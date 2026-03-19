@@ -10,15 +10,15 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #ffffff; --bg2: #f5f5f3; --bg3: #ededea;
-    --text: #1a1a18; --text2: #6b6b68; --text3: #9b9b98;
-    --border: rgba(0,0,0,0.12); --border2: rgba(0,0,0,0.22);
-    --blue: #185FA5; --blue-bg: #E6F1FB;
-    --green: #0F6E56; --green-bg: #E1F5EE;
-    --red: #A32D2D; --red-bg: #FCEBEB;
+    --bg: #1e2130; --bg2: #262b3d; --bg3: #2e3450;
+    --text: #e8eaf0; --text2: #9ba3b8; --text3: #6b7490;
+    --border: rgba(255,255,255,0.08); --border2: rgba(255,255,255,0.14);
+    --blue: #4d9de0; --blue-bg: #1a2f47;
+    --green: #3dba7a; --green-bg: #12302a;
+    --red: #e05c5c; --red-bg: #2e1a1a;
     --rad: 8px; --rad-lg: 12px;
   }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0eeea; color: var(--text); min-height: 100vh; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0e1117; color: var(--text); min-height: 100vh; }
   .app { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem; }
 
   button { cursor: pointer; font-family: inherit; font-size: 13px; padding: 6px 14px; border-radius: var(--rad); border: 0.5px solid var(--border2); background: transparent; color: var(--text); transition: background 0.15s; }
@@ -39,13 +39,13 @@
   .tabs { display: flex; gap: 3px; border-bottom: 1px solid var(--border); margin-bottom: 1.2rem; }
   .tab { padding: 7px 14px; font-size: 13px; cursor: pointer; border-radius: var(--rad) var(--rad) 0 0; border: 1px solid transparent; color: var(--text2); background: transparent; transition: 0.15s; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
   .tab:hover { color: var(--text); background: var(--bg2); }
-  .tab.active { color: var(--text); border-color: var(--border); border-bottom-color: #f0eeea; background: #f0eeea; font-weight: 500; }
+  .tab.active { color: var(--text); border-color: var(--border); border-bottom-color: #0e1117; background: #0e1117; font-weight: 500; }
   .badge { font-size: 11px; background: var(--bg3); border-radius: 10px; padding: 1px 7px; color: var(--text2); }
   .tab.active .badge { background: var(--blue-bg); color: var(--blue); }
   .panel { display: none; } .panel.active { display: block; }
 
   .plano-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
-  .plano-card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; cursor: pointer; transition: border-color 0.15s; }
+  .plano-card { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; cursor: pointer; transition: border-color 0.15s; }
   .plano-card:hover { border-color: var(--border2); }
   .plano-card.selected { border: 1.5px solid var(--blue); }
   .plano-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
@@ -56,7 +56,7 @@
   .card-actions { margin-top: 10px; display: flex; gap: 5px; }
 
   .editor { display: flex; gap: 1.2rem; flex-wrap: wrap; }
-  .editor-left { flex: 0 0 210px; min-width: 175px; background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; height: fit-content; }
+  .editor-left { flex: 0 0 210px; min-width: 175px; background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; height: fit-content; }
   .editor-right { flex: 1; min-width: 280px; }
   .field { margin-bottom: 10px; }
   .two-col { display: flex; gap: 8px; }
@@ -70,15 +70,15 @@
   .type-btn.active { background: var(--text); color: #fff; border-color: transparent; }
 
   .rows-controls { display: flex; gap: 6px; margin-bottom: 8px; }
-  .row-config { background: var(--bg2); border-radius: var(--rad); padding: 7px 8px; margin-bottom: 5px; display: flex; gap: 6px; align-items: center; }
+  .row-config { background: var(--bg3); border-radius: var(--rad); padding: 7px 8px; margin-bottom: 5px; display: flex; gap: 6px; align-items: center; }
   .row-config span { font-size: 12px; color: var(--text3); min-width: 16px; }
   .row-config input { font-size: 12px; padding: 3px 7px; }
 
-  .vending-preview { background: var(--bg2); border-radius: var(--rad-lg); padding: 12px; overflow-x: auto; }
+  .vending-preview { background: var(--bg3); border-radius: var(--rad-lg); padding: 12px; overflow-x: auto; }
   .vm-header { font-size: 11px; font-weight: 600; color: var(--text2); margin-bottom: 8px; }
   .vm-row { display: flex; gap: 3px; margin-bottom: 3px; align-items: stretch; }
   .vm-row-label { font-size: 10px; color: var(--text3); width: 24px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-weight: 600; }
-  .vm-slot { border: 0.5px solid var(--border2); border-radius: 4px; background: var(--bg); padding: 5px; font-size: 10px; text-align: center; min-width: 62px; flex: 1; cursor: pointer; transition: border-color 0.15s; }
+  .vm-slot { border: 0.5px solid var(--border2); border-radius: 4px; background: var(--bg2); padding: 5px; font-size: 10px; text-align: center; min-width: 62px; flex: 1; cursor: pointer; transition: border-color 0.15s; }
   .vm-slot:hover { border-color: var(--blue); }
   .vm-slot.sel { border: 1.5px solid var(--blue); }
   .slot-name { font-weight: 600; color: var(--text); line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -86,17 +86,17 @@
   .slot-qty { color: var(--text2); font-size: 10px; }
   .slot-empty { color: var(--text3); }
 
-  .slot-editor { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; margin-top: 10px; }
+  .slot-editor { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1rem; margin-top: 10px; }
   .slot-editor h4 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
   .color-row { display: flex; gap: 5px; flex-wrap: wrap; }
   .color-dot { width: 22px; height: 22px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; flex-shrink: 0; }
   .color-dot.sel { border-color: var(--text); }
 
-  .info-bar { font-size: 12px; color: var(--text2); padding: 7px 10px; background: var(--bg2); border-radius: var(--rad); margin-bottom: 10px; }
+  .info-bar { font-size: 12px; color: var(--text2); padding: 7px 10px; background: var(--bg3); border-radius: var(--rad); margin-bottom: 10px; }
   .info-bar.ok { color: var(--green); background: var(--green-bg); }
 
   .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px; }
-  .lib-card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--rad); padding: .8rem; }
+  .lib-card { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rad); padding: .8rem; }
   .lib-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 2px; display: flex; align-items: center; gap: 5px; }
   .lib-card p { font-size: 12px; color: var(--text2); }
   .lib-card .lc-actions { display: flex; gap: 5px; margin-top: 8px; }
@@ -104,13 +104,13 @@
 
   .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 200; align-items: center; justify-content: center; }
   .modal-bg.open { display: flex; }
-  .modal { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1.4rem; width: 370px; max-width: 96vw; max-height: 90vh; overflow-y: auto; }
+  .modal { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rad-lg); padding: 1.4rem; width: 370px; max-width: 96vw; max-height: 90vh; overflow-y: auto; }
   .modal h3 { font-size: 15px; font-weight: 600; margin-bottom: 1rem; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1rem; }
 
-  .import-zone { border: 1.5px dashed var(--border2); border-radius: var(--rad); padding: 1.2rem; text-align: center; cursor: pointer; font-size: 13px; color: var(--text2); transition: 0.15s; }
+  .import-zone { border: 1.5px dashed rgba(255,255,255,0.2); border-radius: var(--rad); padding: 1.2rem; text-align: center; cursor: pointer; font-size: 13px; color: var(--text2); transition: 0.15s; }
   .import-zone:hover { border-color: var(--blue); color: var(--blue); }
-  .csv-preview { font-family: monospace; font-size: 11px; background: var(--bg2); border-radius: var(--rad); padding: 8px; max-height: 120px; overflow-y: auto; color: var(--text2); white-space: pre; margin-top: 8px; }
+  .csv-preview { font-family: monospace; font-size: 11px; background: var(--bg3); border-radius: var(--rad); padding: 8px; max-height: 120px; overflow-y: auto; color: var(--text2); white-space: pre; margin-top: 8px; }
   .hint { font-size: 11px; color: var(--text2); margin-top: 5px; }
 
   .toast { position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--text); color: #fff; padding: 10px 18px; border-radius: var(--rad); font-size: 13px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
@@ -281,8 +281,8 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const COLORS = ['#E6F1FB','#EAF3DE','#FAEEDA','#FAECE7','#FBEAF0','#EEEDFE','#E1F5EE','#FCEBEB','#F1EFE8','#FFFFFF'];
-const CNAMES = ['Bleu','Vert','Ambre','Corail','Rose','Violet','Sarcelle','Rouge','Gris','Blanc'];
+const COLORS = ['#1a2f47','#12302a','#2e2a14','#2e1a1a','#2a1a2a','#1f1a3a','#12302a','#2e1a1a','#2a2a2a','#2e3450'];
+const CNAMES = ['Bleu','Vert','Ambre','Corail','Violet','Indigo','Sarcelle','Rouge','Gris','Ardoise'];
 
 let planograms = [], library = [], currentId = null, selectedSlot = null, csvParsed = null, apSelectedColor = '';
 
@@ -457,7 +457,7 @@ function selectSlot(key){
 function buildColorRow(containerId, selected, onSelect){
   document.getElementById(containerId).innerHTML =
     COLORS.map((col,i)=>`<div class="color-dot ${selected===col?'sel':''}" style="background:${col};border-color:${col==="#FFFFFF"?'#ccc':'transparent'}" title="${CNAMES[i]}" onclick='selectColor("${containerId}","${col}",this)'></div>`).join('')
-    + `<div class="color-dot ${!selected?'sel':''}" style="background:#f5f5f3;border:2px solid #ccc" title="Aucune" onclick='selectColor("${containerId}","",this)'></div>`;
+    + `<div class="color-dot ${!selected?'sel':''}" style="background:var(--bg3);border:1.5px solid rgba(255,255,255,0.2)" title="Aucune" onclick='selectColor("${containerId}","",this)'></div>`;
   document.getElementById(containerId)._onSelect = onSelect;
 }
 
@@ -518,7 +518,7 @@ function openAddProd(){
 function buildApColorRow(selected){
   document.getElementById('ap-color-row').innerHTML =
     COLORS.map((col,i)=>`<div class="color-dot ${selected===col?'sel':''}" style="background:${col};border-color:${col==="#FFFFFF"?'#ccc':'transparent'}" title="${CNAMES[i]}" onclick="apSelectColor('${col}',this)"></div>`).join('')
-    + `<div class="color-dot ${!selected?'sel':''}" style="background:#f5f5f3;border:2px solid #ccc" title="Aucune" onclick="apSelectColor('',this)"></div>`;
+    + `<div class="color-dot ${!selected?'sel':''}" style="background:var(--bg3);border:1.5px solid rgba(255,255,255,0.2)" title="Aucune" onclick="apSelectColor('',this)"></div>`;
 }
 
 function apSelectColor(col, el){
