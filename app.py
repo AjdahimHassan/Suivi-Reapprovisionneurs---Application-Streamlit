@@ -153,22 +153,24 @@ st.divider()
 total_prev  = sum(len(d["salles_prevues"])   for d in results.values())
 total_fait  = sum(len(d["salles_faites"])    for d in results.values())
 total_nf    = sum(len(d["salles_non_faites"]) for d in results.values())
-total_joker = sum(sum(1 for s in d["salles_faites"] if s["is_joker"]) for d in results.values())
-taux_global = round((total_fait / total_prev * 100) if total_prev > 0 else 0, 1)
+total_joker   = sum(sum(1 for s in d["salles_faites"] if s["is_joker"]) for d in results.values())
+total_decale  = sum(1 for d in results.values() if d.get("tournee_decalee"))
+taux_global   = round((total_fait / total_prev * 100) if total_prev > 0 else 0, 1)
 
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("📋 Prévues",    total_prev)
-k2.metric("✅ Faites",     total_fait)
-k3.metric("❌ Non faites", total_nf,
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+k1.metric("📋 Prévues",       total_prev)
+k2.metric("✅ Faites",        total_fait)
+k3.metric("❌ Non faites",    total_nf,
           delta=f"-{total_nf}" if total_nf else None, delta_color="inverse")
-k4.metric("🔄 Jokers",     total_joker)
-k5.metric("📈 Taux global", f"{taux_global}%")
+k4.metric("🔄 Jokers",        total_joker)
+k5.metric("📅 Décalées",      total_decale)
+k6.metric("📈 Taux global",   f"{taux_global}%")
 
 # ────────────────────────────────────────────────────────
 # TABS
 # ────────────────────────────────────────────────────────
-tab_recap, tab_nf, tab_jokers, tab_detail = st.tabs([
-    "📋 Récapitulatif", "❌ Non Faites", "🔄 Jokers", "🔍 Détail par réappro"
+tab_recap, tab_nf, tab_jokers, tab_decale, tab_detail = st.tabs([
+    "📋 Récapitulatif", "❌ Non Faites", "🔄 Jokers", "📅 Tournées Décalées", "🔍 Détail par réappro"
 ])
 
 # ── RÉCAPITULATIF ──
@@ -180,8 +182,9 @@ with tab_recap:
         nb_nf = len(data["salles_non_faites"])
         nb_j  = sum(1 for s in data["salles_faites"] if s["is_joker"])
         taux  = round((nb_f / nb_p * 100) if nb_p > 0 else 0, 1)
+        decale = "📅 " + data.get("tournee_decalee", {}).get("jour_detecte", "") if data.get("tournee_decalee") else ""
         rows.append({"Réappro": reappro, "Prévues": nb_p, "Faites": nb_f,
-                     "Non Faites": nb_nf, "Jokers": nb_j, "Taux (%)": taux})
+                     "Non Faites": nb_nf, "Jokers": nb_j, "Décalée": decale, "Taux (%)": taux})
 
     df_recap = pd.DataFrame(rows)
 
@@ -238,6 +241,55 @@ with tab_jokers:
         )
     else:
         st.info("Aucun remplacement détecté.")
+
+# ── TOURNÉES DÉCALÉES ──
+with tab_decale:
+    decale_rows = []
+    for reappro, data in sorted(results.items()):
+        td = data.get("tournee_decalee")
+        if td:
+            nb_matchees = len(td["salles_decalees"])
+            nb_faites   = td["nb_machines_faites"]
+            decale_rows.append({
+                "Réappro":           reappro,
+                "Jour planifié":     jour,
+                "Tournée détectée":  td["jour_detecte"],
+                "Salles matchées":   nb_matchees,
+                "Total fait":        nb_faites,
+                "Salles (planning)": ", ".join(f"{c} [{m}]" for c,m in td["salles_decalees"][:5])
+                                       + ("..." if nb_matchees > 5 else ""),
+            })
+    if decale_rows:
+        st.info(
+            "Ces réappros ont des salles non faites sur le jour analysé, mais ont quand même "
+            "effectué des chargements correspondant à un **autre jour** de leur planning."
+        )
+        df_decale = pd.DataFrame(decale_rows)
+        st.dataframe(
+            df_decale.style.applymap(lambda _: "background-color:#6C3483; color:#FFFFFF; font-weight:600"),
+            use_container_width=True, hide_index=True,
+        )
+        # Détail par réappro décalé
+        st.markdown("#### Détail des salles décalées")
+        for reappro, data in sorted(results.items()):
+            td = data.get("tournee_decalee")
+            if not td:
+                continue
+            with st.expander(f"🔍 {reappro} — tournée du {td['jour_detecte']} faite un {jour}"):
+                detail_dec = [{"Client / Salle": c, "Machine": m}
+                              for c, m in td["salles_decalees"]]
+                if detail_dec:
+                    st.dataframe(
+                        pd.DataFrame(detail_dec).style.applymap(
+                            lambda _: "background-color:#6C3483; color:#FFFFFF; font-weight:600"
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
+                if td["salles_hors_planning"]:
+                    st.caption(f"⚠️ {len(td['salles_hors_planning'])} machine(s) faite(s) hors planning : "
+                               + ", ".join(td["salles_hors_planning"]))
+    else:
+        st.success("✅ Aucune tournée décalée détectée.")
 
 # ── DÉTAIL PAR RÉAPPRO ──
 with tab_detail:
