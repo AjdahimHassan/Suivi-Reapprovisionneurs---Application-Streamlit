@@ -774,6 +774,26 @@ def _do_export_pdf(p: dict):
         )
 
         styles = getSampleStyleSheet()
+
+        # ── Tailles de police adaptatives selon le nombre de colonnes ──
+        # Plus il y a de colonnes, plus on réduit pour que tout rentre
+        cols = p["cols"]
+        if cols <= 8:
+            fs_cell, fs_price, fs_qty, fs_empty = 7, 7, 7, 9
+            row_h_mm = 18
+        elif cols <= 12:
+            fs_cell, fs_price, fs_qty, fs_empty = 6, 6, 6, 7
+            row_h_mm = 16
+        elif cols <= 16:
+            fs_cell, fs_price, fs_qty, fs_empty = 5, 5, 5, 6
+            row_h_mm = 14
+        else:
+            fs_cell, fs_price, fs_qty, fs_empty = 4, 4, 4, 5
+            row_h_mm = 12
+
+        leading_cell  = fs_cell + 2
+        leading_price = fs_price + 2
+
         title_style = ParagraphStyle(
             "Title", parent=styles["Normal"],
             fontSize=14, fontName="Helvetica-Bold",
@@ -788,31 +808,31 @@ def _do_export_pdf(p: dict):
         )
         cell_style = ParagraphStyle(
             "Cell", parent=styles["Normal"],
-            fontSize=7, fontName="Helvetica-Bold",
-            alignment=TA_CENTER, leading=9,
+            fontSize=fs_cell, fontName="Helvetica-Bold",
+            alignment=TA_CENTER, leading=leading_cell,
         )
         price_style = ParagraphStyle(
             "Price", parent=styles["Normal"],
-            fontSize=7, fontName="Helvetica",
+            fontSize=fs_price, fontName="Helvetica",
             textColor=colors.HexColor("#185FA5"),
-            alignment=TA_CENTER, leading=9,
+            alignment=TA_CENTER, leading=leading_price,
         )
         qty_style = ParagraphStyle(
             "Qty", parent=styles["Normal"],
-            fontSize=7, fontName="Helvetica",
+            fontSize=fs_qty, fontName="Helvetica",
             textColor=colors.HexColor("#888888"),
-            alignment=TA_CENTER, leading=9,
+            alignment=TA_CENTER, leading=leading_price,
         )
         empty_style = ParagraphStyle(
             "Empty", parent=styles["Normal"],
-            fontSize=9, fontName="Helvetica",
+            fontSize=fs_empty, fontName="Helvetica",
             textColor=colors.HexColor("#CCCCCC"),
             alignment=TA_CENTER,
         )
 
         # ── Calcul largeur colonnes ──
         usable_w = page_w - 2 * margin
-        label_w  = 18 * mm
+        label_w  = 14 * mm
         data_col_w = (usable_w - label_w) / p["cols"]
         col_widths = [label_w] + [data_col_w] * p["cols"]
 
@@ -870,7 +890,7 @@ def _do_export_pdf(p: dict):
 
         # Hauteur de ligne
         row_h = 18 * mm
-        row_heights = [7 * mm] + [row_h] * p["rows"]
+        row_heights = [6 * mm] + [row_h_mm * mm] * p["rows"]
 
         table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
         table.setStyle(TableStyle(cell_styles_cmds))
