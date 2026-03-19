@@ -7,10 +7,9 @@ Application Streamlit - Outil Réappro
 import streamlit as st
 import pandas as pd
 import datetime
-import streamlit.components.v1 as components
-from pathlib import Path
 
 from planning_parser import get_today_day_str, JOURS
+import page_planogrammes
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -368,20 +367,4 @@ elif st.session_state.page == "planogrammes":
         unsafe_allow_html=True,
     )
 
-    html_path = Path(__file__).parent / "assets" / "planogram_manager.html"
-
-    if not html_path.exists():
-        st.error(
-            "❌ Fichier introuvable : `assets/planogram_manager.html`\n\n"
-            "Assurez-vous que le fichier est bien présent dans le dossier `assets/` du projet."
-        )
-        st.stop()
-
-    html_content = html_path.read_text(encoding="utf-8")
-    components.html(html_content, height=920, scrolling=True)
-
-    st.caption(
-        "💾 Les planogrammes sont sauvegardés dans le **localStorage de votre navigateur** — "
-        "ils persistent entre les sessions sur ce poste. "
-        "Pour partager, utilisez l'export **Excel** ou **PDF**."
-    )
+    page_planogrammes.render()
