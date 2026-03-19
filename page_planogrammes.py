@@ -463,14 +463,16 @@ def _view_editor():
             st.divider()
             st.markdown(f"**Emplacement : {row_lbl} · C{int(c_i)+1}**")
 
-            # Bouton depuis bibliothèque
+            # Appliquer depuis bibliothèque (hors form pour éviter conflits)
             produits = _get_produits()
             if produits:
                 prod_names = ["— Choisir dans la bibliothèque —"] + [pr["nom"] for pr in produits]
-                choice = st.selectbox("Bibliothèque de produits", prod_names, key="lib_pick")
+                # Clé inclut le slot pour forcer reset à chaque changement de slot
+                choice = st.selectbox("Bibliothèque de produits", prod_names,
+                                      key=f"lib_pick_{sel}")
                 if choice != "— Choisir dans la bibliothèque —":
                     prod_obj = next((pr for pr in produits if pr["nom"] == choice), None)
-                    if prod_obj and st.button("Appliquer ce produit", type="primary"):
+                    if prod_obj and st.button("↙️ Appliquer ce produit", type="primary", key=f"apply_lib_{sel}"):
                         p["slots"][sel] = {
                             "product": prod_obj["nom"],
                             "price":   prod_obj.get("prix", ""),
@@ -479,35 +481,47 @@ def _view_editor():
                         }
                         _mark_dirty(); st.rerun()
 
-            ec1, ec2, ec3 = st.columns(3)
-            with ec1:
-                new_prod = st.text_input("Produit", value=s.get("product", ""), key=f"s_prod_{sel}")
-            with ec2:
-                new_price = st.text_input("Prix (€)", value=s.get("price", ""), key=f"s_price_{sel}")
-            with ec3:
-                new_qty = st.text_input("Quantité ×", value=s.get("qty", ""), key=f"s_qty_{sel}")
+            # Formulaire d'édition manuelle — la clé du form inclut le slot
+            # pour forcer Streamlit à recréer les widgets à chaque slot différent
+            with st.form(key=f"form_slot_{sel}"):
+                color_names = list(SLOT_COLORS.keys())
+                cur_color = s.get("color", "")
+                cur_color_name = next((n for n, v in SLOT_COLORS.items() if v == cur_color), "Aucune")
 
-            color_names = list(SLOT_COLORS.keys())
-            cur_color = s.get("color", "")
-            cur_color_name = next((n for n, v in SLOT_COLORS.items() if v == cur_color), "Aucune")
-            new_color_name = st.selectbox("Couleur de fond", color_names,
-                                          index=color_names.index(cur_color_name), key=f"s_color_{sel}")
-            new_color = SLOT_COLORS[new_color_name]
+                ec1, ec2, ec3 = st.columns(3)
+                with ec1:
+                    new_prod = st.text_input("Produit", value=s.get("product", ""))
+                with ec2:
+                    new_price = st.text_input("Prix (€)", value=s.get("price", ""))
+                with ec3:
+                    new_qty = st.text_input("Quantité ×", value=s.get("qty", ""))
 
-            uc1, uc2 = st.columns([2, 1])
-            with uc1:
-                if st.button("✅ Appliquer les modifications", use_container_width=True, type="primary"):
-                    p["slots"][sel] = {
-                        "product": new_prod,
-                        "price":   new_price,
-                        "qty":     new_qty,
-                        "color":   new_color,
-                    }
-                    _mark_dirty(); st.rerun()
-            with uc2:
-                if st.button("🗑️ Vider", use_container_width=True):
-                    p["slots"][sel] = {"product": "", "price": "", "qty": "", "color": ""}
-                    _mark_dirty(); st.rerun()
+                new_color_name = st.selectbox(
+                    "Couleur de fond", color_names,
+                    index=color_names.index(cur_color_name)
+                )
+                new_color = SLOT_COLORS[new_color_name]
+
+                fc1, fc2 = st.columns([2, 1])
+                with fc1:
+                    apply = st.form_submit_button(
+                        "✅ Appliquer", use_container_width=True, type="primary"
+                    )
+                with fc2:
+                    clear = st.form_submit_button("🗑️ Vider", use_container_width=True)
+
+            if apply:
+                p["slots"][sel] = {
+                    "product": new_prod,
+                    "price":   new_price,
+                    "qty":     new_qty,
+                    "color":   new_color,
+                }
+                _mark_dirty(); st.rerun()
+
+            if clear:
+                p["slots"][sel] = {"product": "", "price": "", "qty": "", "color": ""}
+                _mark_dirty(); st.rerun()
 
 
 # ════════════════════════════════════════════════════════
