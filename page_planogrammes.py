@@ -737,60 +737,171 @@ def _do_export_excel(p: dict):
         st.error(f"Erreur export Excel : {e}")
 
 
+def _hex_to_rgb(hex_color: str):
+    """Convertit #rrggbb en tuple (r, g, b) float 0-1 pour reportlab."""
+    hex_color = (hex_color or "").strip().lstrip("#")
+    if len(hex_color) == 6:
+        r = int(hex_color[0:2], 16) / 255
+        g = int(hex_color[2:4], 16) / 255
+        b = int(hex_color[4:6], 16) / 255
+        return (r, g, b)
+    return None
+
+
 def _do_export_pdf(p: dict):
-    """Export PDF via HTML imprimable (fallback sans dépendance externe)."""
-    col_w = max(55, int(660 / p["cols"]))
-    rows_html = ""
-    for r in range(p["rows"]):
-        lbl = p["row_labels"][r] if r < len(p["row_labels"]) else f"R{r+1}"
-        rows_html += f'<tr><td class="lbl">{lbl}</td>'
-        for c in range(p["cols"]):
-            s  = p["slots"].get(f"{r}-{c}", {})
-            bg = s.get("color", "") or "#ffffff"
-            rows_html += f'<td style="background:{bg};width:{col_w}px">'
-            if s.get("product"):
-                rows_html += f'<div class="pname">{s["product"]}</div>'
-                if s.get("price"):
-                    try:    rows_html += f'<div class="pprice">{float(s["price"]):.2f} €</div>'
-                    except: rows_html += f'<div class="pprice">{s["price"]} €</div>'
-                if s.get("qty"):
-                    rows_html += f'<div class="pqty">×{s["qty"]}</div>'
-            else:
-                rows_html += '<div class="empty">—</div>'
-            rows_html += "</td>"
-        rows_html += "</tr>"
+    """Génère un vrai fichier PDF avec reportlab et le propose en téléchargement."""
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        )
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
-    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>{p["nom"]}</title>
-<style>
-  body {{ font-family: Arial, sans-serif; margin: 20px; }}
-  h1 {{ font-size: 16px; color: #1F4E79; margin-bottom: 4px; }}
-  .sub {{ font-size: 11px; color: #666; margin-bottom: 14px; }}
-  table {{ border-collapse: collapse; }}
-  td {{ border: 1px solid #ddd; padding: 4px 3px; text-align: center; vertical-align: top; font-size: 10px; min-width: {col_w}px; }}
-  td.lbl {{ background: #f0f0ee; font-weight: bold; font-size: 11px; white-space: nowrap; width: 30px; }}
-  .pname {{ font-weight: bold; line-height: 1.3; color: #1a1a18; }}
-  .pprice {{ color: #185FA5; margin-top: 2px; }}
-  .pqty {{ color: #888; }}
-  .empty {{ color: #ccc; }}
-  button {{ padding: 8px 18px; background: #1F4E79; color: white; border: none; border-radius: 6px; cursor: pointer; margin-bottom: 14px; font-size: 13px; }}
-  @media print {{ button {{ display: none; }} }}
-</style></head>
-<body>
-<h1>{p["nom"]}</h1>
-<div class="sub">{'Double' if p.get('type')=='double' else 'Simple'} — {p['rows']} rangées × {p['cols']} colonnes — Exporté le {datetime.date.today().strftime('%d/%m/%Y')}</div>
-<button onclick="window.print()">🖨️ Imprimer / Enregistrer en PDF</button>
-<table>{rows_html}</table>
-</body></html>"""
+        # ── Orientation : paysage si beaucoup de colonnes ──
+        page_size = landscape(A4) if p["cols"] > 8 else A4
+        page_w, page_h = page_size
+        margin = 15 * mm
 
-    safe_name = re.sub(r"[^\w\s-]", "_", p["nom"])
-    st.download_button(
-        label="⬇️ Télécharger PDF (impression)",
-        data=html.encode("utf-8"),
-        file_name=f"{safe_name}.html",
-        mime="text/html",
-    )
-    st.caption("Ouvrez le fichier HTML téléchargé → Ctrl+P → 'Enregistrer en PDF'.")
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=page_size,
+            leftMargin=margin, rightMargin=margin,
+            topMargin=14 * mm, bottomMargin=14 * mm,
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "Title", parent=styles["Normal"],
+            fontSize=14, fontName="Helvetica-Bold",
+            textColor=colors.HexColor("#1F4E79"),
+            spaceAfter=3,
+        )
+        sub_style = ParagraphStyle(
+            "Sub", parent=styles["Normal"],
+            fontSize=9, fontName="Helvetica",
+            textColor=colors.HexColor("#666666"),
+            spaceAfter=8,
+        )
+        cell_style = ParagraphStyle(
+            "Cell", parent=styles["Normal"],
+            fontSize=7, fontName="Helvetica-Bold",
+            alignment=TA_CENTER, leading=9,
+        )
+        price_style = ParagraphStyle(
+            "Price", parent=styles["Normal"],
+            fontSize=7, fontName="Helvetica",
+            textColor=colors.HexColor("#185FA5"),
+            alignment=TA_CENTER, leading=9,
+        )
+        qty_style = ParagraphStyle(
+            "Qty", parent=styles["Normal"],
+            fontSize=7, fontName="Helvetica",
+            textColor=colors.HexColor("#888888"),
+            alignment=TA_CENTER, leading=9,
+        )
+        empty_style = ParagraphStyle(
+            "Empty", parent=styles["Normal"],
+            fontSize=9, fontName="Helvetica",
+            textColor=colors.HexColor("#CCCCCC"),
+            alignment=TA_CENTER,
+        )
+
+        # ── Calcul largeur colonnes ──
+        usable_w = page_w - 2 * margin
+        label_w  = 18 * mm
+        data_col_w = (usable_w - label_w) / p["cols"]
+        col_widths = [label_w] + [data_col_w] * p["cols"]
+
+        # ── Construction du tableau ──
+        # Ligne d'en-tête
+        header_row = [Paragraph("", cell_style)] + [
+            Paragraph(f"C{c+1}", cell_style) for c in range(p["cols"])
+        ]
+        table_data  = [header_row]
+        cell_styles_cmds = [
+            # En-tête bleue
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), colors.white),
+            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0, 0), (-1, 0), 7),
+            ("ALIGN",      (0, 0), (-1, 0), "CENTER"),
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#DDDDDD")),
+            ("ROWBACKGROUNDS", (0, 0), (0, -1), [colors.HexColor("#E8EAF0")]),
+            ("FONTNAME",   (0, 1), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE",   (0, 1), (0, -1), 8),
+            ("ALIGN",      (0, 1), (0, -1), "CENTER"),
+        ]
+
+        for r in range(p["rows"]):
+            lbl = p["row_labels"][r] if r < len(p["row_labels"]) else f"R{r+1}"
+            row_data = [Paragraph(lbl, cell_style)]
+            for c in range(p["cols"]):
+                s = p["slots"].get(f"{r}-{c}", {})
+                if s.get("product"):
+                    parts = [Paragraph(s["product"], cell_style)]
+                    if s.get("price"):
+                        try:    parts.append(Paragraph(f"{float(s['price']):.2f} €", price_style))
+                        except: parts.append(Paragraph(f"{s['price']} €", price_style))
+                    if s.get("qty"):
+                        parts.append(Paragraph(f"×{s['qty']}", qty_style))
+                    row_data.append(parts)
+                else:
+                    row_data.append(Paragraph("—", empty_style))
+
+                # Couleur de fond du slot
+                bg_hex = s.get("color", "")
+                if bg_hex and bg_hex.startswith("#") and len(bg_hex) == 7:
+                    try:
+                        rgb = _hex_to_rgb(bg_hex)
+                        if rgb:
+                            bg_color = colors.Color(*rgb)
+                            cell_styles_cmds.append(
+                                ("BACKGROUND", (c + 1, r + 1), (c + 1, r + 1), bg_color)
+                            )
+                    except Exception:
+                        pass
+
+            table_data.append(row_data)
+
+        # Hauteur de ligne
+        row_h = 18 * mm
+        row_heights = [7 * mm] + [row_h] * p["rows"]
+
+        table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
+        table.setStyle(TableStyle(cell_styles_cmds))
+
+        # ── Assemblage ──
+        today = datetime.date.today().strftime("%d/%m/%Y")
+        type_label = "Double" if p.get("type") == "double" else "Simple"
+        story = [
+            Paragraph(p["nom"], title_style),
+            Paragraph(
+                f"{type_label} — {p['rows']} rangées × {p['cols']} colonnes — Exporté le {today}",
+                sub_style
+            ),
+            table,
+        ]
+
+        doc.build(story)
+        buf.seek(0)
+
+        safe_name = re.sub(r"[^\w\s-]", "_", p["nom"])
+        st.download_button(
+            label="⬇️ Télécharger le PDF",
+            data=buf.getvalue(),
+            file_name=f"{safe_name}.pdf",
+            mime="application/pdf",
+        )
+
+    except ImportError:
+        st.error("La librairie `reportlab` n'est pas installée. Ajoutez `reportlab` dans requirements.txt.")
+    except Exception as e:
+        st.error(f"Erreur export PDF : {e}")
 
 
 # ════════════════════════════════════════════════════════
