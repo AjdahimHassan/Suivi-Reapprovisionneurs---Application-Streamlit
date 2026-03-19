@@ -761,7 +761,7 @@ def _do_export_pdf(p: dict):
         from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
         # ── Orientation : paysage si beaucoup de colonnes ──
-        page_size = landscape(A4) if p["cols"] > 8 else A4
+        page_size = landscape(A4)
         page_w, page_h = page_size
         margin = 15 * mm
 
