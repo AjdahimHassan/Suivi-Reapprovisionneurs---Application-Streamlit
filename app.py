@@ -7,9 +7,9 @@ L'utilisateur uploade uniquement le fichier de chargement machine du jour.
 import streamlit as st
 import pandas as pd
 import datetime
-from pathlib import Path
 
-from planning_parser import load_all_plannings_from_folder, get_today_day_str, JOURS
+from planning_parser import get_today_day_str, JOURS
+from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
 
@@ -33,17 +33,13 @@ st.markdown("""
 # ────────────────────────────────────────────────────────
 # DOSSIER DES PLANNINGS — dossier relatif au projet
 # ────────────────────────────────────────────────────────
-APP_DIR = Path(__file__).resolve().parent
-PLANNING_DIR = APP_DIR / "plannings"
-
-@st.cache_data(show_spinner="Chargement des plannings...")
+@st.cache_data(show_spinner="Chargement des plannings depuis MongoDB...", ttl=300)
 def charger_plannings():
-    plannings, errors = load_all_plannings_from_folder(str(PLANNING_DIR))
-    if plannings:
-        return plannings, errors, str(PLANNING_DIR)
-    return {}, {"erreur": f"Aucun planning trouve dans {PLANNING_DIR}."}, str(PLANNING_DIR)
+    plannings, errors = load_plannings_from_mongo()
+    return plannings, errors
 
-plannings, planning_errors, planning_folder = charger_plannings()
+plannings, planning_errors = charger_plannings()
+planning_folder = "MongoDB Atlas"
 
 # ────────────────────────────────────────────────────────
 # SESSION STATE

@@ -2,10 +2,6 @@
 
 Application de suivi quotidien des passages en salle des réapprovisionneurs.
 
-
-Lien d'application : 
-https://ajdahimhassan-suivi-reapprovisionneurs---application-app-lqf5qi.streamlit.app/
-
 ## 🚀 Lancement local
 
 ```bash
