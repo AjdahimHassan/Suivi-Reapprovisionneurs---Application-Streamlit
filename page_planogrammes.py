@@ -941,9 +941,9 @@ def _do_export_pdf(p: dict):
 
 def _parse_planogramme_pdf(file_bytes: bytes) -> dict:
     """
-    Parse un PDF de planogramme (format NXT Level / Basic-Fit).
-    Détecte les triplets lignes : quantités (X12) / produits / prix.
-    Retourne un dict prêt à être sauvegardé en MongoDB.
+    Parse un PDF de planogramme. Gère deux formats :
+    - Format BF  : ligne quantités seules (X12, X9…) / ligne produits / ligne prix
+    - Format FP  : produit + quantité dans la même cellule (ex: "Red Bull X9") / ligne prix
     """
     import io as _io
     with pdfplumber.open(_io.BytesIO(file_bytes)) as pdf:
@@ -959,68 +959,112 @@ def _parse_planogramme_pdf(file_bytes: bytes) -> dict:
             # Chercher le titre dans les premières lignes
             for row in table[:5]:
                 for cell in (row or []):
-                    if cell and re.search(r'VENDING|PLANOGRAMM', str(cell), re.I) and len(str(cell)) > 5:
+                    if cell and re.search(
+                        r'VENDING|PLANOGRAMM|FITNESSPARK|BASIC.?FIT|COMBOPLUS',
+                        str(cell), re.I
+                    ) and len(str(cell)) > 4:
                         title = str(cell).strip()
                         break
 
-            # Trouver la première ligne de quantités (format X12, X10…)
-            start = 0
-            for i, row in enumerate(table):
-                vals = [v for v in (row or []) if v and re.match(r'^X\d+$', str(v).strip())]
-                if len(vals) >= 2:
-                    start = i
-                    break
+            # ── Helpers ──────────────────────────────────────
+            def is_price_row(row):
+                cells = [c for c in (row or []) if c and str(c).strip()]
+                if not cells:
+                    return False
+                n_prices = sum(1 for c in cells if re.search(r'\d+[,\.]\d{2}\s*€', str(c)))
+                return n_prices >= max(1, len(cells) * 0.5)
 
-            data_rows = table[start:]
-            i = 0
-            while i < len(data_rows):
-                row = data_rows[i]
-                qty_vals = [v for v in (row or []) if v and re.match(r'^X\d+$', str(v).strip())]
+            def is_qty_only_row(row):
+                """Format BF : toutes les cellules non vides sont X12, X10…"""
+                cells = [c for c in (row or []) if c and str(c).strip()]
+                if len(cells) < 2:
+                    return False
+                n_qty = sum(1 for c in cells if re.match(r'^X\d+$', str(c).strip()))
+                return n_qty >= max(2, len(cells) * 0.5)
 
-                if len(qty_vals) >= 2:
-                    qty_row   = row or []
-                    prod_row  = data_rows[i + 1] if i + 1 < len(data_rows) else []
-                    price_row = data_rows[i + 2] if i + 2 < len(data_rows) else []
+            def extract_product_qty(cell_text):
+                """Extrait (produit, qty) d'une cellule qui contient les deux."""
+                text = str(cell_text or '').replace('\n', ' ').strip()
+                if not text or text.lower() == 'none':
+                    return None, None
+                # Quantité en fin : "Red Bull X9" ou "Evian x8"
+                m = re.search(r'[Xx](\d+)\s*$', text)
+                if m:
+                    product = text[:m.start()].strip()
+                    return product, m.group(1)
+                # Quantité en début : "X9 Red Bull"
+                m2 = re.search(r'^[Xx](\d+)\s+(.+)', text)
+                if m2:
+                    return m2.group(2).strip(), m2.group(1)
+                return text, ''
 
+            def extract_price(cell_text):
+                m = re.search(r'(\d+[,\.]\d{2})', str(cell_text or ''))
+                return m.group(1).replace(',', '.') if m else ''
+
+            # ── Parcours du tableau ───────────────────────────
+            i = 2  # skip lignes d'en-tête
+            while i < len(table):
+                row = table[i]
+
+                # Ignorer les lignes de prix et les lignes de labels purs
+                if is_price_row(row):
+                    i += 1
+                    continue
+
+                # ── Format BF : ligne de quantités pures ──
+                if is_qty_only_row(row):
+                    qty_row   = row
+                    prod_row  = table[i + 1] if i + 1 < len(table) else []
+                    price_row = table[i + 2] if i + 2 < len(table) else []
                     n = max(len(qty_row), len(prod_row or []), len(price_row or []))
                     slots = []
                     for c in range(n):
-                        qty   = str(qty_row[c]   if c < len(qty_row)         else "").strip()
-                        prod  = str((prod_row  or [])[c] if c < len(prod_row  or []) else "").strip()
-                        price = str((price_row or [])[c] if c < len(price_row or []) else "").strip()
-
-                        prod  = prod.replace("\n", " ").strip()
-                        price = re.sub(r"[^\d,.]", "", price).replace(",", ".")
-                        if not price or not re.match(r"^\d+\.?\d*$", price):
-                            price = ""
-
-                        if re.match(r"^X\d+$", qty):
-                            if prod and prod.lower() not in ("none", ""):
-                                slots.append({"product": prod, "price": price, "qty": qty[1:]})
-                            else:
-                                slots.append(None)
-                        elif prod and prod.lower() not in ("none", ""):
-                            slots.append({"product": prod, "price": price, "qty": ""})
+                        qty   = str(qty_row[c] if c < len(qty_row) else '').strip()
+                        prod  = str((prod_row or [])[c] if c < len(prod_row or []) else '').replace('\n', ' ').strip()
+                        price = extract_price((price_row or [])[c] if c < len(price_row or []) else '')
+                        if re.match(r'^X\d+$', qty) and prod and prod.lower() not in ('none', ''):
+                            slots.append({'product': prod, 'price': price, 'qty': qty[1:]})
                         else:
                             slots.append(None)
-
                     if any(s for s in slots):
-                        all_rows.append({"slots": slots})
+                        all_rows.append({'slots': slots})
                     i += 3
-                else:
-                    i += 1
+                    continue
 
-        # Nettoyer les lignes sans aucun produit
-        all_rows = [r for r in all_rows if any(s and s.get("product") for s in r["slots"])]
+                # ── Format FP : produit + quantité dans la même cellule ──
+                cells = [c for c in (row or []) if c and str(c).strip() and str(c).strip().lower() != 'none']
+                n_embedded = sum(1 for c in cells if re.search(r'[Xx]\d+', str(c)))
+                if cells and n_embedded >= max(1, len(cells) * 0.4):
+                    price_row = table[i + 1] if i + 1 < len(table) else []
+                    n = max(len(row or []), len(price_row or []))
+                    slots = []
+                    for c in range(n):
+                        cell  = (row or [])[c] if c < len(row or []) else ''
+                        price = extract_price((price_row or [])[c] if c < len(price_row or []) else '')
+                        product, qty = extract_product_qty(cell)
+                        if product and product.lower() not in ('none', ''):
+                            slots.append({'product': product, 'price': price, 'qty': qty or ''})
+                        else:
+                            slots.append(None)
+                    if any(s for s in slots):
+                        all_rows.append({'slots': slots})
+                    i += 2
+                    continue
+
+                i += 1
+
+        # Supprimer les lignes sans aucun produit réel
+        all_rows = [r for r in all_rows if any(s and s.get('product') for s in r['slots'])]
 
         if not all_rows:
             raise ValueError(
                 "Aucune rangée de produits détectée. "
-                "Vérifiez que le PDF contient bien des lignes de quantités (X12, X10…)."
+                "Formats supportés : BF (lignes X12/produits/prix) et FP (produit+quantité/prix)."
             )
 
-        type_dist = "double" if "DOUBLE" in title.upper() else "simple"
-        return {"title": title or "Planogramme importé", "type": type_dist, "rows": all_rows}
+        type_dist = 'double' if 'DOUBLE' in title.upper() else 'simple'
+        return {'title': title or 'Planogramme importé', 'type': type_dist, 'rows': all_rows}
 
 
 def _build_plano_from_parsed(parsed: dict, nom: str) -> dict:
