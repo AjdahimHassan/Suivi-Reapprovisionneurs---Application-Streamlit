@@ -1,6 +1,11 @@
 """
-Script one-shot pour importer les plannings CSV dans MongoDB Atlas.
+Script d'import des plannings CSV dans MongoDB Atlas.
 Lance : python import_plannings_mongo.py
+
+A chaque exécution :
+  1. Supprime TOUS les documents de la collection plannings
+  2. Réinsère tous les plannings depuis les fichiers CSV
+=> Garantit que MongoDB est toujours un miroir exact du dossier plannings/
 """
 
 import os
@@ -8,10 +13,11 @@ import datetime
 from pymongo import MongoClient
 from planning_parser import parse_planning_file
 
-MONGO_URI  = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
-DB_NAME    = "suivi_reappro"
-COLLECTION = "plannings"
+MONGO_URI     = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
+DB_NAME       = "suivi_reappro"
+COLLECTION    = "plannings"
 PLANNINGS_DIR = "./plannings"
+
 
 def main():
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
@@ -19,9 +25,16 @@ def main():
     print("Connexion MongoDB OK")
 
     col = client[DB_NAME][COLLECTION]
-    col.create_index("employe", unique=True)
 
-    ok, errors = 0, []
+    # ── Étape 1 : suppression complète de la collection ──────────────
+    nb_supprimes = col.count_documents({})
+    col.drop()
+    print(f"Collection vidée ({nb_supprimes} document(s) supprimé(s))")
+
+    # ── Étape 2 : réinsertion depuis les CSV ─────────────────────────
+    docs  = []
+    errors = []
+
     for fname in sorted(os.listdir(PLANNINGS_DIR)):
         if not fname.endswith(".csv"):
             continue
@@ -36,25 +49,27 @@ def main():
                 for jour, salles in planning.items()
             }
 
-            col.update_one(
-                {"employe": employe},
-                {"$set": {
-                    "employe":    employe,
-                    "planning":   planning_json,
-                    "semaine":    semaine,
-                    "updated_at": datetime.date.today().isoformat(),
-                }},
-                upsert=True,
-            )
+            docs.append({
+                "employe":    employe,
+                "planning":   planning_json,
+                "semaine":    semaine,
+                "updated_at": datetime.date.today().isoformat(),
+            })
             total = sum(len(v) for v in planning.values())
             print(f"  OK  {employe} — {total} salles ({semaine})")
-            ok += 1
+
         except Exception as e:
             errors.append(f"  ERR {employe} : {e}")
             print(errors[-1])
 
-    print(f"\nImport termine : {ok} reappros importes, {len(errors)} erreur(s).")
+    # Insertion en une seule opération bulk
+    if docs:
+        col.insert_many(docs)
+        col.create_index("employe", unique=True)
+
+    print(f"\nImport terminé : {len(docs)} réappro(s) importé(s), {len(errors)} erreur(s).")
     client.close()
+
 
 if __name__ == "__main__":
     main()
