@@ -10,6 +10,12 @@ import io
 import re
 from pathlib import Path
 
+try:
+    import pdfplumber
+    _PDFPLUMBER_OK = True
+except ImportError:
+    _PDFPLUMBER_OK = False
+
 from planogrammes_storage import (
     load_planogrammes, save_planogramme, delete_planogramme, duplicate_planogramme,
     load_produits, save_produit, delete_produit,
@@ -189,12 +195,16 @@ def _view_list():
     with hc1:
         st.markdown("### 📋 Tous les planogrammes")
     with hc2:
-        bc1, bc2 = st.columns(2)
+        bc1, bc2, bc3 = st.columns(3)
         with bc1:
             if st.button("+ Nouveau", use_container_width=True, type="primary"):
                 st.session_state.pg_view = "new"
                 st.rerun()
         with bc2:
+            if st.button("↑ Import PDF", use_container_width=True):
+                st.session_state.pg_view = "import_pdf"
+                st.rerun()
+        with bc3:
             if st.button("📦 Bibliothèque", use_container_width=True):
                 st.session_state.pg_view = "library"
                 st.rerun()
@@ -924,6 +934,239 @@ def _do_export_pdf(p: dict):
         st.error(f"Erreur export PDF : {e}")
 
 
+
+# ════════════════════════════════════════════════════════
+# PARSEUR PDF
+# ════════════════════════════════════════════════════════
+
+def _parse_planogramme_pdf(file_bytes: bytes) -> dict:
+    """
+    Parse un PDF de planogramme (format NXT Level / Basic-Fit).
+    Détecte les triplets lignes : quantités (X12) / produits / prix.
+    Retourne un dict prêt à être sauvegardé en MongoDB.
+    """
+    import io as _io
+    with pdfplumber.open(_io.BytesIO(file_bytes)) as pdf:
+        all_rows = []
+        title = ""
+
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            if not tables:
+                continue
+            table = tables[0]
+
+            # Chercher le titre dans les premières lignes
+            for row in table[:5]:
+                for cell in (row or []):
+                    if cell and re.search(r'VENDING|PLANOGRAMM', str(cell), re.I) and len(str(cell)) > 5:
+                        title = str(cell).strip()
+                        break
+
+            # Trouver la première ligne de quantités (format X12, X10…)
+            start = 0
+            for i, row in enumerate(table):
+                vals = [v for v in (row or []) if v and re.match(r'^X\d+$', str(v).strip())]
+                if len(vals) >= 2:
+                    start = i
+                    break
+
+            data_rows = table[start:]
+            i = 0
+            while i < len(data_rows):
+                row = data_rows[i]
+                qty_vals = [v for v in (row or []) if v and re.match(r'^X\d+$', str(v).strip())]
+
+                if len(qty_vals) >= 2:
+                    qty_row   = row or []
+                    prod_row  = data_rows[i + 1] if i + 1 < len(data_rows) else []
+                    price_row = data_rows[i + 2] if i + 2 < len(data_rows) else []
+
+                    n = max(len(qty_row), len(prod_row or []), len(price_row or []))
+                    slots = []
+                    for c in range(n):
+                        qty   = str(qty_row[c]   if c < len(qty_row)         else "").strip()
+                        prod  = str((prod_row  or [])[c] if c < len(prod_row  or []) else "").strip()
+                        price = str((price_row or [])[c] if c < len(price_row or []) else "").strip()
+
+                        prod  = prod.replace("\n", " ").strip()
+                        price = re.sub(r"[^\d,.]", "", price).replace(",", ".")
+                        if not price or not re.match(r"^\d+\.?\d*$", price):
+                            price = ""
+
+                        if re.match(r"^X\d+$", qty):
+                            if prod and prod.lower() not in ("none", ""):
+                                slots.append({"product": prod, "price": price, "qty": qty[1:]})
+                            else:
+                                slots.append(None)
+                        elif prod and prod.lower() not in ("none", ""):
+                            slots.append({"product": prod, "price": price, "qty": ""})
+                        else:
+                            slots.append(None)
+
+                    if any(s for s in slots):
+                        all_rows.append({"slots": slots})
+                    i += 3
+                else:
+                    i += 1
+
+        # Nettoyer les lignes sans aucun produit
+        all_rows = [r for r in all_rows if any(s and s.get("product") for s in r["slots"])]
+
+        if not all_rows:
+            raise ValueError(
+                "Aucune rangée de produits détectée. "
+                "Vérifiez que le PDF contient bien des lignes de quantités (X12, X10…)."
+            )
+
+        type_dist = "double" if "DOUBLE" in title.upper() else "simple"
+        return {"title": title or "Planogramme importé", "type": type_dist, "rows": all_rows}
+
+
+def _build_plano_from_parsed(parsed: dict, nom: str) -> dict:
+    """Convertit le résultat du parseur en structure MongoDB planogramme."""
+    rows_data = parsed["rows"]
+    n_rows    = len(rows_data)
+    n_cols    = max(len(r["slots"]) for r in rows_data)
+
+    slots = {}
+    for r, row in enumerate(rows_data):
+        for c in range(n_cols):
+            s = row["slots"][c] if c < len(row["slots"]) else None
+            if s and s.get("product"):
+                slots[f"{r}-{c}"] = {
+                    "product": s["product"],
+                    "price":   s.get("price", ""),
+                    "qty":     s.get("qty", ""),
+                    "color":   "",
+                }
+            else:
+                slots[f"{r}-{c}"] = {"product": "", "price": "", "qty": "", "color": ""}
+
+    return {
+        "nom":        nom,
+        "type":       parsed.get("type", "simple"),
+        "rows":       n_rows,
+        "cols":       n_cols,
+        "row_labels": [f"R{i+1}" for i in range(n_rows)],
+        "slots":      slots,
+    }
+
+
+# ════════════════════════════════════════════════════════
+# VUE : IMPORT PDF
+# ════════════════════════════════════════════════════════
+
+def _view_import_pdf():
+    st.markdown("### 📄 Importer un planogramme depuis un PDF")
+
+    if st.button("← Retour"):
+        st.session_state.pg_view = "list"
+        st.rerun()
+
+    if not _PDFPLUMBER_OK:
+        st.error("La librairie `pdfplumber` n'est pas installée. Ajoutez `pdfplumber` dans `requirements.txt`.")
+        return
+
+    st.info(
+        "**Format supporté** : planogrammes NXT Level / Basic-Fit avec la structure "
+        "Quantités (X12, X10…) → Produits → Prix par rangée."
+    )
+
+    uploaded = st.file_uploader(
+        "Choisir un fichier PDF", type=["pdf"],
+        key="pdf_import_uploader", label_visibility="collapsed"
+    )
+
+    if not uploaded:
+        return
+
+    # Parser le PDF dès l'upload
+    if st.session_state.get("pdf_parsed_name") != uploaded.name:
+        with st.spinner("Analyse du PDF en cours…"):
+            try:
+                parsed = _parse_planogramme_pdf(uploaded.read())
+                st.session_state["pdf_parsed"]      = parsed
+                st.session_state["pdf_parsed_name"] = uploaded.name
+                st.session_state["pdf_import_nom"]  = parsed["title"]
+            except Exception as e:
+                st.error(f"Erreur lors de la lecture du PDF : {e}")
+                return
+
+    parsed = st.session_state.get("pdf_parsed")
+    if not parsed:
+        return
+
+    # ── Aperçu du contenu détecté ──
+    total_slots = sum(
+        sum(1 for s in row["slots"] if s and s.get("product"))
+        for row in parsed["rows"]
+    )
+    n_cols = max(len(r["slots"]) for r in parsed["rows"])
+
+    st.success(
+        f"✅ **{len(parsed['rows'])} rangées** · **{n_cols} colonnes** · "
+        f"**{total_slots} emplacements** détectés"
+    )
+
+    # Tableau d'aperçu
+    preview_rows = []
+    for i, row in enumerate(parsed["rows"]):
+        filled = [s for s in row["slots"] if s and s.get("product")]
+        preview_rows.append({
+            "Rangée":    f"R{i+1}",
+            "Remplis":   len(filled),
+            "Exemple 1": filled[0]["product"] if len(filled) > 0 else "—",
+            "Exemple 2": filled[1]["product"] if len(filled) > 1 else "—",
+            "Exemple 3": filled[2]["product"] if len(filled) > 2 else "—",
+        })
+    st.dataframe(
+        pd.DataFrame(preview_rows),
+        use_container_width=True, hide_index=True
+    )
+
+    st.divider()
+
+    # ── Options avant import ──
+    with st.form("form_pdf_import"):
+        nom = st.text_input(
+            "Nom du planogramme",
+            value=st.session_state.get("pdf_import_nom", parsed["title"])
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            type_dist = st.selectbox(
+                "Type de distributeur",
+                ["simple", "double"],
+                index=0 if parsed.get("type") == "simple" else 1
+            )
+        with c2:
+            st.markdown(f"**Colonnes détectées :** {n_cols}")
+
+        submitted = st.form_submit_button(
+            "✅ Importer ce planogramme", type="primary", use_container_width=True
+        )
+
+    if submitted:
+        if not nom.strip():
+            st.error("Le nom est obligatoire.")
+            return
+
+        parsed["type"] = type_dist
+        plano = _build_plano_from_parsed(parsed, nom.strip())
+        new_id = save_planogramme(plano)
+        plano["_id"] = new_id
+
+        # Nettoyage session
+        for k in ["pdf_parsed", "pdf_parsed_name", "pdf_import_nom"]:
+            st.session_state.pop(k, None)
+
+        _reload_planogrammes()
+        _set_current(plano)
+        st.toast(f"✅ Planogramme '{nom}' importé avec succès !")
+        st.rerun()
+
+
 # ════════════════════════════════════════════════════════
 # POINT D'ENTRÉE PRINCIPAL
 # ════════════════════════════════════════════════════════
@@ -943,6 +1186,8 @@ def render():
         _view_library()
     elif view == "new_product":
         _view_new_product()
+    elif view == "import_pdf":
+        _view_import_pdf()
     else:
         st.session_state.pg_view = "list"
         st.rerun()
