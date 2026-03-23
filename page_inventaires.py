@@ -541,7 +541,7 @@ def render():
 
         st.markdown("---")
         if st.button("📥 Exporter en Excel", key="inv_export"):
-            excel_bytes = _export_excel(filtered, df_raw, croisement)
+            excel_bytes = _export_excel(filtered, df_raw, croisement, plannings_mongo)
             date_str = datetime.date.today().strftime("%Y%m%d")
             st.download_button(
                 "⬇️ Télécharger Excel", data=excel_bytes,
@@ -781,78 +781,363 @@ def _show_thresholds():
 # EXPORT EXCEL
 # ══════════════════════════════════════════
 
-def _export_excel(summary: pd.DataFrame, df_raw: pd.DataFrame, croisement: dict) -> bytes:
+def _build_export_rows(
+    summary: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    croisement: dict,
+    plannings_mongo: dict,
+) -> list:
+    """
+    Construit la liste complète des lignes d'export :
+    une ligne par (réappro, jour planifié, salle) — qu'elle soit faite, non faite ou double passage.
+    """
+    from planning_parser import parse_planning_file
+    import os
+
+    ABBR = {"l": "Lundi", "ma": "Mardi", "me": "Mercredi", "j": "Jeudi", "v": "Vendredi"}
+
+    # Index inventaires faits : {(reappro, date): set(codes)}
+    inv_by_date = (
+        df_raw.groupby(["Ressource", "Date"])["Code client"]
+        .apply(set)
+        .to_dict()
+    )
+
+    # Index semaine : {(reappro, iso_year, iso_week): set(codes)}
+    df_raw2 = df_raw.copy()
+    df_raw2["_dt"] = pd.to_datetime(df_raw2["Date"], format="%d/%m/%Y", errors="coerce")
+    df_raw2["_iso_year"] = df_raw2["_dt"].dt.isocalendar().year.astype("Int64")
+    df_raw2["_iso_week"] = df_raw2["_dt"].dt.isocalendar().week.astype("Int64")
+    codes_by_week = (
+        df_raw2.groupby(["Ressource", "_iso_year", "_iso_week"])["Code client"]
+        .apply(set)
+        .to_dict()
+    )
+
+    # Index inventaires résumés par (reappro, code, date)
+    inv_idx = {}
+    for _, r in summary.iterrows():
+        inv_idx[(r["Ressource"], r["Code client"], r["Date"])] = r
+
+    # Index produits manquants par Num Piece
+    missing_idx = (
+        df_raw[df_raw["Quantité"] == 0]
+        .groupby("Num Piece")["Libellé produit"]
+        .apply(lambda x: list(x.drop_duplicates()))
+        .to_dict()
+    )
+
+    # Dates présentes dans l'export
+    all_dates = sorted(df_raw["Date"].unique())
+
+    rows = []
+    for date_str in all_dates:
+        dt = datetime.datetime.strptime(date_str, "%d/%m/%Y")
+        jour_fr = WEEKDAY_TO_JOUR.get(dt.weekday())
+        if not jour_fr:
+            continue
+        iso = dt.isocalendar()
+
+        for reappro, planning_raw in sorted(plannings_mongo.items()):
+            planning = _parse_planning_for_reappro(planning_raw)
+            if jour_fr not in planning:
+                continue
+
+            jour_plan = planning[jour_fr]
+            codes_fait_today = inv_by_date.get((reappro, date_str), set())
+            codes_fait_week  = codes_by_week.get((reappro, iso[0], iso[1]), set())
+
+            for code, info in sorted(jour_plan.items(), key=lambda x: x[1]["label"]):
+                key = (reappro, code, date_str)
+                inv_row = inv_idx.get(key)
+
+                if code in codes_fait_today and inv_row is not None:
+                    total        = inv_row["total"]
+                    smin         = inv_row["seuil_min"]
+                    smax         = inv_row["seuil_max"]
+                    machine_type = inv_row["type_label"]
+                    ecart        = inv_row["ecart_min"]
+                    statut_plan  = "Fait"
+                    if inv_row["total"] < smin:
+                        statut_inv = "Mal fait"
+                    elif inv_row["total"] > smax:
+                        statut_inv = "Au-dessus max"
+                    else:
+                        statut_inv = "OK"
+                    prods = missing_idx.get(inv_row["Num Piece"], [])
+                elif code not in codes_fait_today and code in codes_fait_week:
+                    total = smin = smax = ecart = machine_type = None
+                    statut_plan = "Double passage"
+                    statut_inv  = "-"
+                    prods       = []
+                else:
+                    total = smin = smax = ecart = machine_type = None
+                    statut_plan = "Non fait"
+                    statut_inv  = "Non fait"
+                    prods       = []
+
+                rows.append({
+                    "reappro":      reappro,
+                    "date":         date_str,
+                    "jour":         jour_fr,
+                    "code":         code,
+                    "salle":        info["label"],
+                    "machine":      info["machine"],
+                    "statut_plan":  statut_plan,
+                    "machine_type": machine_type or "",
+                    "total":        total,
+                    "seuil_min":    smin,
+                    "seuil_max":    smax,
+                    "ecart":        ecart,
+                    "statut_inv":   statut_inv,
+                    "produits":     prods,
+                })
+
+    return rows
+
+
+def _export_excel(
+    summary: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    croisement: dict,
+    plannings_mongo: dict = None,
+) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    plannings_mongo = plannings_mongo or {}
+    rows = _build_export_rows(summary, df_raw, croisement, plannings_mongo)
+
+    # ── Style helpers ──────────────────────────────────────────────────────
+    def _fill(hex_col):
+        return PatternFill("solid", fgColor=hex_col.lstrip("#"))
+
+    def _font(bold=False, color="000000", size=9, italic=False):
+        return Font(bold=bold, color=color.lstrip("#"), size=size,
+                    name="Arial", italic=italic)
+
+    _side_thin  = Side(style="thin",   color="CCCCCC")
+    _side_med   = Side(style="medium", color="1F4E79")
+    _brd        = Border(left=_side_thin, right=_side_thin,
+                         top=_side_thin,  bottom=_side_thin)
+    _brd_sep    = Border(left=_side_med, right=_side_thin,
+                         top=_side_med,  bottom=_side_med)
+
+    def _align(h="left", v="center", wrap=False):
+        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+
+    # Color palette
+    C_DARK      = "1F4E79"; C_MID  = "2E75B6"; C_SUB = "BDD7EE"
+    C_OK_BG     = "D4EDDA"; C_BAD_BG = "F8D7DA"; C_ORA_BG = "FFF3CD"
+    C_DOUB_BG   = "EDE7F6"; C_GREY_BG = "F5F5F5"
+    C_OK_FG     = "1E7E34"; C_BAD_FG  = "C0392B"
+    C_ORA_FG    = "E67E22"; C_DOUB_FG = "6C3483"
+    C_WHITE     = "FFFFFF"
+
+    STATUS_STYLE = {
+        "Fait":                  (C_OK_BG,   C_MID,    False),
+        "Non fait":              (C_BAD_BG,  C_BAD_FG, True),
+        "Double passage":        (C_DOUB_BG, C_DOUB_FG,True),
+        "OK":                    (C_OK_BG,   C_OK_FG,  True),
+        "Mal fait":              (C_BAD_BG,  C_BAD_FG, True),
+        "Au-dessus max":         (C_ORA_BG,  C_ORA_FG, True),
+        "-":                     (C_GREY_BG, C_DARK,   False),
+        "Non fait (inv)":        (C_BAD_BG,  C_BAD_FG, True),
+    }
+
+    # Column definitions for detail sheets: (header, width)
+    DETAIL_COLS = [
+        ("Date",             11), ("Jour",          10), ("Salle",            36),
+        ("Machine",           9), ("Type machine",  16), ("Statut planning",  18),
+        ("Montant HT",       13), ("Seuil min",     11), ("Seuil max",        11),
+        ("Écart min",        11), ("Statut inv.",   14), ("Produits épuisés", 52),
+    ]
+    N = len(DETAIL_COLS)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ══════════════════════════════════════════
+    # ONGLET RÉCAP GLOBAL
+    # ══════════════════════════════════════════
+    ws_g = wb.create_sheet("📊 Récap global")
+    ws_g.freeze_panes = "A3"
+    ws_g.sheet_properties.tabColor = C_DARK
+
+    # Row 1 : big title
+    ws_g.merge_cells("A1:J1")
+    tc = ws_g.cell(1, 1, "Suivi des inventaires — Récapitulatif")
+    tc.fill = _fill(C_DARK); tc.font = _font(True, C_WHITE, 13)
+    tc.alignment = _align("center"); ws_g.row_dimensions[1].height = 26
+
+    # Row 2 : headers
+    RECAP_HDRS = [
+        "Réappro", "Date", "Jour",
+        "✅ Faits", "🔴 Non faits", "🔄 Double pass.",
+        "⚠️ Mal faits", "📈 Au-dessus max",
+        "💰 Total € fait", "% réalisation",
+    ]
+    ws_g.row_dimensions[2].height = 20
+    for ci, h in enumerate(RECAP_HDRS, 1):
+        c = ws_g.cell(2, ci, h)
+        c.fill = _fill(C_MID); c.font = _font(True, C_WHITE, 9)
+        c.alignment = _align("center"); c.border = _brd
+        ws_g.column_dimensions[get_column_letter(ci)].width = [
+            13, 11, 11, 10, 12, 13, 12, 15, 16, 14][ci - 1]
+
+    # Aggregate
+    recap: dict = {}
+    for r in rows:
+        k = (r["reappro"], r["date"], r["jour"])
+        if k not in recap:
+            recap[k] = {"fait": 0, "non_fait": 0, "double": 0,
+                        "mal_fait": 0, "au_dessus": 0, "total_eur": 0.0}
+        d = recap[k]
+        sp = r["statut_plan"]
+        si = r["statut_inv"]
+        if sp == "Fait":
+            d["fait"] += 1; d["total_eur"] += r["total"] or 0
+            if si == "Mal fait":       d["mal_fait"] += 1
+            elif si == "Au-dessus max": d["au_dessus"] += 1
+        elif sp == "Non fait":     d["non_fait"] += 1
+        elif sp == "Double passage": d["double"] += 1
+
+    ri = 3
+    for (reappro, date_str, jour), d in sorted(recap.items()):
+        planif = d["fait"] + d["non_fait"] + d["double"]
+        pct    = round(d["fait"] / planif * 100, 1) if planif else 0
+        bg = C_OK_BG if (d["non_fait"] == 0 and d["mal_fait"] == 0) else \
+             C_BAD_BG if d["non_fait"] > 0 else C_ORA_BG
+        vals = [reappro, date_str, jour, d["fait"], d["non_fait"], d["double"],
+                d["mal_fait"], d["au_dessus"], round(d["total_eur"], 2), f"{pct}%"]
+        ws_g.row_dimensions[ri].height = 17
+        for ci, v in enumerate(vals, 1):
+            c = ws_g.cell(ri, ci, v)
+            c.fill = _fill(bg); c.border = _brd
+            c.font = _font(size=9)
+            c.alignment = _align("center" if ci > 3 else "left")
+            if ci == 9 and isinstance(v, (int, float)):
+                c.number_format = "#,##0.00 €"
+        ri += 1
+
+    # ══════════════════════════════════════════
+    # UN ONGLET PAR RÉAPPRO
+    # ══════════════════════════════════════════
+    reappros_ordered = sorted({r["reappro"] for r in rows})
+    for reappro in reappros_ordered:
+        ws = wb.create_sheet(reappro[:31])
+        ws.freeze_panes = "A3"
+
+        # Title row
+        ws.merge_cells(f"A1:{get_column_letter(N)}1")
+        t = ws.cell(1, 1, f"Suivi inventaires — {reappro}")
+        t.fill = _fill(C_DARK); t.font = _font(True, C_WHITE, 12)
+        t.alignment = _align("center"); ws.row_dimensions[1].height = 24
+
+        # Header row
+        ws.row_dimensions[2].height = 18
+        for ci, (h, w) in enumerate(DETAIL_COLS, 1):
+            c = ws.cell(2, ci, h)
+            c.fill = _fill(C_MID); c.font = _font(True, C_WHITE, 9)
+            c.alignment = _align("center"); c.border = _brd
+            ws.column_dimensions[get_column_letter(ci)].width = w
+
+        sub_rows = [r for r in rows if r["reappro"] == reappro]
+        current_date = None
+        ri = 3
+
+        for r in sub_rows:
+            # ── Date separator ─────────────────────────────────────────────
+            if r["date"] != current_date:
+                current_date = r["date"]
+
+                # Count stats for this day
+                day_rows = [x for x in sub_rows if x["date"] == r["date"]]
+                nb_fait    = sum(1 for x in day_rows if x["statut_plan"] == "Fait")
+                nb_nf      = sum(1 for x in day_rows if x["statut_plan"] == "Non fait")
+                nb_dbl     = sum(1 for x in day_rows if x["statut_plan"] == "Double passage")
+                nb_mal     = sum(1 for x in day_rows if x["statut_inv"] == "Mal fait")
+                total_jour = sum(x["total"] or 0 for x in day_rows if x["statut_plan"] == "Fait")
+                sep_txt = (
+                    f"  {r['jour']}  {r['date']}"
+                    f"   |   ✅ {nb_fait} faits   🔴 {nb_nf} non faits"
+                    + (f"   🔄 {nb_dbl} double(s)" if nb_dbl else "")
+                    + (f"   ⚠️ {nb_mal} mal fait(s)" if nb_mal else "")
+                    + f"   💰 {total_jour:,.2f} €"
+                )
+                ws.merge_cells(f"A{ri}:{get_column_letter(N)}{ri}")
+                sep = ws.cell(ri, 1, sep_txt)
+                sep.fill = _fill(C_SUB)
+                sep.font = _font(True, C_DARK, 10)
+                sep.alignment = _align("left")
+                for ci in range(1, N + 1):
+                    ws.cell(ri, ci).border = _brd_sep
+                ws.row_dimensions[ri].height = 20
+                ri += 1
+
+            # ── Data row ───────────────────────────────────────────────────
+            sp = r["statut_plan"]
+            si = r["statut_inv"]
+
+            # Row background
+            if sp == "Non fait":
+                row_bg = C_BAD_BG
+            elif sp == "Double passage":
+                row_bg = C_DOUB_BG
+            elif si == "Mal fait":
+                row_bg = C_BAD_BG
+            elif si == "Au-dessus max":
+                row_bg = C_ORA_BG
+            elif si == "OK":
+                row_bg = C_OK_BG
+            else:
+                row_bg = C_GREY_BG
+
+            prods_str = " / ".join(r["produits"]) if r["produits"] else ""
+            has_prods = bool(prods_str)
+            ws.row_dimensions[ri].height = 20 if has_prods else 16
+
+            values = [
+                r["date"], r["jour"], r["salle"], r["machine"],
+                r["machine_type"] or "-", sp,
+                r["total"], r["seuil_min"], r["seuil_max"],
+                r["ecart"], si, prods_str,
+            ]
+
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(ri, ci, v)
+                c.fill = _fill(row_bg)
+                c.font = _font(size=9)
+                c.border = _brd
+                c.alignment = _align(
+                    "center" if ci in (1, 2, 4, 7, 8, 9, 10) else "left",
+                    wrap=(ci == 12),
+                )
+                if ci in (7, 8, 9, 10) and isinstance(v, (int, float)):
+                    c.number_format = "#,##0.00 €"
+
+                # Statut planning cell (col 6) — colored badge
+                if ci == 6:
+                    bg, fg, bold = STATUS_STYLE.get(sp, (C_GREY_BG, C_DARK, False))
+                    c.fill = _fill(bg); c.font = _font(bold, fg, 9)
+                    c.alignment = _align("center")
+
+                # Statut inventaire cell (col 11) — colored badge
+                if ci == 11:
+                    key = si if si in STATUS_STYLE else "Non fait (inv)"
+                    bg, fg, bold = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
+                    c.fill = _fill(bg); c.font = _font(bold, fg, 9)
+                    c.alignment = _align("center")
+
+                # Produits épuisés cell (col 12) — red if present
+                if ci == 12 and has_prods:
+                    c.fill = _fill("FFCCCC")
+                    c.font = _font(True, C_BAD_FG, 9)
+
+            ri += 1
+
     output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        wb = writer.book
-        fmt_hdr  = wb.add_format({"bold": True, "bg_color": "#1F4E79", "font_color": WHITE, "border": 1, "align": "center"})
-        fmt_ok   = wb.add_format({"bg_color": COLOR_OK,     "font_color": WHITE, "bold": True, "border": 1})
-        fmt_bad  = wb.add_format({"bg_color": COLOR_BAD,    "font_color": WHITE, "bold": True, "border": 1})
-        fmt_over = wb.add_format({"bg_color": COLOR_ORANGE, "font_color": WHITE, "bold": True, "border": 1})
-
-        cols = ["Ressource", "Nom client", "Stock Origine", "type_label",
-                "total", "seuil_min", "seuil_max", "ecart_min",
-                "nb_produits_vides", "statut_emoji", "statut_label", "Date"]
-        hdrs = ["Réappro", "Salle", "Machine", "Type",
-                "Montant HT", "Seuil min", "Seuil max", "Écart min",
-                "Produits épuisés", "Statut", "Détail", "Date"]
-
-        def _write_sheet(ws, rows_df, cols_list, hdrs_list):
-            for i, h in enumerate(hdrs_list):
-                ws.write(0, i, h, fmt_hdr)
-                ws.set_column(i, i, max(14, len(h) + 2))
-            for ri, (_, row) in enumerate(rows_df.iterrows(), 1):
-                fmt = fmt_ok if row.get("statut_emoji") == "🟢" else \
-                      fmt_bad if row.get("statut_emoji") == "🔴" else fmt_over
-                for ci, col in enumerate(cols_list):
-                    v = row[col]
-                    ws.write(ri, ci, str(v) if not isinstance(v, (int, float)) else v, fmt)
-
-        # Résumé global
-        summary[cols].to_excel(writer, sheet_name="Résumé global", index=False, startrow=0)
-        _write_sheet(writer.sheets["Résumé global"], summary, cols, hdrs)
-
-        # Suivi planning
-        if croisement:
-            plan_rows = []
-            for reappro, r_data in sorted(croisement.items()):
-                for date_str, d in sorted(r_data.items()):
-                    for m in d["manquants"]:
-                        plan_rows.append({
-                            "Réappro": reappro, "Date": date_str, "Jour": d["jour_fr"],
-                            "Code client": m["code"], "Salle": m["label"],
-                            "Machine": m["machine"], "Statut": "Non fait",
-                        })
-            if plan_rows:
-                df_plan = pd.DataFrame(plan_rows)
-                df_plan.to_excel(writer, sheet_name="Non faits planning", index=False, startrow=0)
-                ws_p = writer.sheets["Non faits planning"]
-                for i, h in enumerate(df_plan.columns):
-                    ws_p.write(0, i, h, fmt_hdr)
-                    ws_p.set_column(i, i, 20)
-                for ri, (_, row) in enumerate(df_plan.iterrows(), 1):
-                    for ci, col in enumerate(df_plan.columns):
-                        ws_p.write(ri, ci, str(row[col]), fmt_bad)
-
-        # Produits épuisés
-        df_vides = _get_all_missing_products(df_raw, summary)
-        if not df_vides.empty:
-            df_vides.to_excel(writer, sheet_name="Produits épuisés", index=False, startrow=0)
-            ws_v = writer.sheets["Produits épuisés"]
-            for i, h in enumerate(df_vides.columns):
-                ws_v.write(0, i, h, fmt_hdr)
-                ws_v.set_column(i, i, max(14, len(h) + 2))
-            for ri in range(len(df_vides)):
-                for ci in range(len(df_vides.columns)):
-                    ws_v.write(ri + 1, ci, str(df_vides.iloc[ri, ci]), fmt_bad)
-
-        # Un onglet par réappro
-        for reappro in sorted(summary["Ressource"].unique()):
-            sub_r = summary[summary["Ressource"] == reappro]
-            sn = reappro[:31]
-            sub_r[cols].to_excel(writer, sheet_name=sn, index=False, startrow=0)
-            _write_sheet(writer.sheets[sn], sub_r, cols, hdrs)
-
+    wb.save(output)
     output.seek(0)
     return output.read()
