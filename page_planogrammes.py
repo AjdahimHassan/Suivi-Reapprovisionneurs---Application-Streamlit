@@ -52,22 +52,52 @@ SLOT_COLORS_DISPLAY = {
 
 def _calcul_valeur_totale(plano: dict) -> float:
     """
-    Calcule la valeur totale du planogramme en € :
-    somme de (prix × quantité) pour chaque slot rempli.
+    Calcule le coût d'achat TTC total du planogramme :
+    somme de (prix_achat × (1 + TVA/100) × quantité) pour chaque slot rempli.
+    Le prix_achat et la TVA sont récupérés depuis la bibliothèque de produits
+    en faisant le lien par le nom du produit.
+    Fallback : si le produit n'est pas dans la bibliothèque, utilise le prix
+    du slot directement.
     """
+    # Construire un index nom → produit depuis la bibliothèque
+    produits = _get_produits()
+    index_nom = {}
+    for pr in produits:
+        nom_clean = pr.get("nom", "").strip().lower()
+        if nom_clean:
+            index_nom[nom_clean] = pr
+
     total = 0.0
     for s in plano.get("slots", {}).values():
         if not s.get("product"):
             continue
         try:
-            prix = float(s.get("price", 0) or 0)
+            qty = float(s.get("qty", 0) or 0)
         except (ValueError, TypeError):
-            prix = 0.0
+            qty = 0.0
+        if qty <= 0:
+            continue
+
+        # Chercher le produit dans la bibliothèque
+        nom_slot = s.get("product", "").strip().lower()
+        prod_lib = index_nom.get(nom_slot)
+
+        if prod_lib and prod_lib.get("prix_achat") and prod_lib.get("tva") is not None:
+            try:
+                prix_achat = float(prod_lib["prix_achat"])
+                tva        = float(prod_lib["tva"])
+                total += prix_achat * (1 + tva / 100) * qty
+                continue
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback : prix saisi manuellement dans le slot
         try:
-            qty = float(s.get("qty", 1) or 1)
+            prix = float(s.get("price", 0) or 0)
+            total += prix * qty
         except (ValueError, TypeError):
-            qty = 1.0
-        total += prix * qty
+            pass
+
     return total
 
 
@@ -257,7 +287,7 @@ def _view_list():
                         f"{filled}/{total} remplis"
                     )
                     valeur = _calcul_valeur_totale(p)
-                    st.caption(f"💰 Valeur totale : **{valeur:,.2f} €** · Modifié le {upd}")
+                    st.caption(f"💰 Coût achat TTC : **{valeur:,.2f} €** · Modifié le {upd}")
 
                     bc1, bc2, bc3 = st.columns(3)
                     with bc1:
@@ -471,7 +501,7 @@ def _view_editor():
         mc1, mc2, mc3, mc4 = st.columns(4)
         mc1.metric("Type",        "Double" if p.get("type") == "double" else "Simple")
         mc2.metric("Emplacements", f"{filled_count}/{total_count}")
-        mc3.metric("Valeur totale", f"{valeur_totale:,.2f} €")
+        mc3.metric("Coût achat TTC", f"{valeur_totale:,.2f} €")
         mc4.metric("Rangées × Col.", f"{p['rows']} × {p['cols']}")
         st.caption("Cliquez sur un emplacement pour le modifier.")
 
