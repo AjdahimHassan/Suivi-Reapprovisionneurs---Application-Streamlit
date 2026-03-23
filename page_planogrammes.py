@@ -47,6 +47,31 @@ SLOT_COLORS_DISPLAY = {
 
 
 # ════════════════════════════════════════════════════════
+# CALCUL VALEUR TOTALE
+# ════════════════════════════════════════════════════════
+
+def _calcul_valeur_totale(plano: dict) -> float:
+    """
+    Calcule la valeur totale du planogramme en € :
+    somme de (prix × quantité) pour chaque slot rempli.
+    """
+    total = 0.0
+    for s in plano.get("slots", {}).values():
+        if not s.get("product"):
+            continue
+        try:
+            prix = float(s.get("price", 0) or 0)
+        except (ValueError, TypeError):
+            prix = 0.0
+        try:
+            qty = float(s.get("qty", 1) or 1)
+        except (ValueError, TypeError):
+            qty = 1.0
+        total += prix * qty
+    return total
+
+
+# ════════════════════════════════════════════════════════
 # HELPERS SESSION STATE
 # ════════════════════════════════════════════════════════
 
@@ -231,7 +256,8 @@ def _view_list():
                         f"{p.get('rows',0)} × {p.get('cols',0)} · "
                         f"{filled}/{total} remplis"
                     )
-                    st.caption(f"Modifié le {upd}")
+                    valeur = _calcul_valeur_totale(p)
+                    st.caption(f"💰 Valeur totale : **{valeur:,.2f} €** · Modifié le {upd}")
 
                     bc1, bc2, bc3 = st.columns(3)
                     with bc1:
@@ -437,11 +463,17 @@ def _view_editor():
                 _mark_dirty(); st.rerun()
 
     with right:
-        st.caption(
-            f"**{p['nom']}** · {'Double' if p.get('type')=='double' else 'Simple'} · "
-            f"{p['rows']} rangées × {p['cols']} colonnes · "
-            f"Cliquez sur un emplacement pour le modifier"
-        )
+        # Métriques du planogramme
+        filled_count = sum(1 for s in p.get("slots", {}).values() if s.get("product"))
+        total_count  = p.get("rows", 0) * p.get("cols", 0)
+        valeur_totale = _calcul_valeur_totale(p)
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Type",        "Double" if p.get("type") == "double" else "Simple")
+        mc2.metric("Emplacements", f"{filled_count}/{total_count}")
+        mc3.metric("Valeur totale", f"{valeur_totale:,.2f} €")
+        mc4.metric("Rangées × Col.", f"{p['rows']} × {p['cols']}")
+        st.caption("Cliquez sur un emplacement pour le modifier.")
 
         # Grille visuelle
         _render_grid_preview(p)
