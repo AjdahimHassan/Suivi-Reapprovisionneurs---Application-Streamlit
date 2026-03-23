@@ -527,32 +527,23 @@ def render():
         filtered = filtered[filtered["type_label"] == filtre_type]
 
     # ── Onglets ─────────────────────────────
-    tab_planning, tab_global, tab_reappro, tab_detail, tab_vides = st.tabs([
-        "📅 Suivi planning",
-        "🌍 Vue globale",
-        "👤 Par réappro",
+    tab_suivi, tab_detail = st.tabs([
+        "📋 Suivi & inventaires",
         "🔍 Détail machine",
-        "📭 Produits épuisés",
     ])
 
     # ════════════════════════════════════════
-    # TAB — SUIVI PLANNING
+    # TAB — SUIVI & INVENTAIRES
     # ════════════════════════════════════════
-    with tab_planning:
-        if not croisement:
-            st.warning("Plannings non disponibles — connexion MongoDB requise.")
-        else:
-            st.markdown(
-                "Croisement entre les **inventaires réalisés** et le **planning prévu** "
-                "pour chaque réappro et chaque jour."
-            )
+    with tab_suivi:
 
+        # KPIs planning
+        if croisement:
             nb_r_ok = sum(
                 1 for r_data in croisement.values()
                 if all(len(d["manquants"]) == 0 for d in r_data.values())
             )
             nb_r_ko = len(croisement) - nb_r_ok
-
             p1, p2, p3 = st.columns(3)
             p1.metric("✅ Réappros tout OK",        nb_r_ok)
             p2.metric("🔴 Réappros avec manquants", nb_r_ko,
@@ -560,71 +551,89 @@ def render():
             p3.metric("📭 Inventaires non faits",   total_inv_manquants,
                       delta=f"-{total_inv_manquants}" if total_inv_manquants else None,
                       delta_color="inverse")
+            st.divider()
 
-            st.markdown("---")
-
-            # Filtre réappro pour cet onglet (suit le filtre global si actif)
-            if filtre_reappro != "Tous" and filtre_reappro in croisement:
-                reappros_show = [filtre_reappro]
-            else:
-                sel_plan = st.selectbox(
-                    "Filtrer par réappro",
-                    ["Tous"] + sorted(croisement.keys()),
-                    key="inv_plan_sel",
+        # Bouton export
+        col_exp, _ = st.columns([1, 4])
+        with col_exp:
+            if st.button("📥 Exporter en Excel", key="inv_export"):
+                excel_bytes = _export_excel(filtered, df_raw, croisement, plannings_mongo)
+                date_str_dl = datetime.date.today().strftime("%Y%m%d")
+                st.download_button(
+                    "⬇️ Télécharger Excel", data=excel_bytes,
+                    file_name=f"inventaires_{date_str_dl}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="inv_dl",
                 )
-                reappros_show = [sel_plan] if sel_plan != "Tous" else sorted(croisement.keys())
 
-            for reappro in reappros_show:
-                r_data = croisement[reappro]
-                total_manq_r = sum(len(d["manquants"]) for d in r_data.values())
-                all_ok = total_manq_r == 0
+        st.divider()
 
-                with st.expander(
-                    f"**{reappro}** — "
-                    + ("✅ Tous les inventaires faits" if all_ok
-                       else f"🔴 {total_manq_r} inventaire(s) non fait(s)"),
-                    expanded=not all_ok,
-                ):
-                    for date_str in sorted(r_data.keys()):
-                        d       = r_data[date_str]
-                        nb_manq = len(d["manquants"])  # vrais manquants seulement
+        # Accordéon par réappro
+        reappros_liste = (
+            [filtre_reappro] if filtre_reappro != "Tous"
+            else sorted(filtered["Ressource"].unique())
+        )
+
+        for reappro in reappros_liste:
+            sub = filtered[filtered["Ressource"] == reappro]
+            nb_ok_r   = (sub["statut_emoji"] == "🟢").sum()
+            nb_bad_r  = (sub["statut_emoji"] == "🔴").sum()
+            nb_over_r = (sub["statut_emoji"] == "🟠").sum()
+            total_r   = sub["total"].sum()
+            inv_manq_r = sum(len(d["manquants"]) for d in croisement.get(reappro, {}).values())
+            jokers_r   = sum(len(d.get("jokers", [])) for d in croisement.get(reappro, {}).values())
+            nb_planif_r = sum(d["nb_planifie"] for d in croisement.get(reappro, {}).values())
+            nb_fait_r   = sum(d["nb_fait"] for d in croisement.get(reappro, {}).values())
+
+            titre = (
+                f"**{reappro}** — "
+                f"📋 {nb_fait_r}/{nb_planif_r} · "
+                f"🟢 {nb_ok_r} · 🔴 {nb_bad_r} · 🟠 {nb_over_r}"
+                + (f" · 📭 {inv_manq_r} non faits" if inv_manq_r else "")
+                + (f" · 🔀 {jokers_r} joker(s)" if jokers_r else "")
+                + f" · 💰 {total_r:,.2f} €"
+            )
+
+            with st.expander(titre, expanded=(nb_bad_r > 0 or inv_manq_r > 0)):
+
+                # Section planning du réappro
+                if reappro in croisement:
+                    for date_str_c in sorted(croisement[reappro].keys()):
+                        d       = croisement[reappro][date_str_c]
+                        nb_manq = len(d["manquants"])
                         nb_deja = len(d.get("deja_fait_semaine", []))
+                        nb_jok  = len(d.get("jokers", []))
                         color   = COLOR_OK if nb_manq == 0 else COLOR_BAD
                         icon    = "✅" if nb_manq == 0 else "🔴"
                         bg      = "#f8fff8" if nb_manq == 0 else "#fff8f8"
+                        extra   = ""
+                        if nb_deja: extra += f" · 🔄 {nb_deja} double(s)"
+                        if nb_jok:  extra += f" · 🔀 {nb_jok} joker(s)"
 
-                        extra = f" · 🔄 {nb_deja} double(s) passage" if nb_deja else ""
                         st.markdown(
-                            f"""<div style="border-left:4px solid {color};padding:8px 12px;
-                                border-radius:4px;margin-bottom:8px;background:{bg}">
-                            <b>{icon} {d['jour_fr']} {date_str}</b> —
+                            f"""<div style="border-left:4px solid {color};padding:7px 12px;
+                                border-radius:4px;margin-bottom:6px;background:{bg}">
+                            <b>{icon} {d['jour_fr']} {date_str_c}</b> —
                             {d['nb_fait']}/{d['nb_planifie']} inventaires réalisés{extra}
                             </div>""",
                             unsafe_allow_html=True,
                         )
 
                         if nb_manq > 0:
-                            st.markdown(f"**Inventaires non faits ({nb_manq}) :**")
-                            rows_m = [
-                                {"Code client": m["code"], "Salle": m["label"], "Machine": m["machine"]}
-                                for m in d["manquants"]
-                            ]
+                            rows_m = [{"Code": m["code"], "Salle": m["label"], "Machine": m["machine"]}
+                                      for m in d["manquants"]]
                             st.dataframe(
                                 pd.DataFrame(rows_m).style.applymap(
                                     lambda _: f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"
                                 ),
                                 hide_index=True, use_container_width=True,
-                                height=min(300, 38 + len(rows_m) * 35),
+                                height=min(250, 38 + len(rows_m) * 35),
                             )
 
-                        # Double passage : fait un autre jour de la semaine
-                        deja = d.get("deja_fait_semaine", [])
-                        if deja:
-                            st.markdown(f"**🔄 Double passage — déjà inventorié cette semaine ({len(deja)}) :**")
-                            rows_deja = [
-                                {"Code client": m["code"], "Salle": m["label"], "Machine": m["machine"]}
-                                for m in deja
-                            ]
+                        if nb_deja:
+                            rows_deja = [{"Code": m["code"], "Salle": m["label"], "Machine": m["machine"]}
+                                         for m in d["deja_fait_semaine"]]
+                            st.markdown(f"🔄 *Double passage ({nb_deja})*")
                             st.dataframe(
                                 pd.DataFrame(rows_deja).style.applymap(
                                     lambda _: f"background-color:{COLOR_ORANGE}; color:{WHITE}; font-weight:600"
@@ -633,15 +642,11 @@ def render():
                                 height=min(200, 38 + len(rows_deja) * 35),
                             )
 
-                        # Jokers : fait par un autre réappro
-                        jokers = d.get("jokers", [])
-                        if jokers:
-                            st.markdown(f"**🔀 Jokers — inventorié par un autre réappro ({len(jokers)}) :**")
-                            rows_j = [
-                                {"Code client": j["code"], "Salle": j["label"],
-                                 "Machine": j["machine"], "Fait par": j["fait_par"]}
-                                for j in jokers
-                            ]
+                        if nb_jok:
+                            rows_j = [{"Code": j["code"], "Salle": j["label"],
+                                       "Machine": j["machine"], "Fait par": j["fait_par"]}
+                                      for j in d["jokers"]]
+                            st.markdown(f"🔀 *Jokers ({nb_jok})*")
                             st.dataframe(
                                 pd.DataFrame(rows_j).style.applymap(
                                     lambda _: f"background-color:#6C3483; color:{WHITE}; font-weight:600"
@@ -650,92 +655,9 @@ def render():
                                 height=min(200, 38 + len(rows_j) * 35),
                             )
 
-    # ════════════════════════════════════════
-    # TAB — VUE GLOBALE
-    # ════════════════════════════════════════
-    with tab_global:
-        st.markdown(f"**{len(filtered)} inventaires affichés**")
+                    st.markdown("---")
 
-        cols_disp = [
-            "Ressource", "Nom client", "Stock Origine", "type_label",
-            "total", "seuil_min", "seuil_max", "ecart_min",
-            "nb_produits_vides", "statut_emoji", "statut_label", "Date",
-        ]
-        hdrs = [
-            "Réappro", "Salle", "Machine", "Type",
-            "Montant HT", "Seuil min", "Seuil max", "Écart min",
-            "Produits épuisés", "Statut", "Détail", "Date",
-        ]
-        df_disp = filtered[cols_disp].copy()
-        df_disp.columns = hdrs
-        df_disp["Montant HT"] = df_disp["Montant HT"].map("{:.2f} €".format)
-        df_disp["Seuil min"]  = df_disp["Seuil min"].map(lambda x: f"{x:.0f} €" if pd.notna(x) else "—")
-        df_disp["Seuil max"]  = df_disp["Seuil max"].map(lambda x: f"{x:.2f} €" if pd.notna(x) else "—")
-        df_disp["Écart min"]  = df_disp["Écart min"].map(lambda x: f"{x:+.2f} €" if pd.notna(x) else "—")
-
-        def _color_row(row):
-            e = row["Statut"]
-            bg = COLOR_OK if e == "🟢" else COLOR_BAD if e == "🔴" else COLOR_ORANGE
-            return [f"background-color:{bg}; color:{WHITE}; font-weight:600"] * len(row)
-
-        st.dataframe(
-            df_disp.style.apply(_color_row, axis=1),
-            use_container_width=True, hide_index=True,
-            height=min(700, 38 + len(df_disp) * 35),
-        )
-
-        st.markdown("---")
-        if st.button("📥 Exporter en Excel", key="inv_export"):
-            excel_bytes = _export_excel(filtered, df_raw, croisement, plannings_mongo)
-            date_str = datetime.date.today().strftime("%Y%m%d")
-            st.download_button(
-                "⬇️ Télécharger Excel", data=excel_bytes,
-                file_name=f"inventaires_{date_str}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="inv_dl",
-            )
-
-    # ════════════════════════════════════════
-    # TAB — PAR RÉAPPRO
-    # ════════════════════════════════════════
-    with tab_reappro:
-        for reappro in sorted(filtered["Ressource"].unique()):
-            sub = filtered[filtered["Ressource"] == reappro]
-            nb_ok_r   = (sub["statut_emoji"] == "🟢").sum()
-            nb_bad_r  = (sub["statut_emoji"] == "🔴").sum()
-            nb_over_r = (sub["statut_emoji"] == "🟠").sum()
-            total_r   = sub["total"].sum()
-            inv_manq_r = sum(
-                len(d["manquants"])
-                for d in croisement.get(reappro, {}).values()
-            )
-
-            with st.expander(
-                f"**{reappro}** — {len(sub)} inv. · "
-                f"🟢 {nb_ok_r} · 🔴 {nb_bad_r} · 🟠 {nb_over_r}"
-                + (f" · 📭 {inv_manq_r} non faits" if inv_manq_r else "")
-                + f" · Total : {total_r:,.2f} €",
-                expanded=(nb_bad_r > 0 or inv_manq_r > 0),
-            ):
-                # Inventaires manquants au planning
-                if reappro in croisement:
-                    manq_lines = [
-                        m for d in croisement[reappro].values() for m in d["manquants"]
-                    ]
-                    if manq_lines:
-                        st.markdown(f"**📭 {len(manq_lines)} inventaire(s) non fait(s) au planning :**")
-                        st.dataframe(
-                            pd.DataFrame([
-                                {"Code": m["code"], "Salle": m["label"], "Machine": m["machine"]}
-                                for m in manq_lines
-                            ]).style.applymap(
-                                lambda _: f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"
-                            ),
-                            hide_index=True, use_container_width=True,
-                            height=min(200, 38 + len(manq_lines) * 35),
-                        )
-                        st.markdown("---")
-
+                # Cartes inventaires réalisés
                 for _, row in sub.iterrows():
                     _machine_card(row, df_raw)
 
@@ -754,80 +676,6 @@ def render():
                 )
                 _machine_detail_full(row, df_raw)
 
-    # ════════════════════════════════════════
-    # TAB — PRODUITS ÉPUISÉS (qty = 0)
-    # ════════════════════════════════════════
-    with tab_vides:
-        st.markdown(
-            "Produits avec **quantité = 0** lors de l'inventaire — "
-            "ils étaient épuisés au moment du passage du réappro."
-        )
-
-        df_vides = _get_all_missing_products(df_raw, filtered)
-
-        if df_vides.empty:
-            st.success("🎉 Aucun produit épuisé dans la sélection !")
-        else:
-            v1, v2, v3 = st.columns(3)
-            v1.metric("📦 Produits épuisés (lignes)", len(df_vides))
-            v2.metric("🏋️ Salles concernées",         df_vides["Salle"].nunique())
-            v3.metric("🏷️ Produits distincts",        df_vides["Produit manquant"].nunique())
-
-            # Top 10
-            st.markdown("---")
-            st.markdown("#### 🏆 Produits les plus souvent épuisés")
-            top = (
-                df_vides.groupby(["Code produit", "Produit manquant"])
-                .agg(
-                    nb_salles      = ("Salle", "nunique"),
-                    nb_occurrences = ("Salle", "count"),
-                )
-                .reset_index()
-                .sort_values("nb_salles", ascending=False)
-                .head(10)
-                .rename(columns={
-                    "Code produit":   "Code",
-                    "Produit manquant": "Produit",
-                    "nb_salles":      "Nb salles concernées",
-                    "nb_occurrences": "Nb occurrences",
-                })
-            )
-            st.dataframe(
-                top.style.applymap(
-                    lambda _: f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"
-                ),
-                hide_index=True, use_container_width=True,
-            )
-
-            # Liste complète avec filtres
-            st.markdown("---")
-            st.markdown("#### 📋 Liste complète")
-            col_fv1, col_fv2 = st.columns(2)
-            with col_fv1:
-                fv_reappro = st.selectbox(
-                    "Réappro", ["Tous"] + sorted(df_vides["Réappro"].unique()),
-                    key="inv_vides_reappro",
-                )
-            with col_fv2:
-                fv_produit = st.selectbox(
-                    "Produit", ["Tous"] + sorted(df_vides["Produit manquant"].unique()),
-                    key="inv_vides_produit",
-                )
-
-            df_show = df_vides.copy()
-            if fv_reappro != "Tous":
-                df_show = df_show[df_show["Réappro"] == fv_reappro]
-            if fv_produit != "Tous":
-                df_show = df_show[df_show["Produit manquant"] == fv_produit]
-
-            st.markdown(f"**{len(df_show)} ligne(s)**")
-            st.dataframe(
-                df_show.style.applymap(
-                    lambda _: f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"
-                ),
-                use_container_width=True, hide_index=True,
-                height=min(700, 38 + len(df_show) * 35),
-            )
 
 
 # ══════════════════════════════════════════
