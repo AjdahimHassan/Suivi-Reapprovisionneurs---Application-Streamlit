@@ -10,6 +10,7 @@ import datetime
 
 from planning_parser import get_today_day_str, JOURS
 import page_planogrammes
+import page_inventaires
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -48,7 +49,7 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_rest = st.columns([2, 2, 6])
+nav_c1, nav_c2, nav_c3, nav_rest = st.columns([2, 2, 2, 4])
 with nav_c1:
     if st.button(
         "📦  Suivi Réapprovisionneurs",
@@ -66,6 +67,15 @@ with nav_c2:
         type="primary" if st.session_state.page == "planogrammes" else "secondary",
     ):
         st.session_state.page = "planogrammes"
+        st.rerun()
+with nav_c3:
+    if st.button(
+        "📊  Inventaires",
+        key="nav_inv",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "inventaires" else "secondary",
+    ):
+        st.session_state.page = "inventaires"
         st.rerun()
 
 st.divider()
@@ -368,3 +378,18 @@ elif st.session_state.page == "planogrammes":
     )
 
     page_planogrammes.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : INVENTAIRES
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "inventaires":
+
+    st.markdown('<div class="main-title">📊 Suivi des Inventaires</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Analysez les inventaires machines par réappro — '
+        'contrôle des seuils, produits manquants, statuts.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_inventaires.render()
