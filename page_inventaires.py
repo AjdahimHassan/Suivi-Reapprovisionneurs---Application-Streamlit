@@ -156,28 +156,102 @@ def _parse_planning_for_reappro(planning_dict: dict) -> dict:
     return result
 
 
+def _build_joker_index(df_inv: pd.DataFrame, plannings_mongo: dict) -> dict:
+    """
+    Construit un index des jokers : inventaires faits par un réappro
+    pour les salles planifiées par un autre réappro le même jour.
+
+    Retourne :
+    {
+      reappro_prevu: {
+        date_str: [
+          {"code", "label", "machine", "fait_par": reappro_fait}, ...
+        ]
+      }
+    }
+    """
+    # Index planning complet : {code: [(reappro, jour, label, machine), ...]}
+    code_plan_idx: dict = {}
+    for reappro, planning_raw in plannings_mongo.items():
+        for jour, salles in planning_raw.items():
+            if jour not in WEEKDAY_TO_JOUR.values():
+                continue
+            for salle in salles:
+                if len(salle) < 2:
+                    continue
+                client_full = str(salle[0]).strip()
+                machine     = str(salle[1]).strip()
+                code  = client_full.split(" - ")[0].strip() if " - " in client_full else client_full
+                label = client_full.split(" - ", 1)[1].strip() if " - " in client_full else client_full
+                if code not in code_plan_idx:
+                    code_plan_idx[code] = []
+                code_plan_idx[code].append((reappro, jour, label, machine))
+
+    # Pour chaque inventaire réalisé, vérifier si le code appartient
+    # au planning d'un AUTRE réappro ce même jour
+    inv_unique = (
+        df_inv[["Code client", "Ressource", "Date", "Nom client"]]
+        .drop_duplicates(subset=["Code client", "Ressource", "Date"])
+    )
+
+    joker_index: dict = {}  # {reappro_prevu: {date: [{code, label, machine, fait_par}]}}
+
+    for _, row in inv_unique.iterrows():
+        code         = row["Code client"]
+        reappro_inv  = row["Ressource"]
+        date_str     = row["Date"]
+
+        if code not in code_plan_idx:
+            continue
+
+        try:
+            dt = datetime.datetime.strptime(date_str, "%d/%m/%Y")
+        except ValueError:
+            continue
+        jour_fait = WEEKDAY_TO_JOUR.get(dt.weekday())
+        if not jour_fait:
+            continue
+
+        seen = set()  # deduplicate (planned_reappro, code) pairs
+        for (planned_reappro, planned_jour, label, machine) in code_plan_idx[code]:
+            dedup_key = (planned_reappro, code)
+            if planned_reappro != reappro_inv and planned_jour == jour_fait and dedup_key not in seen:
+                seen.add(dedup_key)
+                if planned_reappro not in joker_index:
+                    joker_index[planned_reappro] = {}
+                if date_str not in joker_index[planned_reappro]:
+                    joker_index[planned_reappro][date_str] = []
+                joker_index[planned_reappro][date_str].append({
+                    "code":     code,
+                    "label":    label,
+                    "machine":  machine,
+                    "fait_par": reappro_inv,
+                })
+
+    return joker_index
+
+
 def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) -> dict:
     """
     Retourne :
     {
       reappro: {
         date_str: {
-          "jour_fr":     str,
-          "nb_planifie": int,
-          "nb_fait":     int,
-          "planifie":    [{code, label, machine}, ...],
-          "fait":        [code, ...],
-          "manquants":   [{code, label, machine}, ...],
-          "deja_fait_semaine": [code, ...],  # double passage : fait un autre jour cette semaine
+          "jour_fr":           str,
+          "nb_planifie":       int,
+          "nb_fait":           int,
+          "planifie":          [{code, label, machine}, ...],
+          "fait":              [code, ...],
+          "manquants":         [{code, label, machine}, ...],
+          "deja_fait_semaine": [{code, label, machine}, ...],
+          "jokers":            [{code, label, machine, fait_par}, ...],
         }
       }
     }
 
-    Règle double passage :
-      Si une machine est planifiée le jour J mais pas inventoriée ce jour-là,
-      on vérifie si elle a été inventoriée un autre jour de la même semaine ISO.
-      Si c'est le cas → elle n'est PAS comptée comme manquante (juste signalée
-      comme "déjà fait cette semaine").
+    Règles :
+      - Double passage : planifié ce jour mais inventaire fait un autre jour de la semaine ISO.
+      - Joker : planifié par ce réappro mais inventaire fait par un autre réappro le même jour.
     """
     planning_index = {
         r: _parse_planning_for_reappro(p)
@@ -202,7 +276,21 @@ def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) 
         .reset_index()
     )
 
+    # Joker index : {reappro_prevu: {date: [{code, label, machine, fait_par}]}}
+    joker_index = _build_joker_index(df_inv, plannings_mongo)
+
+    # All codes inventoried globally on each date (any reappro)
+    # used to detect jokers for reappros that have no inventories themselves
+    all_done_by_date: dict = {}
+    for _, row in inv_done.iterrows():
+        d = row["Date"]
+        if d not in all_done_by_date:
+            all_done_by_date[d] = set()
+        all_done_by_date[d] |= row["Code client"]
+
     results = {}
+
+    # Process reappros that have inventories
     for _, row in inv_done.iterrows():
         reappro    = row["Ressource"]
         date_str   = row["Date"]
@@ -219,35 +307,75 @@ def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) 
         if not jour_fr or jour_fr not in planning_index[reappro]:
             continue
 
-        jour_plan     = planning_index[reappro][jour_fr]
-        planned_codes = set(jour_plan.keys())
-        fait_codes    = done_codes & planned_codes
-        manquants_bruts = planned_codes - done_codes
+        _populate_result(
+            results, reappro, date_str, jour_fr, dt,
+            planning_index[reappro][jour_fr],
+            done_codes, codes_by_week,
+            joker_index.get(reappro, {}).get(date_str, []),
+        )
 
-        # Filtrage double passage :
-        # Pour les manquants, vérifier si l'inventaire a été fait un autre jour cette semaine
-        iso_cal = dt.isocalendar()
-        iso_year = iso_cal[0]
-        iso_week = iso_cal[1]
-        codes_faits_semaine = codes_by_week.get((reappro, iso_year, iso_week), set())
-
-        deja_fait_semaine = sorted(manquants_bruts & codes_faits_semaine)
-        manquants_reels   = manquants_bruts - codes_faits_semaine
-
-        if reappro not in results:
-            results[reappro] = {}
-
-        results[reappro][date_str] = {
-            "jour_fr":            jour_fr,
-            "nb_planifie":        len(planned_codes),
-            "nb_fait":            len(fait_codes) + len(deja_fait_semaine),
-            "planifie":           [{"code": c, **v} for c, v in jour_plan.items()],
-            "fait":               sorted(fait_codes),
-            "manquants":          [{"code": c, **jour_plan[c]} for c in sorted(manquants_reels)],
-            "deja_fait_semaine":  [{"code": c, **jour_plan[c]} for c in deja_fait_semaine],
-        }
+    # Also process reappros with NO inventories but who have jokers or are completely absent
+    for reappro, planning in planning_index.items():
+        for date_str in sorted(all_done_by_date.keys()):
+            if reappro in results and date_str in results[reappro]:
+                continue  # already processed
+            try:
+                dt = datetime.datetime.strptime(date_str, "%d/%m/%Y")
+            except ValueError:
+                continue
+            jour_fr = WEEKDAY_TO_JOUR.get(dt.weekday())
+            if not jour_fr or jour_fr not in planning:
+                continue
+            # Only add if there are jokers for this reappro on this date
+            jokers_today = joker_index.get(reappro, {}).get(date_str, [])
+            if jokers_today:
+                _populate_result(
+                    results, reappro, date_str, jour_fr, dt,
+                    planning[jour_fr],
+                    set(),  # no own inventories
+                    codes_by_week,
+                    jokers_today,
+                )
 
     return results
+
+
+def _populate_result(
+    results: dict,
+    reappro: str,
+    date_str: str,
+    jour_fr: str,
+    dt: datetime.datetime,
+    jour_plan: dict,
+    done_codes: set,
+    codes_by_week: dict,
+    jokers_today: list,
+) -> None:
+    """Calcule et insère le résultat pour (reappro, date) dans results."""
+    planned_codes   = set(jour_plan.keys())
+    fait_codes      = done_codes & planned_codes
+    joker_codes     = {j["code"] for j in jokers_today}
+    manquants_bruts = planned_codes - done_codes - joker_codes
+
+    iso_cal  = dt.isocalendar()
+    codes_faits_semaine = codes_by_week.get((reappro, iso_cal[0], iso_cal[1]), set())
+
+    deja_fait_semaine = sorted(manquants_bruts & codes_faits_semaine)
+    manquants_reels   = manquants_bruts - codes_faits_semaine
+
+    if reappro not in results:
+        results[reappro] = {}
+
+    results[reappro][date_str] = {
+        "jour_fr":            jour_fr,
+        "nb_planifie":        len(planned_codes),
+        "nb_fait":            len(fait_codes) + len(deja_fait_semaine) + len(joker_codes),
+        "planifie":           [{"code": c, **v} for c, v in jour_plan.items()],
+        "fait":               sorted(fait_codes),
+        "manquants":          [{"code": c, **jour_plan[c]} for c in sorted(manquants_reels)],
+        "deja_fait_semaine":  [{"code": c, **jour_plan[c]} for c in deja_fait_semaine],
+        "jokers":             jokers_today,
+    }
 
 
 # ══════════════════════════════════════════
@@ -503,6 +631,23 @@ def render():
                                 ),
                                 hide_index=True, use_container_width=True,
                                 height=min(200, 38 + len(rows_deja) * 35),
+                            )
+
+                        # Jokers : fait par un autre réappro
+                        jokers = d.get("jokers", [])
+                        if jokers:
+                            st.markdown(f"**🔀 Jokers — inventorié par un autre réappro ({len(jokers)}) :**")
+                            rows_j = [
+                                {"Code client": j["code"], "Salle": j["label"],
+                                 "Machine": j["machine"], "Fait par": j["fait_par"]}
+                                for j in jokers
+                            ]
+                            st.dataframe(
+                                pd.DataFrame(rows_j).style.applymap(
+                                    lambda _: f"background-color:#6C3483; color:{WHITE}; font-weight:600"
+                                ),
+                                hide_index=True, use_container_width=True,
+                                height=min(200, 38 + len(rows_j) * 35),
                             )
 
     # ════════════════════════════════════════
@@ -865,16 +1010,49 @@ def _build_export_rows(
                     else:
                         statut_inv = "OK"
                     prods = missing_idx.get(inv_row["Num Piece"], [])
+                    fait_par = reappro
                 elif code not in codes_fait_today and code in codes_fait_week:
                     total = smin = smax = ecart = machine_type = None
                     statut_plan = "Double passage"
                     statut_inv  = "-"
                     prods       = []
+                    fait_par    = reappro
                 else:
-                    total = smin = smax = ecart = machine_type = None
-                    statut_plan = "Non fait"
-                    statut_inv  = "Non fait"
-                    prods       = []
+                    # Check joker: was it inventoried by another reappro on the same date?
+                    joker_reappro = None
+                    for (other_r, other_d), other_codes in inv_by_date.items():
+                        if other_r != reappro and other_d == date_str and code in other_codes:
+                            joker_reappro = other_r
+                            break
+
+                    if joker_reappro:
+                        joker_key = (joker_reappro, code, date_str)
+                        joker_inv = inv_idx.get(joker_key)
+                        if joker_inv is not None:
+                            total        = joker_inv["total"]
+                            smin         = joker_inv["seuil_min"]
+                            smax         = joker_inv["seuil_max"]
+                            machine_type = joker_inv["type_label"]
+                            ecart        = joker_inv["ecart_min"]
+                            if joker_inv["total"] < smin:
+                                statut_inv = "Mal fait"
+                            elif joker_inv["total"] > smax:
+                                statut_inv = "Au-dessus max"
+                            else:
+                                statut_inv = "OK"
+                            prods = missing_idx.get(joker_inv["Num Piece"], [])
+                        else:
+                            total = smin = smax = ecart = machine_type = None
+                            statut_inv = "-"
+                            prods = []
+                        statut_plan = f"Joker ({joker_reappro})"
+                        fait_par    = joker_reappro
+                    else:
+                        total = smin = smax = ecart = machine_type = None
+                        statut_plan = "Non fait"
+                        statut_inv  = "Non fait"
+                        prods       = []
+                        fait_par    = ""
 
                 rows.append({
                     "reappro":      reappro,
@@ -891,6 +1069,7 @@ def _build_export_rows(
                     "ecart":        ecart,
                     "statut_inv":   statut_inv,
                     "produits":     prods,
+                    "fait_par":     fait_par if statut_plan.startswith("Joker") else "",
                 })
 
     return rows
@@ -945,13 +1124,14 @@ def _export_excel(
         "-":                     (C_GREY_BG, C_DARK,   False),
         "Non fait (inv)":        (C_BAD_BG,  C_BAD_FG, True),
     }
+    # Joker entries added dynamically below since the reappro name is in the key
 
     # Column definitions for detail sheets: (header, width)
     DETAIL_COLS = [
         ("Date",             11), ("Jour",          10), ("Salle",            36),
-        ("Machine",           9), ("Type machine",  16), ("Statut planning",  18),
-        ("Montant HT",       13), ("Seuil min",     11), ("Seuil max",        11),
-        ("Écart min",        11), ("Statut inv.",   14), ("Produits épuisés", 52),
+        ("Machine",           9), ("Type machine",  16), ("Statut planning",  22),
+        ("Fait par",         12), ("Montant HT",    13), ("Statut inv.",      14),
+        ("Produits épuisés", 52),
     ]
     N = len(DETAIL_COLS)
 
@@ -1002,6 +1182,11 @@ def _export_excel(
             elif si == "Au-dessus max": d["au_dessus"] += 1
         elif sp == "Non fait":     d["non_fait"] += 1
         elif sp == "Double passage": d["double"] += 1
+        elif sp.startswith("Joker"):
+            # Joker = fait, compté comme tel
+            d["fait"] += 1; d["total_eur"] += r["total"] or 0
+            if si == "Mal fait":       d["mal_fait"] += 1
+            elif si == "Au-dessus max": d["au_dessus"] += 1
 
     ri = 3
     for (reappro, date_str, jour), d in sorted(recap.items()):
@@ -1085,6 +1270,8 @@ def _export_excel(
                 row_bg = C_BAD_BG
             elif sp == "Double passage":
                 row_bg = C_DOUB_BG
+            elif sp.startswith("Joker"):
+                row_bg = "F3E5F5"  # violet très clair
             elif si == "Mal fait":
                 row_bg = C_BAD_BG
             elif si == "Au-dessus max":
@@ -1098,11 +1285,14 @@ def _export_excel(
             has_prods = bool(prods_str)
             ws.row_dimensions[ri].height = 20 if has_prods else 16
 
+            is_joker = sp.startswith("Joker")
             values = [
                 r["date"], r["jour"], r["salle"], r["machine"],
-                r["machine_type"] or "-", sp,
-                r["total"], r["seuil_min"], r["seuil_max"],
-                r["ecart"], si, prods_str,
+                r["machine_type"] or "-",
+                sp,
+                r.get("fait_par", "") or "",
+                r["total"],
+                si, prods_str,
             ]
 
             for ci, v in enumerate(values, 1):
@@ -1111,27 +1301,35 @@ def _export_excel(
                 c.font = _font(size=9)
                 c.border = _brd
                 c.alignment = _align(
-                    "center" if ci in (1, 2, 4, 7, 8, 9, 10) else "left",
-                    wrap=(ci == 12),
+                    "center" if ci in (1, 2, 4, 8) else "left",
+                    wrap=(ci == 10),
                 )
-                if ci in (7, 8, 9, 10) and isinstance(v, (int, float)):
+                if ci == 8 and isinstance(v, (int, float)):
                     c.number_format = "#,##0.00 €"
 
                 # Statut planning cell (col 6) — colored badge
                 if ci == 6:
-                    bg, fg, bold = STATUS_STYLE.get(sp, (C_GREY_BG, C_DARK, False))
+                    if is_joker:
+                        bg, fg, bold = "E8D5F5", "6C3483", True
+                    else:
+                        bg, fg, bold = STATUS_STYLE.get(sp, (C_GREY_BG, C_DARK, False))
                     c.fill = _fill(bg); c.font = _font(bold, fg, 9)
                     c.alignment = _align("center")
 
-                # Statut inventaire cell (col 11) — colored badge
-                if ci == 11:
-                    key = si if si in STATUS_STYLE else "Non fait (inv)"
+                # Fait par cell (col 7) — violet if joker
+                if ci == 7 and v:
+                    c.fill = _fill("E8D5F5")
+                    c.font = _font(True, "6C3483", 9)
+                    c.alignment = _align("center")
+
+                # Statut inventaire cell (col 9) — colored badge
+                if ci == 9:
                     bg, fg, bold = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
                     c.fill = _fill(bg); c.font = _font(bold, fg, 9)
                     c.alignment = _align("center")
 
-                # Produits épuisés cell (col 12) — red if present
-                if ci == 12 and has_prods:
+                # Produits épuisés cell (col 10) — red if present
+                if ci == 10 and has_prods:
                     c.fill = _fill("FFCCCC")
                     c.font = _font(True, C_BAD_FG, 9)
 
