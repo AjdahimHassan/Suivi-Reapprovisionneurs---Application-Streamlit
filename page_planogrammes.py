@@ -595,6 +595,11 @@ def _view_library():
             st.session_state.pg_view = "list"
             st.rerun()
 
+    # Afficher résultat de l'import si disponible
+    if st.session_state.get("_excel_import_result"):
+        added, updated, skipped = st.session_state.pop("_excel_import_result")
+        st.success(f"✅ Import terminé : **{added}** ajoutés · **{updated}** mis à jour · **{skipped}** ignorés")
+
     sc1, sc2 = st.columns([3, 2])
     with sc1:
         search = st.text_input("🔍 Rechercher", placeholder="Nom, code ou catégorie…", key="lib_search")
@@ -1380,26 +1385,33 @@ def _view_import_produits_excel():
         cat_default = st.text_input("Catégorie par défaut", placeholder="ex: Boissons, Barres…")
         mode = st.radio(
             "Mode d'import",
-            ["Ajouter les nouveaux seulement (ne pas écraser)", "Écraser si même code", "Tout réimporter (doublons possibles)"],
+            ["Ajouter les nouveaux seulement (ne pas écraser)", "Écraser si même code"],
             index=1
         )
         submitted = st.form_submit_button("✅ Importer", type="primary", use_container_width=True)
 
-    if submitted:
+    # Guard anti-doublon : on exécute l'import une seule fois grâce au flag
+    if submitted and not st.session_state.get("_excel_import_done"):
+        st.session_state["_excel_import_done"] = True
+
         produits_existants = _get_produits()
-        codes_existants = {p.get("code", "").upper(): p["_id"] for p in produits_existants}
+        codes_existants = {p.get("code", "").upper(): p["_id"]
+                           for p in produits_existants if p.get("code")}
 
         added = updated = skipped = 0
+
         for _, row in df.iterrows():
             nom = str(row.get(col_map.get("nom", ""), "")).strip()
             if not nom or nom.lower() == "nan":
                 continue
 
             code = str(row.get(col_map.get("code", ""), "")).strip().upper() if "code" in col_map else ""
+            if code == "NAN":
+                code = ""
 
-            def _fval(field):
+            def _fval(field, _row=row):
                 if field not in col_map: return ""
-                val = row.get(col_map[field], "")
+                val = _row.get(col_map[field], "")
                 try:
                     f = float(val)
                     return f"{f:.4f}" if f else ""
@@ -1435,7 +1447,7 @@ def _view_import_produits_excel():
                 save_produit(produit)
                 added += 1
 
-            elif mode == "Écraser si même code":
+            else:  # Écraser si même code
                 if code and code in codes_existants:
                     produit["_id"] = codes_existants[code]
                     save_produit(produit)
@@ -1444,14 +1456,13 @@ def _view_import_produits_excel():
                     save_produit(produit)
                     added += 1
 
-            else:  # Tout réimporter
-                save_produit(produit)
-                added += 1
-
         _reload_produits()
-        st.success(f"✅ Import terminé : **{added}** ajoutés · **{updated}** mis à jour · **{skipped}** ignorés")
+        st.session_state["_excel_import_result"] = (added, updated, skipped)
         st.session_state.pg_view = "library"
         st.rerun()
+
+    # Nettoyage du flag après le rerun
+    st.session_state.pop("_excel_import_done", None)
 
 
 # ════════════════════════════════════════════════════════
