@@ -515,9 +515,15 @@ def _view_editor():
                 if choice != "— Choisir dans la bibliothèque —":
                     prod_obj = next((pr for pr in produits if pr["nom"] == choice), None)
                     if prod_obj and st.button("↙️ Appliquer ce produit", type="primary", key=f"apply_lib_{sel}"):
+                        # Utiliser prix_ttc en priorité, sinon prix_ht
+                        prix_slot = prod_obj.get("prix_ttc", "") or prod_obj.get("prix_ht", "") or prod_obj.get("prix", "")
+                        try:
+                            prix_slot = f"{float(prix_slot):.2f}" if prix_slot else ""
+                        except Exception:
+                            pass
                         p["slots"][sel] = {
                             "product": prod_obj["nom"],
-                            "price":   prod_obj.get("prix", ""),
+                            "price":   prix_slot,
                             "qty":     prod_obj.get("quantite", ""),
                             "color":   prod_obj.get("couleur", ""),
                         }
@@ -573,7 +579,7 @@ def _view_editor():
 def _view_library():
     produits = _get_produits()
 
-    hc1, hc2, hc3 = st.columns([4, 2, 2])
+    hc1, hc2, hc3, hc4 = st.columns([3, 2, 2, 2])
     with hc1:
         st.markdown("### 📦 Bibliothèque de produits")
     with hc2:
@@ -581,49 +587,78 @@ def _view_library():
             st.session_state.pg_view = "new_product"
             st.rerun()
     with hc3:
+        if st.button("↑ Import Excel", use_container_width=True):
+            st.session_state.pg_view = "import_produits_excel"
+            st.rerun()
+    with hc4:
         if st.button("← Retour aux planogrammes", use_container_width=True):
             st.session_state.pg_view = "list"
             st.rerun()
 
-    search = st.text_input("🔍 Rechercher", placeholder="Nom ou catégorie…", key="lib_search")
+    sc1, sc2 = st.columns([3, 2])
+    with sc1:
+        search = st.text_input("🔍 Rechercher", placeholder="Nom, code ou catégorie…", key="lib_search")
+    with sc2:
+        cats = sorted(set(p.get("categorie", "") for p in produits if p.get("categorie")))
+        cat_filter = st.selectbox("Catégorie", ["Toutes"] + cats, key="lib_cat_filter")
 
     filtered = [p for p in produits
-                if not search or search.lower() in p["nom"].lower()
-                or search.lower() in p.get("categorie", "").lower()]
+                if (not search or search.lower() in p["nom"].lower()
+                    or search.lower() in p.get("code", "").lower()
+                    or search.lower() in p.get("categorie", "").lower())
+                and (cat_filter == "Toutes" or p.get("categorie", "") == cat_filter)]
+
+    if filtered:
+        st.caption(f"{len(filtered)} produit(s) · Stock total estimé : **{sum(_marge_produit(p)[2] for p in filtered if p.get('prix_ttc')):.2f} €** valeur TTC")
 
     if not filtered:
-        st.info("Aucun produit." + (" Aucun résultat pour cette recherche." if search else " Ajoutez-en un !"))
+        st.info("Aucun produit." + (" Aucun résultat pour cette recherche." if search else " Ajoutez-en un ou importez un fichier Excel !"))
         return
 
-    cols_per_row = 4
-    for i in range(0, len(filtered), cols_per_row):
-        batch = filtered[i:i + cols_per_row]
-        cols  = st.columns(cols_per_row)
-        for j, pr in enumerate(batch):
-            with cols[j]:
-                with st.container(border=True):
-                    color_dot = _slot_color_badge(pr.get("couleur", ""))
-                    st.markdown(
-                        f'{color_dot}<strong>{pr["nom"]}</strong>',
-                        unsafe_allow_html=True
-                    )
-                    info = []
-                    if pr.get("prix"):     info.append(f"{float(pr['prix']):.2f} €")
-                    if pr.get("quantite"): info.append(f"×{pr['quantite']}")
-                    if pr.get("categorie"): info.append(pr["categorie"])
-                    st.caption(" · ".join(info) if info else "—")
+    # Tableau récapitulatif
+    rows = []
+    for pr in filtered:
+        marge_ht, marge_pct, _ = _marge_produit(pr)
+        rows.append({
+            "Code":          pr.get("code", "—"),
+            "Nom":           pr["nom"],
+            "Catégorie":     pr.get("categorie", "—"),
+            "P.U. HT":       f"{float(pr['prix_ht']):.2f} €"  if pr.get("prix_ht")  else "—",
+            "Prix achat":    f"{float(pr['prix_achat']):.2f} €" if pr.get("prix_achat") else "—",
+            "TVA":           f"{float(pr['tva']):.1f} %"       if pr.get("tva")      else "—",
+            "Prix TTC":      f"{float(pr['prix_ttc']):.2f} €" if pr.get("prix_ttc") else "—",
+            "Marge HT":      f"{marge_ht:.2f} €" if marge_ht is not None else "—",
+            "Marge %":       f"{marge_pct:.1f} %" if marge_pct is not None else "—",
+            "Couleur":       pr.get("couleur", ""),
+        })
 
-                    bc1, bc2 = st.columns(2)
-                    with bc1:
-                        if st.button("✏️", key=f"editpr_{pr['_id']}", use_container_width=True):
-                            st.session_state["edit_product_id"] = pr["_id"]
-                            st.session_state.pg_view = "new_product"
-                            st.rerun()
-                    with bc2:
-                        if st.button("🗑️", key=f"delpr_{pr['_id']}", use_container_width=True):
-                            delete_produit(pr["_id"])
-                            _reload_produits()
-                            st.rerun()
+    df_lib = pd.DataFrame(rows)
+
+    # Affichage tableau + boutons par ligne
+    st.dataframe(
+        df_lib.drop(columns=["Couleur"]),
+        use_container_width=True,
+        hide_index=True,
+        height=min(600, 38 + len(df_lib) * 35),
+    )
+
+    st.divider()
+    st.caption("Actions sur un produit :")
+    ac1, ac2, ac3 = st.columns([3, 1, 1])
+    with ac1:
+        prod_names = [f"{p.get('code','')} — {p['nom']}" for p in filtered]
+        selected_name = st.selectbox("Sélectionner un produit", prod_names, key="lib_action_select", label_visibility="collapsed")
+        selected_pr = filtered[prod_names.index(selected_name)] if selected_name else None
+    with ac2:
+        if selected_pr and st.button("✏️ Modifier", use_container_width=True):
+            st.session_state["edit_product_id"] = selected_pr["_id"]
+            st.session_state.pg_view = "new_product"
+            st.rerun()
+    with ac3:
+        if selected_pr and st.button("🗑️ Supprimer", use_container_width=True):
+            delete_produit(selected_pr["_id"])
+            _reload_produits()
+            st.rerun()
 
 
 # ════════════════════════════════════════════════════════
@@ -638,19 +673,43 @@ def _view_new_product():
     title = "✏️ Modifier le produit" if existing else "➕ Ajouter un produit"
     st.markdown(f"### {title}")
 
-    with st.form("form_product"):
-        nom  = st.text_input("Nom du produit *", value=existing["nom"] if existing else "")
-        c1, c2 = st.columns(2)
+    def _v(field, default=""):
+        return existing.get(field, default) if existing else default
+
+    with st.form(key=f"form_product_{edit_id or 'new'}"):
+        c1, c2 = st.columns([2, 1])
         with c1:
-            prix = st.text_input("Prix (€)", value=existing.get("prix", "") if existing else "")
+            nom  = st.text_input("Nom du produit *", value=_v("nom"))
         with c2:
-            qte  = st.text_input("Quantité ×", value=existing.get("quantite", "") if existing else "")
-        cat  = st.text_input("Catégorie", value=existing.get("categorie", "") if existing else "",
-                             placeholder="Boissons, Barres, Accessoires…")
-        color_names = list(SLOT_COLORS.keys())
-        cur_color = existing.get("couleur", "") if existing else ""
-        cur_color_name = next((n for n, v in SLOT_COLORS.items() if v == cur_color), "Aucune")
-        col_choice = st.selectbox("Couleur", color_names, index=color_names.index(cur_color_name))
+            code = st.text_input("Code", value=_v("code"), placeholder="ex: REDBULL25CL")
+
+        c3, c4 = st.columns(2)
+        with c3:
+            cat = st.text_input("Catégorie", value=_v("categorie"), placeholder="Boissons, Barres, Accessoires…")
+        with c4:
+            color_names = list(SLOT_COLORS.keys())
+            cur_color_name = next((n for n, v in SLOT_COLORS.items() if v == _v("couleur")), "Aucune")
+            col_choice = st.selectbox("Couleur d'affichage", color_names, index=color_names.index(cur_color_name))
+
+        st.markdown("**Prix**")
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            prix_ht    = st.text_input("P.U. HT (€)",        value=_v("prix_ht"),    placeholder="3.51")
+        with p2:
+            prix_achat = st.text_input("Prix achat unitaire (€)", value=_v("prix_achat"), placeholder="1.13")
+        with p3:
+            tva        = st.text_input("TVA (%)",              value=_v("tva"),       placeholder="5.5")
+
+        # Calcul auto Prix TTC
+        prix_ttc_val = ""
+        try:
+            ht  = float(prix_ht.replace(",", ".")) if prix_ht else None
+            t   = float(str(tva).replace(",", ".")) if tva else None
+            if ht and t is not None:
+                prix_ttc_val = f"{ht * (1 + t/100):.4f}"
+        except Exception:
+            pass
+        prix_ttc = st.text_input("Prix TTC (€) — calculé auto", value=prix_ttc_val, placeholder="3.70")
 
         submitted = st.form_submit_button("Enregistrer", type="primary", use_container_width=True)
 
@@ -659,11 +718,14 @@ def _view_new_product():
             st.error("Le nom est obligatoire.")
             return
         produit = {
-            "nom":       nom.strip(),
-            "prix":      prix.strip(),
-            "quantite":  qte.strip(),
-            "categorie": cat.strip(),
-            "couleur":   SLOT_COLORS[col_choice],
+            "nom":        nom.strip(),
+            "code":       code.strip().upper(),
+            "categorie":  cat.strip(),
+            "couleur":    SLOT_COLORS[col_choice],
+            "prix_ht":    prix_ht.strip().replace(",", "."),
+            "prix_achat": prix_achat.strip().replace(",", "."),
+            "tva":        str(tva).strip().replace(",", "."),
+            "prix_ttc":   prix_ttc.strip().replace(",", "."),
         }
         if existing:
             produit["_id"] = existing["_id"]
@@ -1244,6 +1306,155 @@ def _view_import_pdf():
 
 
 # ════════════════════════════════════════════════════════
+# HELPER MARGE
+# ════════════════════════════════════════════════════════
+
+def _marge_produit(pr: dict):
+    """Retourne (marge_ht, marge_pct, valeur_ttc) ou (None, None, 0)."""
+    try:
+        ht     = float(pr.get("prix_ht", 0) or 0)
+        achat  = float(pr.get("prix_achat", 0) or 0)
+        ttc    = float(pr.get("prix_ttc", 0) or 0)
+        if ht and achat:
+            marge_ht  = ht - achat
+            marge_pct = (marge_ht / ht * 100) if ht else 0
+            return round(marge_ht, 4), round(marge_pct, 2), round(ttc, 4)
+    except Exception:
+        pass
+    return None, None, 0.0
+
+
+# ════════════════════════════════════════════════════════
+# VUE : IMPORT PRODUITS DEPUIS EXCEL
+# ════════════════════════════════════════════════════════
+
+def _view_import_produits_excel():
+    st.markdown("### ↑ Importer des produits depuis Excel")
+
+    if st.button("← Retour à la bibliothèque"):
+        st.session_state.pg_view = "library"
+        st.rerun()
+
+    st.info(
+        "**Format attendu :** colonnes `Code`, `Nom`, `P.U. HT`, `Prix unit. achat`, `TVA`, `Prix TTC`. "
+        "Les colonnes supplémentaires sont ignorées."
+    )
+
+    uploaded = st.file_uploader(
+        "Fichier Excel (.xlsx)", type=["xlsx"],
+        key="excel_prod_uploader", label_visibility="collapsed"
+    )
+    if not uploaded:
+        return
+
+    try:
+        df = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Impossible de lire le fichier : {e}")
+        return
+
+    # Mapping flexible des colonnes
+    col_map = {}
+    for col in df.columns:
+        c = str(col).strip().lower()
+        if "code" in c:                          col_map["code"]       = col
+        elif "nom" in c:                          col_map["nom"]        = col
+        elif "p.u" in c or "pu ht" in c or (c == "p.u. ht"):
+                                                  col_map["prix_ht"]    = col
+        elif "achat" in c:                        col_map["prix_achat"] = col
+        elif "tva" in c:                          col_map["tva"]        = col
+        elif "ttc" in c:                          col_map["prix_ttc"]   = col
+
+    if "nom" not in col_map:
+        st.error("Colonne `Nom` introuvable dans le fichier.")
+        return
+
+    # Aperçu
+    st.success(f"✅ {len(df)} produit(s) détectés")
+    cols_found = {k: v for k, v in col_map.items()}
+    st.caption(f"Colonnes mappées : {cols_found}")
+    st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+
+    # Options
+    with st.form("form_import_excel_prod"):
+        cat_default = st.text_input("Catégorie par défaut", placeholder="ex: Boissons, Barres…")
+        mode = st.radio(
+            "Mode d'import",
+            ["Ajouter les nouveaux seulement (ne pas écraser)", "Écraser si même code", "Tout réimporter (doublons possibles)"],
+            index=1
+        )
+        submitted = st.form_submit_button("✅ Importer", type="primary", use_container_width=True)
+
+    if submitted:
+        produits_existants = _get_produits()
+        codes_existants = {p.get("code", "").upper(): p["_id"] for p in produits_existants}
+
+        added = updated = skipped = 0
+        for _, row in df.iterrows():
+            nom = str(row.get(col_map.get("nom", ""), "")).strip()
+            if not nom or nom.lower() == "nan":
+                continue
+
+            code = str(row.get(col_map.get("code", ""), "")).strip().upper() if "code" in col_map else ""
+
+            def _fval(field):
+                if field not in col_map: return ""
+                val = row.get(col_map[field], "")
+                try:
+                    f = float(val)
+                    return f"{f:.4f}" if f else ""
+                except Exception:
+                    return ""
+
+            # Calcul TTC auto si manquant
+            prix_ttc = _fval("prix_ttc")
+            if not prix_ttc:
+                try:
+                    ht  = float(_fval("prix_ht") or 0)
+                    tva = float(_fval("tva") or 0)
+                    if ht:
+                        prix_ttc = f"{ht * (1 + tva/100):.4f}"
+                except Exception:
+                    pass
+
+            produit = {
+                "nom":        nom,
+                "code":       code,
+                "categorie":  cat_default.strip() if cat_default.strip() else "",
+                "couleur":    "",
+                "prix_ht":    _fval("prix_ht"),
+                "prix_achat": _fval("prix_achat"),
+                "tva":        _fval("tva"),
+                "prix_ttc":   prix_ttc,
+            }
+
+            if mode == "Ajouter les nouveaux seulement (ne pas écraser)":
+                if code and code in codes_existants:
+                    skipped += 1
+                    continue
+                save_produit(produit)
+                added += 1
+
+            elif mode == "Écraser si même code":
+                if code and code in codes_existants:
+                    produit["_id"] = codes_existants[code]
+                    save_produit(produit)
+                    updated += 1
+                else:
+                    save_produit(produit)
+                    added += 1
+
+            else:  # Tout réimporter
+                save_produit(produit)
+                added += 1
+
+        _reload_produits()
+        st.success(f"✅ Import terminé : **{added}** ajoutés · **{updated}** mis à jour · **{skipped}** ignorés")
+        st.session_state.pg_view = "library"
+        st.rerun()
+
+
+# ════════════════════════════════════════════════════════
 # POINT D'ENTRÉE PRINCIPAL
 # ════════════════════════════════════════════════════════
 
@@ -1264,6 +1475,8 @@ def render():
         _view_new_product()
     elif view == "import_pdf":
         _view_import_pdf()
+    elif view == "import_produits_excel":
+        _view_import_produits_excel()
     else:
         st.session_state.pg_view = "list"
         st.rerun()

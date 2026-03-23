@@ -26,10 +26,13 @@ Structure produit bibliothèque :
 {
   "_id": ObjectId,
   "nom": "Red Bull 250ml",
-  "prix": "3.00",
-  "quantite": "9",
+  "code": "REDBULL25CL",
   "categorie": "Boissons",
   "couleur": "#1a2f47",
+  "prix_ht": "2.840",
+  "prix_achat": "1.130",
+  "tva": "5.5",
+  "prix_ttc": "2.9962",
   "created_at": "2026-03-19"
 }
 """
