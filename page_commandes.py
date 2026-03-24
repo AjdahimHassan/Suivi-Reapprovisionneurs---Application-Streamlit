@@ -67,7 +67,7 @@ PRODUITS_PAR_FOURNISSEUR = {
 
 def get_gemini_api_key():
     try:
-        return st.secrets["GEMINI_API_KEY"]
+        return st.secrets["gemini"]["api_key"]
     except (KeyError, FileNotFoundError):
         return os.environ.get("GEMINI_API_KEY", "")
 
