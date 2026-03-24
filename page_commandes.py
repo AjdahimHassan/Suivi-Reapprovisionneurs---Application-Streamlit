@@ -122,7 +122,8 @@ Tu dois retourner ce format JSON :
 
 Regles :
 - Pour chaque produit mentionne, trouve le meilleur match dans la liste des produits connus.
-- Si la quantite est en packs/palettes, convertis en nombre de packs.
+- Si la quantite est en packs/palettes, convertis en nombre de packs. Pour LIDIS : 1 palette Evian = 84 packs. Les quantites mentionnees sont toujours en nombre de packs sauf si "palette" est explicitement mentionne.
+- Pour LIDIS, le multiplicateur UVC est celui indique dans le nom du produit (x24, x12). Exemple : "50CL Volvic Juicy Fraise x12" signifie 12 unites par pack, pas 24.
 - Si la date n'est pas mentionnee, utilise aujourd'hui : {today}.
 - Si le depot n'est pas clairement mentionne, mets "Non precise".
 - Retourne UNIQUEMENT le JSON, rien d'autre."""
@@ -151,6 +152,8 @@ Regles :
 
 
 def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
+    from openpyxl.styles import Font, Border, Side, PatternFill
+    
     if fournisseur not in wb.sheetnames:
         st.error(f"Feuille '{fournisseur}' introuvable dans le fichier Excel.")
         return
@@ -165,6 +168,12 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
         dt = datetime.datetime.today()
 
     is_nxt = fournisseur == "NXT LEVEL"
+    max_col = ws.max_column or 16
+
+    thin = Side(style="thin")
+    thick = Side(style="medium")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    bold_font = Font(bold=True)
 
     for i, produit in enumerate(produits):
         row_num = next_row + i
@@ -184,6 +193,23 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
             if uvc:
                 ws.cell(row=row_num, column=5).value = uvc
             ws.cell(row=row_num, column=7).value = nom
+
+        # Appliquer gras + bordures fines sur toutes les colonnes de la ligne
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=row_num, column=col)
+            cell.font = bold_font
+            cell.border = thin_border
+
+    # Bordures épaisses extérieures sur le bloc inséré
+    nb = len(produits)
+    for col in range(1, max_col + 1):
+        for row_num in range(next_row, next_row + nb):
+            cell = ws.cell(row=row_num, column=col)
+            left   = thick if col == 1 else thin
+            right  = thick if col == max_col else thin
+            top    = thick if row_num == next_row else thin
+            bottom = thick if row_num == next_row + nb - 1 else thin
+            cell.border = Border(left=left, right=right, top=top, bottom=bottom)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
