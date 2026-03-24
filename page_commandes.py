@@ -89,11 +89,25 @@ PRODUITS_PAR_FOURNISSEUR = {
 # HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def get_gemini_api_key():
+def get_gemini_api_keys():
+    """Retourne la liste des clés API Gemini disponibles."""
+    keys = []
     try:
-        return st.secrets["gemini"]["api_key"]
+        k1 = st.secrets["gemini"]["api_key"]
+        if k1:
+            keys.append(k1)
     except (KeyError, FileNotFoundError):
-        return os.environ.get("GEMINI_API_KEY", "")
+        pass
+    try:
+        k2 = st.secrets["gemini"]["api_key_2"]
+        if k2:
+            keys.append(k2)
+    except (KeyError, FileNotFoundError):
+        pass
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    if env_key and env_key not in keys:
+        keys.append(env_key)
+    return keys
 
 
 def _get_mongo_db():
@@ -167,9 +181,9 @@ def find_last_data_row(ws, header_row):
 
 
 def analyze_screenshot_with_gemini(image_bytes, mime, fournisseur):
-    api_key = get_gemini_api_key()
-    if not api_key:
-        raise ValueError("Clé GEMINI_API_KEY introuvable dans les secrets Streamlit.")
+    api_keys = get_gemini_api_keys()
+    if not api_keys:
+        raise ValueError("Aucune clé GEMINI_API_KEY trouvée dans les secrets Streamlit.")
 
     produits_list = "\n".join(f"- {p}" for p in PRODUITS_PAR_FOURNISSEUR[fournisseur])
     today = datetime.date.today().strftime("%d/%m/%Y")
@@ -218,9 +232,17 @@ Regles :
         ]
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={api_key}"
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
+    last_error = None
+    for api_key in api_keys:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={api_key}"
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 429:
+            last_error = resp
+            continue
+        resp.raise_for_status()
+        break
+    else:
+        last_error.raise_for_status()
 
     raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw = re.sub(r"^```json\s*", "", raw)
