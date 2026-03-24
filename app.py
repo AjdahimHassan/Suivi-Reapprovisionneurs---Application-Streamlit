@@ -12,6 +12,7 @@ from planning_parser import get_today_day_str, JOURS
 import page_planogrammes
 import page_inventaires
 import page_commandes
+import page_indefinis
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -50,7 +51,7 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_c4, nav_rest = st.columns([2, 2, 2, 2, 2])
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_rest = st.columns([2, 2, 2, 2, 2, 1])
 with nav_c1:
     if st.button(
         "📦  Suivi Réapprovisionneurs",
@@ -86,6 +87,15 @@ with nav_c4:
         type="primary" if st.session_state.page == "commandes" else "secondary",
     ):
         st.session_state.page = "commandes"
+        st.rerun()
+with nav_c5:
+    if st.button(
+        "❓  Indéfinis",
+        key="nav_indef",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "indefinis" else "secondary",
+    ):
+        st.session_state.page = "indefinis"
         st.rerun()
 
 st.divider()
@@ -417,3 +427,17 @@ elif st.session_state.page == "commandes":
     )
 
     page_commandes.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : INDÉFINIS
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "indefinis":
+
+    st.markdown('<div class="main-title">❓ Détection des Indéfinis</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Identifiez les lignes mal paramétrées qui génèrent des ventes en INDÉFINI.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_indefinis.render()
