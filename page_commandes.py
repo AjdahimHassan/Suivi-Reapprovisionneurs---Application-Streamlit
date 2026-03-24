@@ -39,21 +39,24 @@ HEROIC_PRODUCTS = [
 ]
 
 NUTRAMINO_PRODUCTS = [
+    "ON Essential AmiN.O. Energy +Electrolytes DRINK 250ML Tropical",
+    "ON HFSS Protein Bar 60g Chocolate Caramel",
+    "ON HFSS Protein Bar 68g White Chocolate",
     "Protein XL Shake 475ML Vanilla x12",
     "Protein XL Shake 475ML Chocolate x12",
     "Protein XL Shake 475ML Strawberry x12",
-    "On high protein shake van 500ML Gla-8 x10",
+    "Protein XL Shake 475ML Chocolate Banana x12",
     "Nutra-GO Shake 330ML Chocolate x12",
+    "Nutra-GO Shake 330ML Strawberry x12",
+    "Nutra-GO Shake 330ML Vanilla x12",
     "Pre Workout SHOT 60ML Berries x12",
     "Pre Workout SHOT 60ML Orange x12",
-    "HEAT Energy Drink 330ML- Low Caffeine Orange x24",
     "Protein Bar 55G Crispy Vanilla & Caramel x12",
-    "Protein Bar 55G Crispy Chocolate Brownie x12",
-    "Protein Bar 55G Chunky Peanut Caramel x12",
-    "Protein Bar 66G Coconut x12",
-    "Protein Wafer 39G Hazelnut Chocolate Chip x12",
-    "Protein Wafer 39G Vanilla Chocolate Chip x12",
+    "Protein Bar 55G Coconut x12",
+    "Protein Bar 55G Creamy Caramel x12",
     "Protein Wafer 39G Chocolate x12",
+    "Protein Wafer 39G Hazelnut x12",
+    "Protein Wafer 39G Vanilla x12",
 ]
 
 NXT_PRODUCTS = [
