@@ -229,8 +229,11 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
             cell_date = ws.cell(row=row_num, column=1)
             cell_date.value = dt
             cell_date.number_format = "DD/MM/YYYY"
-            # Nettoyer le depot : supprimer "Home Box ", "home box ", etc.
-            depot_clean = re.sub(r"(?i)home\s+box\s*[-–]?\s*", "", depot).strip()
+            # Nettoyer le depot : supprimer les prefixes connus pour ne garder que la ville
+            depot_clean = re.sub(r"(?i)(home\s+box|le\s+piece\s+qui\s+vous\s+manque|distriprot)\s*[-–]?\s*", "", depot).strip()
+            # Supprimer aussi les adresses (chiffres, "rue", "avenue", codes postaux)
+            depot_clean = re.sub(r"(?i)[-–]?\s*\d+.*$", "", depot_clean).strip()
+            depot_clean = re.sub(r"(?i)(rue|avenue|boulevard|impasse|chemin|place).*$", "", depot_clean).strip()
             ws.cell(row=row_num, column=4).value = depot_clean
 
         if is_nxt:
