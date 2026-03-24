@@ -48,6 +48,9 @@ def parse_ventes(file_bytes: bytes) -> pd.DataFrame:
             rename_map[c] = "CODE_CLIENT"
     df = df.rename(columns=rename_map)
 
+    # Dédupliquer après rename (au cas où deux colonnes source → même nom cible)
+    df = df.loc[:, ~df.columns.duplicated()]
+
     # Convertir PU en float
     if "PU" in df.columns:
         df["PU"] = df["PU"].str.replace(",", ".").str.strip()
@@ -381,13 +384,22 @@ def render():
             cols_v = ["CODE_MACHINE"] + cols_v
         if "CODE_CLIENT" in df_ventes.columns:
             cols_v = ["CODE_CLIENT"] + cols_v
-        df_v_show = df_ventes[[c for c in cols_v if c in df_ventes.columns]].copy()
+        # Sélectionner les colonnes disponibles en évitant tous les doublons
+        seen = set()
+        cols_v_dedup = []
+        for c in cols_v:
+            if c in df_ventes.columns and c not in seen:
+                cols_v_dedup.append(c)
+                seen.add(c)
+        df_v_show = df_ventes[cols_v_dedup].copy()
+        # S'assurer que les colonnes du df lui-même sont uniques
+        df_v_show = df_v_show.loc[:, ~df_v_show.columns.duplicated()]
         df_v_show = df_v_show.sort_values("LDP").reset_index(drop=True)
         df_v_show = df_v_show.rename(columns={
             "LDP": "Ligne", "CODE_PRODUIT": "Code Produit",
             "PU": "Prix (€)", "CODE_MACHINE": "Machine", "CODE_CLIENT": "Client"
         })
-        # Ajouter une colonne indicateur visuel pour les indéfinis
+        # Indicateur visuel pour les indéfinis
         df_v_show.insert(0, "⚠️", df_v_show["Code Produit"].str.upper().apply(
             lambda x: "🔴 INDÉFINI" if x == "INDEFINI" else ""
         ))
