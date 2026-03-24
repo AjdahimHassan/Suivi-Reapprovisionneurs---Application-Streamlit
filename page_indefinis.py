@@ -380,9 +380,14 @@ def render():
             cols_v = ["CODE_CLIENT"] + cols_v
         df_v_show = df_ventes[[c for c in cols_v if c in df_ventes.columns]].copy()
         df_v_show = df_v_show.sort_values("LDP")
+        # Renommer pour l'affichage
+        df_v_show = df_v_show.rename(columns={
+            "LDP": "Ligne", "CODE_PRODUIT": "Code Produit",
+            "PU": "Prix (€)", "CODE_MACHINE": "Machine", "CODE_CLIENT": "Client"
+        })
 
         def color_ventes(row):
-            if str(row.get("CODE_PRODUIT", "")).upper() == "INDEFINI":
+            if str(row.get("Code Produit", "")).upper() == "INDEFINI":
                 return ["background-color:#C0392B; color:#FFFFFF; font-weight:600"] * len(row)
             return [""] * len(row)
 
