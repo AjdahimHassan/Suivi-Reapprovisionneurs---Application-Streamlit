@@ -10,6 +10,7 @@ import io
 import json
 import datetime
 import re
+import os
 from openpyxl import load_workbook
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -103,7 +104,11 @@ def analyze_screenshot_with_claude(image_b64: str, mime: str, fournisseur: str) 
     Envoie le screenshot à Claude pour extraire les informations de commande.
     Retourne un dict avec date, depot, produits [{nom, quantite}].
     """
-    client = anthropic.Anthropic()
+    try:
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=api_key)
 
     produits_list = "\n".join(f"- {p}" for p in PRODUITS_PAR_FOURNISSEUR[fournisseur])
 
