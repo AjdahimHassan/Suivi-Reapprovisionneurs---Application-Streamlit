@@ -29,6 +29,9 @@ def parse_ventes(file_bytes: bytes) -> pd.DataFrame:
     for col in df.columns:
         df[col] = df[col].str.strip().str.strip('"')
 
+    # Dédupliquer les colonnes (garder la première occurrence)
+    df = df.loc[:, ~df.columns.duplicated()]
+
     # Normaliser les noms de colonnes attendus
     rename_map = {}
     for c in df.columns:
@@ -379,23 +382,16 @@ def render():
         if "CODE_CLIENT" in df_ventes.columns:
             cols_v = ["CODE_CLIENT"] + cols_v
         df_v_show = df_ventes[[c for c in cols_v if c in df_ventes.columns]].copy()
-        df_v_show = df_v_show.sort_values("LDP")
-        # Renommer pour l'affichage
+        df_v_show = df_v_show.sort_values("LDP").reset_index(drop=True)
         df_v_show = df_v_show.rename(columns={
             "LDP": "Ligne", "CODE_PRODUIT": "Code Produit",
             "PU": "Prix (€)", "CODE_MACHINE": "Machine", "CODE_CLIENT": "Client"
         })
-
-        def color_ventes(row):
-            if str(row.get("Code Produit", "")).upper() == "INDEFINI":
-                return ["background-color:#C0392B; color:#FFFFFF; font-weight:600"] * len(row)
-            return [""] * len(row)
-
-        st.dataframe(
-            df_v_show.style.apply(color_ventes, axis=1),
-            use_container_width=True,
-            hide_index=True,
-        )
+        # Ajouter une colonne indicateur visuel pour les indéfinis
+        df_v_show.insert(0, "⚠️", df_v_show["Code Produit"].str.upper().apply(
+            lambda x: "🔴 INDÉFINI" if x == "INDEFINI" else ""
+        ))
+        st.dataframe(df_v_show, use_container_width=True, hide_index=True)
 
     with st.expander("📋 Voir toutes les lignes du planogramme"):
         cols_p = ["LDP", "CODE_PRODUIT"]
