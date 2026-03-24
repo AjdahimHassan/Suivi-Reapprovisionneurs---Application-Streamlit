@@ -415,8 +415,23 @@ def render():
     excel_bytes_mongo = load_excel_from_mongo()
 
     if excel_bytes_mongo:
-        st.success("✅ Fichier Excel chargé depuis la base de données")
-        with st.expander("🔄 Remplacer le fichier Excel"):
+        col_status, col_dl, col_replace = st.columns([3, 2, 2])
+        with col_status:
+            st.success("✅ Fichier Excel chargé depuis la base de données")
+        with col_dl:
+            st.download_button(
+                label="⬇️ Télécharger le fichier actuel",
+                data=excel_bytes_mongo,
+                file_name="SPECIMEN Suivi commandes marchandises DA - MARS AVRIL.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="btn_dl_current",
+            )
+        with col_replace:
+            if st.button("🔄 Remplacer le fichier", use_container_width=True, key="btn_toggle_replace"):
+                st.session_state["show_replace"] = not st.session_state.get("show_replace", False)
+
+        if st.session_state.get("show_replace", False):
             new_file = st.file_uploader(
                 "Nouveau fichier Excel",
                 type=["xlsx"],
@@ -426,6 +441,7 @@ def render():
             if new_file and st.button("💾 Sauvegarder le nouveau fichier", key="btn_save_new"):
                 save_excel_to_mongo(new_file.read())
                 st.success("✅ Nouveau fichier sauvegardé !")
+                st.session_state["show_replace"] = False
                 st.rerun()
         excel_bytes_to_use = excel_bytes_mongo
     else:
