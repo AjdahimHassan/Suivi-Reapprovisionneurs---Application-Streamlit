@@ -38,6 +38,24 @@ HEROIC_PRODUCTS = [
     "HEROIC SPORT SAVEUR TROPICAL 500ML x6",
 ]
 
+NUTRAMINO_PRODUCTS = [
+    "Protein XL Shake 475ML Vanilla x12",
+    "Protein XL Shake 475ML Chocolate x12",
+    "Protein XL Shake 475ML Strawberry x12",
+    "On high protein shake van 500ML Gla-8 x10",
+    "Nutra-GO Shake 330ML Chocolate x12",
+    "Pre Workout SHOT 60ML Berries x12",
+    "Pre Workout SHOT 60ML Orange x12",
+    "HEAT Energy Drink 330ML- Low Caffeine Orange x24",
+    "Protein Bar 55G Crispy Vanilla & Caramel x12",
+    "Protein Bar 55G Crispy Chocolate Brownie x12",
+    "Protein Bar 55G Chunky Peanut Caramel x12",
+    "Protein Bar 66G Coconut x12",
+    "Protein Wafer 39G Hazelnut Chocolate Chip x12",
+    "Protein Wafer 39G Vanilla Chocolate Chip x12",
+    "Protein Wafer 39G Chocolate x12",
+]
+
 NXT_PRODUCTS = [
     "RTD Protein Shake Strawberry 330ml",
     "RTD Protein Shake Vanilla 330ml",
@@ -54,13 +72,14 @@ NXT_PRODUCTS = [
     "Basic-Fit - Vending Towel black",
 ]
 
-FOURNISSEURS = ["LIDIS", "HIPRO", "HEROIC", "NXT LEVEL"]
+FOURNISSEURS = ["LIDIS", "HIPRO", "HEROIC", "NXT LEVEL", "NUTRAMINO"]
 
 PRODUITS_PAR_FOURNISSEUR = {
     "LIDIS": LIDIS_PRODUCTS,
     "HIPRO": HIPRO_PRODUCTS,
     "HEROIC": HEROIC_PRODUCTS,
     "NXT LEVEL": NXT_PRODUCTS,
+    "NUTRAMINO": NUTRAMINO_PRODUCTS,
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -158,17 +177,20 @@ Tu dois retourner ce format JSON :
   "date_commande": "DD/MM/YYYY",
   "depot": "Nom du depot ou box mentionne dans le mail",
   "produits": [
-    {{"nom": "Nom exact du produit dans la liste", "quantite": nombre_entier}},
+    {{"nom": "Nom exact du produit dans la liste", "quantite": nombre_entier, "unite_par_pack": nombre_entier_ou_null}},
     ...
   ],
   "notes": "Toute information utile non capturee ci-dessus"
 }}
+
+Note : unite_par_pack est uniquement pour NUTRAMINO (colonne "Unit of Measure"). Pour les autres fournisseurs, mets null.
 
 Regles :
 - Pour chaque produit mentionne, trouve le meilleur match dans la liste des produits connus.
 - Si la quantite est en packs/palettes, convertis en nombre de packs. Pour LIDIS : 1 palette Evian = 84 packs. Les quantites mentionnees sont toujours en nombre de packs sauf si "palette" est explicitement mentionne.
 - Pour LIDIS, le multiplicateur UVC est celui indique dans le nom du produit (x24, x12). Exemple : "50CL Volvic Juicy Fraise x12" signifie 12 unites par pack, pas 24.
 - Pour HEROIC : le document peut etre un bon de commande avec un tableau. Utilise la colonne "QUANTITES COMMANDEES EN COLIS" (pas UVC, pas NBR DE PALETTES). Si cette colonne n'est pas visible, prends le nombre de colis commandes.
+- Pour NUTRAMINO : le document est un tableau de commande. La colonne "Quantity" contient le nombre de colis commandes — utilise cette valeur comme quantite. La colonne "Unit of Measure" contient le nombre d'unites par pack (ex: 12 pour "CAS", 24 pour une boite de 24) — utilise cette valeur comme unite_par_pack. Retourne donc pour chaque produit : nom, quantite (= Quantity), et ajoute un champ unite_par_pack (= Unit of Measure numerique).
 - Si la date n'est pas mentionnee, utilise aujourd'hui : {today}.
 - Si le depot n'est pas clairement mentionne, mets "Non precise".
 - Retourne UNIQUEMENT le JSON, rien d'autre."""
@@ -213,7 +235,8 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
         dt = datetime.datetime.today()
 
     is_nxt = fournisseur == "NXT LEVEL"
-    max_col = ws.max_column or 16
+    is_nutramino = fournisseur == "NUTRAMINO"
+    max_col = ws.max_column or 17
 
     thin = Side(style="thin")
     thick = Side(style="medium")
@@ -237,9 +260,18 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
             ws.cell(row=row_num, column=4).value = depot_clean
 
         if is_nxt:
+            # Col E=UVC, Col F=Facturé, Col G=Produit
             ws.cell(row=row_num, column=5).value = quantite
             ws.cell(row=row_num, column=7).value = nom
+        elif is_nutramino:
+            # Col E=UVC, Col F=Unités par pack, Col G=Quantité, Col H=Produit
+            unite_par_pack = produit.get("unite_par_pack") or get_uvc_multiplier(nom) or 1
+            ws.cell(row=row_num, column=6).value = unite_par_pack
+            ws.cell(row=row_num, column=7).value = quantite
+            ws.cell(row=row_num, column=8).value = nom
+            ws.cell(row=row_num, column=5).value = f"=F{row_num}*G{row_num}"
         else:
+            # Col E=UVC, Col F=Quantité, Col G=Produit
             ws.cell(row=row_num, column=6).value = quantite
             uvc = get_uvc_formula_or_value(nom, "F", row_num)
             if uvc:
