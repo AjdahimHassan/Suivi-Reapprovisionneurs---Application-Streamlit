@@ -61,15 +61,12 @@ def parse_planno(file_bytes: bytes) -> pd.DataFrame:
     lines = content.splitlines()
 
     # Trouver la ligne d'en-tête (celle qui contient "Code")
-    header_idx = None
+    header_idx = 1  # fallback
     for i, line in enumerate(lines):
-        if line.startswith('"Code"') or line.startswith('Code'):
+        stripped = line.strip().strip('"')
+        if stripped.startswith("Code"):
             header_idx = i
             break
-
-    if header_idx is None:
-        # Fallback : essayer dès la ligne 1
-        header_idx = 1
 
     data_lines = "\n".join(lines[header_idx:])
     df = pd.read_csv(
@@ -77,37 +74,51 @@ def parse_planno(file_bytes: bytes) -> pd.DataFrame:
         sep=";",
         dtype=str,
     )
-    df.columns = [c.strip().strip('"') for c in df.columns]
-    # Supprimer colonnes vides
+
+    # Nettoyer les noms de colonnes
+    df.columns = [str(c).strip().strip('"') for c in df.columns]
+
+    # Supprimer colonnes Unnamed ou vides
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
     df = df.loc[:, df.columns.str.strip() != ""]
 
+    # Nettoyer les valeurs (toutes les colonnes sont str ici)
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.strip('"')
 
+    # Renommer les colonnes utiles — ordre important : LIGNE avant PRIX
     rename_map = {}
     for c in df.columns:
-        cl = c.upper()
+        cl = c.upper().replace("É", "E").replace("È", "E").replace("Û", "U")
         if cl == "CODE":
             rename_map[c] = "CODE_PRODUIT"
-        elif "LIBELLÉ" in cl or "LIBELLE" in cl or "LIB" in cl:
+        elif cl.startswith("LIBEL"):
             rename_map[c] = "LIBELLE"
-        elif "PRIX" in cl or "PRIX U.B" in cl or "PU" in cl:
-            rename_map[c] = "PU"
-        elif "LIGNE" in cl:
+        elif "LIGNE" in cl:          # "Ligne de prix" → LDP  (testé AVANT PRIX)
             rename_map[c] = "LDP"
-        elif "NIV" in cl:
+        elif "PRIX" in cl:           # "Prix u.b. TTC" → PU
+            rename_map[c] = "PU"
+        elif cl.startswith("NIV"):
             rename_map[c] = "NIV_HAUT"
-        elif "UNITÉ" in cl or "UNITE" in cl:
+        elif "UNIT" in cl:
             rename_map[c] = "UNITE"
+
     df = df.rename(columns=rename_map)
 
     if "PU" in df.columns:
         df["PU"] = df["PU"].str.replace(",", ".").str.strip()
         df["PU"] = pd.to_numeric(df["PU"], errors="coerce")
     if "LDP" in df.columns:
+        df["LDP"] = df["LDP"].str.replace(",", ".").str.strip()
         df["LDP"] = pd.to_numeric(df["LDP"], errors="coerce")
 
+    if "CODE_PRODUIT" not in df.columns:
+        raise ValueError(
+            f"Colonne 'Code' introuvable dans le planno. Colonnes détectées : {list(df.columns)}"
+        )
+
     df = df.dropna(subset=["CODE_PRODUIT"])
+    df = df[df["CODE_PRODUIT"].str.strip().str.upper() != "NAN"]
     df = df[df["CODE_PRODUIT"].str.strip() != ""]
 
     return df
