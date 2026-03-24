@@ -139,6 +139,11 @@ MULTIPLICATEURS_FIXES = {
     "HEROIC SPORT SAVEUR TROPICAL 500ML x6": 6,
     "HIPRO A BOIRE 330 ML VANILLE": 12,
     "HIPRO A BOIRE 330 ML SAVEUR CHOCOLAT": 12,
+    "ON Essential AmiN.O. Energy +Electrolytes DRINK 250ML Tropical": 24,
+    "ON HFSS Protein Bar 60g Chocolate Caramel": 12,
+    "ON HFSS Protein Bar 68g White Chocolate": 12,
+    "Protein Bar 55G Coconut x12": 12,
+    "Protein Bar 55G Creamy Caramel x12": 12,
 }
 
 def get_uvc_formula_or_value(product_name, qty_col, row_num):
@@ -150,12 +155,14 @@ def get_uvc_formula_or_value(product_name, qty_col, row_num):
 
 def find_last_data_row(ws, header_row):
     last = header_row
-    for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row):
-        # Ignore les lignes qui n'ont que des 0 ou None (lignes vides avec formules)
+    # Scan depuis la fin pour trouver la dernière ligne non vide (plus rapide)
+    for row_idx in range(min(ws.max_row, 5000), header_row, -1):
+        row = ws[row_idx]
         values = [c.value for c in row]
         non_empty = [v for v in values if v is not None and v != 0 and v != ""]
         if non_empty:
-            last = row[0].row
+            last = row_idx
+            break
     return last
 
 
