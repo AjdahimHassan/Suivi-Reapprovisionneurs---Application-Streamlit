@@ -85,7 +85,10 @@ def get_uvc_formula_or_value(product_name, qty_col, row_num):
 def find_last_data_row(ws, header_row):
     last = header_row
     for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row):
-        if any(c.value is not None for c in row):
+        # Ignore les lignes qui n'ont que des 0 ou None (lignes vides avec formules)
+        values = [c.value for c in row]
+        non_empty = [v for v in values if v is not None and v != 0 and v != ""]
+        if non_empty:
             last = row[0].row
     return last
 
