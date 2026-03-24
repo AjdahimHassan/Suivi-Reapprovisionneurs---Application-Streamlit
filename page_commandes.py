@@ -181,8 +181,12 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
         quantite = produit.get("quantite", 0)
 
         if i == 0:
-            ws.cell(row=row_num, column=1).value = dt
-            ws.cell(row=row_num, column=4).value = depot
+            cell_date = ws.cell(row=row_num, column=1)
+            cell_date.value = dt
+            cell_date.number_format = "DD/MM/YYYY"
+            # Nettoyer le depot : supprimer "Home Box ", "home box ", etc.
+            depot_clean = re.sub(r"(?i)home\s+box\s*[-–]?\s*", "", depot).strip()
+            ws.cell(row=row_num, column=4).value = depot_clean
 
         if is_nxt:
             ws.cell(row=row_num, column=5).value = quantite
