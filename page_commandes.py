@@ -311,6 +311,57 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render():
+
+    # ── Gestion du fichier Excel (toujours visible en haut) ──
+    st.markdown("### 📂 Fichier Excel de suivi")
+    excel_bytes_mongo = load_excel_from_mongo()
+
+    if excel_bytes_mongo:
+        col_status, col_dl, col_replace = st.columns([3, 2, 2])
+        with col_status:
+            st.success("✅ Fichier Excel chargé depuis la base de données")
+        with col_dl:
+            st.download_button(
+                label="⬇️ Télécharger le fichier actuel",
+                data=excel_bytes_mongo,
+                file_name="SPECIMEN Suivi commandes marchandises DA - MARS AVRIL.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="btn_dl_current",
+            )
+        with col_replace:
+            if st.button("🔄 Remplacer le fichier", use_container_width=True, key="btn_toggle_replace"):
+                st.session_state["show_replace"] = not st.session_state.get("show_replace", False)
+
+        if st.session_state.get("show_replace", False):
+            new_file = st.file_uploader(
+                "Nouveau fichier Excel",
+                type=["xlsx"],
+                key="commande_excel_replace",
+                label_visibility="collapsed",
+            )
+            if new_file and st.button("💾 Sauvegarder le nouveau fichier", key="btn_save_new"):
+                save_excel_to_mongo(new_file.read())
+                st.success("✅ Nouveau fichier sauvegardé !")
+                st.session_state["show_replace"] = False
+                st.rerun()
+    else:
+        st.warning("⚠️ Aucun fichier Excel en base. Uploade-le une première fois ci-dessous.")
+        excel_file_init = st.file_uploader(
+            "Fichier Excel de suivi des commandes",
+            type=["xlsx"],
+            key="commande_excel_init",
+            label_visibility="collapsed",
+        )
+        if excel_file_init:
+            raw = excel_file_init.read()
+            save_excel_to_mongo(raw)
+            st.success("✅ Fichier sauvegardé en base pour les prochaines fois !")
+            st.rerun()
+
+    st.divider()
+
+    # ── Ajout d'une commande ──
     st.markdown("### 📸 Ajouter une commande depuis un screenshot")
 
     col_four, _ = st.columns([2, 4])
@@ -409,56 +460,7 @@ def render():
 
     st.divider()
 
-    st.markdown("### 📥 Fichier Excel de suivi")
-
-    # Charger depuis MongoDB
-    excel_bytes_mongo = load_excel_from_mongo()
-
-    if excel_bytes_mongo:
-        col_status, col_dl, col_replace = st.columns([3, 2, 2])
-        with col_status:
-            st.success("✅ Fichier Excel chargé depuis la base de données")
-        with col_dl:
-            st.download_button(
-                label="⬇️ Télécharger le fichier actuel",
-                data=excel_bytes_mongo,
-                file_name="SPECIMEN Suivi commandes marchandises DA - MARS AVRIL.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="btn_dl_current",
-            )
-        with col_replace:
-            if st.button("🔄 Remplacer le fichier", use_container_width=True, key="btn_toggle_replace"):
-                st.session_state["show_replace"] = not st.session_state.get("show_replace", False)
-
-        if st.session_state.get("show_replace", False):
-            new_file = st.file_uploader(
-                "Nouveau fichier Excel",
-                type=["xlsx"],
-                key="commande_excel_replace",
-                label_visibility="collapsed",
-            )
-            if new_file and st.button("💾 Sauvegarder le nouveau fichier", key="btn_save_new"):
-                save_excel_to_mongo(new_file.read())
-                st.success("✅ Nouveau fichier sauvegardé !")
-                st.session_state["show_replace"] = False
-                st.rerun()
-        excel_bytes_to_use = excel_bytes_mongo
-    else:
-        st.warning("⚠️ Aucun fichier Excel en base. Uploade-le une première fois ci-dessous.")
-        excel_file = st.file_uploader(
-            "Fichier Excel de suivi des commandes",
-            type=["xlsx"],
-            key="commande_excel",
-            label_visibility="collapsed",
-        )
-        if excel_file:
-            raw = excel_file.read()
-            save_excel_to_mongo(raw)
-            st.success("✅ Fichier sauvegardé en base pour les prochaines fois !")
-            excel_bytes_to_use = raw
-        else:
-            excel_bytes_to_use = None
+    excel_bytes_to_use = load_excel_from_mongo()
 
     if excel_bytes_to_use and st.button("💾 Injecter dans le fichier Excel", type="primary", key="btn_inject"):
         with st.spinner("Injection en cours..."):
