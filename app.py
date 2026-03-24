@@ -11,6 +11,7 @@ import datetime
 from planning_parser import get_today_day_str, JOURS
 import page_planogrammes
 import page_inventaires
+import page_commandes
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -49,7 +50,7 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_rest = st.columns([2, 2, 2, 4])
+nav_c1, nav_c2, nav_c3, nav_c4, nav_rest = st.columns([2, 2, 2, 2, 2])
 with nav_c1:
     if st.button(
         "📦  Suivi Réapprovisionneurs",
@@ -76,6 +77,15 @@ with nav_c3:
         type="primary" if st.session_state.page == "inventaires" else "secondary",
     ):
         st.session_state.page = "inventaires"
+        st.rerun()
+with nav_c4:
+    if st.button(
+        "🛒  Commandes",
+        key="nav_cmd",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "commandes" else "secondary",
+    ):
+        st.session_state.page = "commandes"
         st.rerun()
 
 st.divider()
@@ -393,3 +403,17 @@ elif st.session_state.page == "inventaires":
     )
 
     page_inventaires.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : COMMANDES
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "commandes":
+
+    st.markdown('<div class="main-title">🛒 Suivi des Commandes</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Importez un screenshot de mail de commande et injectez-le dans le fichier Excel de suivi.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_commandes.render()
