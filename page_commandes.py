@@ -12,6 +12,8 @@ import re
 import os
 import requests
 from openpyxl import load_workbook
+from pymongo import MongoClient
+import gridfs
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION PRODUITS
@@ -70,6 +72,37 @@ def get_gemini_api_key():
         return st.secrets["gemini"]["api_key"]
     except (KeyError, FileNotFoundError):
         return os.environ.get("GEMINI_API_KEY", "")
+
+
+def _get_mongo_db():
+    uri = st.secrets["mongo"]["uri"]
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]
+
+
+def save_excel_to_mongo(file_bytes: bytes):
+    """Sauvegarde le fichier Excel dans MongoDB (collection suivi_excel)."""
+    db = _get_mongo_db()
+    col = db["suivi_excel"]
+    col.replace_one(
+        {"nom": "suivi_commandes"},
+        {"nom": "suivi_commandes", "data": file_bytes},
+        upsert=True,
+    )
+
+
+def load_excel_from_mongo():
+    """Charge le fichier Excel depuis MongoDB. Retourne bytes ou None."""
+    try:
+        db = _get_mongo_db()
+        col = db["suivi_excel"]
+        doc = col.find_one({"nom": "suivi_commandes"})
+        if doc:
+            return bytes(doc["data"])
+        return None
+    except Exception:
+        return None
 
 
 def get_uvc_multiplier(product_name):
@@ -320,24 +353,53 @@ def render():
     st.divider()
 
     st.markdown("### 📥 Fichier Excel de suivi")
-    excel_file = st.file_uploader(
-        "Depose ici le fichier Excel de suivi des commandes",
-        type=["xlsx"],
-        key="commande_excel",
-        label_visibility="collapsed",
-    )
 
-    if excel_file and st.button("💾 Injecter dans le fichier Excel", type="primary", key="btn_inject"):
+    # Charger depuis MongoDB
+    excel_bytes_mongo = load_excel_from_mongo()
+
+    if excel_bytes_mongo:
+        st.success("✅ Fichier Excel chargé depuis la base de données")
+        with st.expander("🔄 Remplacer le fichier Excel"):
+            new_file = st.file_uploader(
+                "Nouveau fichier Excel",
+                type=["xlsx"],
+                key="commande_excel_replace",
+                label_visibility="collapsed",
+            )
+            if new_file and st.button("💾 Sauvegarder le nouveau fichier", key="btn_save_new"):
+                save_excel_to_mongo(new_file.read())
+                st.success("✅ Nouveau fichier sauvegardé !")
+                st.rerun()
+        excel_bytes_to_use = excel_bytes_mongo
+    else:
+        st.warning("⚠️ Aucun fichier Excel en base. Uploade-le une première fois ci-dessous.")
+        excel_file = st.file_uploader(
+            "Fichier Excel de suivi des commandes",
+            type=["xlsx"],
+            key="commande_excel",
+            label_visibility="collapsed",
+        )
+        if excel_file:
+            raw = excel_file.read()
+            save_excel_to_mongo(raw)
+            st.success("✅ Fichier sauvegardé en base pour les prochaines fois !")
+            excel_bytes_to_use = raw
+        else:
+            excel_bytes_to_use = None
+
+    if excel_bytes_to_use and st.button("💾 Injecter dans le fichier Excel", type="primary", key="btn_inject"):
         with st.spinner("Injection en cours..."):
             try:
-                wb = load_workbook(io.BytesIO(excel_file.read()))
+                wb = load_workbook(io.BytesIO(excel_bytes_to_use))
                 add_commande_to_excel(wb, fournisseur_used, date_val, depot_val, edited_produits)
 
                 output = io.BytesIO()
                 wb.save(output)
                 output.seek(0)
 
-                date_str = datetime.date.today().strftime("%Y%m%d")
+                # Sauvegarder le fichier mis à jour en MongoDB
+                save_excel_to_mongo(output.getvalue())
+
                 st.success(f"✅ Commande ajoutée dans la feuille **{fournisseur_used}** — {len(edited_produits)} produit(s)")
                 st.download_button(
                     label="⬇️ Télécharger le fichier mis à jour",
