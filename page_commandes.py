@@ -110,8 +110,19 @@ def get_uvc_multiplier(product_name):
     return int(m.group(1)) if m else None
 
 
+# Multiplicateurs fixes pour les produits sans suffixe xNN
+MULTIPLICATEURS_FIXES = {
+    "Heroic sport Fruits rouges 500ML x6": 6,
+    "Heroic sport Citron vert Menthe 500ML x6": 6,
+    "HEROIC SPORT SAVEUR TROPICAL 500ML x6": 6,
+    "HIPRO A BOIRE 330 ML VANILLE": 12,
+    "HIPRO A BOIRE 330 ML SAVEUR CHOCOLAT": 12,
+}
+
 def get_uvc_formula_or_value(product_name, qty_col, row_num):
     mult = get_uvc_multiplier(product_name)
+    if not mult:
+        mult = MULTIPLICATEURS_FIXES.get(product_name)
     return f"={qty_col}{row_num}*{mult}" if mult else None
 
 
@@ -157,6 +168,7 @@ Regles :
 - Pour chaque produit mentionne, trouve le meilleur match dans la liste des produits connus.
 - Si la quantite est en packs/palettes, convertis en nombre de packs. Pour LIDIS : 1 palette Evian = 84 packs. Les quantites mentionnees sont toujours en nombre de packs sauf si "palette" est explicitement mentionne.
 - Pour LIDIS, le multiplicateur UVC est celui indique dans le nom du produit (x24, x12). Exemple : "50CL Volvic Juicy Fraise x12" signifie 12 unites par pack, pas 24.
+- Pour HEROIC : le document peut etre un bon de commande avec un tableau. Utilise la colonne "QUANTITES COMMANDEES EN COLIS" (pas UVC, pas NBR DE PALETTES). Si cette colonne n'est pas visible, prends le nombre de colis commandes.
 - Si la date n'est pas mentionnee, utilise aujourd'hui : {today}.
 - Si le depot n'est pas clairement mentionne, mets "Non precise".
 - Retourne UNIQUEMENT le JSON, rien d'autre."""
