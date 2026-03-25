@@ -234,7 +234,7 @@ Regles :
 
     last_error = None
     for api_key in api_keys:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
         resp = requests.post(url, json=payload, timeout=30)
         if resp.status_code == 429:
             last_error = resp
@@ -299,7 +299,7 @@ Voici le texte de la commande :
 
     last_error = None
     for api_key in api_keys:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
         resp = requests.post(url, json=payload, timeout=30)
         if resp.status_code == 429:
             last_error = resp
