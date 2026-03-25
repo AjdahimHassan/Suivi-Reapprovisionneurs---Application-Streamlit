@@ -250,6 +250,71 @@ Regles :
     return json.loads(raw)
 
 
+def analyze_text_with_gemini(texte, fournisseur):
+    """Analyse un texte de commande avec Gemini."""
+    api_keys = get_gemini_api_keys()
+    if not api_keys:
+        raise ValueError("Aucune clé GEMINI_API_KEY trouvée dans les secrets Streamlit.")
+
+    produits_list = "\n".join(f"- {p}" for p in PRODUITS_PAR_FOURNISSEUR[fournisseur])
+    today = datetime.date.today().strftime("%d/%m/%Y")
+
+    prompt = f"""Tu es un assistant qui extrait des informations de commande depuis un texte de mail.
+Tu dois retourner UNIQUEMENT un JSON valide, sans backticks, sans texte avant ou apres.
+
+Le fournisseur est : {fournisseur}
+
+Liste des produits connus pour ce fournisseur :
+{produits_list}
+
+Tu dois retourner ce format JSON :
+{{
+  "date_commande": "DD/MM/YYYY",
+  "depot": "Nom du depot ou box mentionne dans le mail",
+  "produits": [
+    {{"nom": "Nom exact du produit dans la liste", "quantite": nombre_entier, "unite_par_pack": nombre_entier_ou_null}},
+    ...
+  ],
+  "notes": "Toute information utile non capturee ci-dessus"
+}}
+
+Note : unite_par_pack est uniquement pour NUTRAMINO. Pour les autres fournisseurs, mets null.
+
+Regles :
+- Pour chaque produit mentionne, trouve le meilleur match dans la liste des produits connus.
+- Si la quantite est en packs/palettes, convertis en nombre de packs. Pour LIDIS : 1 palette Evian = 84 packs.
+- Pour LIDIS, le multiplicateur UVC est celui indique dans le nom du produit (x24, x12).
+- Pour HEROIC : utilise le nombre de colis commandes.
+- Pour NUTRAMINO : "Quantity" = quantite, "Unit of Measure" = unite_par_pack.
+- Si la date n'est pas mentionnee, utilise aujourd'hui : {today}.
+- Si le depot n'est pas clairement mentionne, mets "Non precise".
+- Retourne UNIQUEMENT le JSON, rien d'autre.
+
+Voici le texte de la commande :
+{texte}"""
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+
+    last_error = None
+    for api_key in api_keys:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={api_key}"
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 429:
+            last_error = resp
+            continue
+        resp.raise_for_status()
+        break
+    else:
+        last_error.raise_for_status()
+
+    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raw = re.sub(r"^```json\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return json.loads(raw)
+
+
 def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
     from openpyxl.styles import Font, Border, Side, PatternFill
     
@@ -384,7 +449,7 @@ def render():
     st.divider()
 
     # ── Ajout d'une commande ──
-    st.markdown("### 📸 Ajouter une commande depuis un screenshot")
+    st.markdown("### 📥 Ajouter une commande")
 
     col_four, _ = st.columns([2, 4])
     with col_four:
@@ -392,34 +457,50 @@ def render():
 
     st.divider()
 
-    st.markdown("**📎 Screenshot du mail de commande**")
-    screenshot = st.file_uploader(
-        "Image du mail",
-        type=["png", "jpg", "jpeg", "webp"],
-        key="commande_screenshot",
-        label_visibility="collapsed",
-    )
+    tab_screenshot, tab_texte = st.tabs(["📸 Screenshot", "📝 Texte"])
 
-    if screenshot:
-        col_img, _ = st.columns([2, 3])
-        with col_img:
-            st.image(screenshot, caption="Apercu du screenshot", use_container_width=True)
+    with tab_screenshot:
+        screenshot = st.file_uploader(
+            "Image du mail de commande",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="commande_screenshot",
+            label_visibility="collapsed",
+        )
+        if screenshot:
+            col_img, _ = st.columns([2, 3])
+            with col_img:
+                st.image(screenshot, caption="Apercu du screenshot", use_container_width=True)
 
-    st.divider()
+        if screenshot and st.button("🔍 Analyser le screenshot", type="primary", key="btn_analyze"):
+            with st.spinner(f"Analyse en cours..."):
+                try:
+                    screenshot.seek(0)
+                    image_bytes = screenshot.read()
+                    mime = screenshot.type or "image/png"
+                    result = analyze_screenshot_with_gemini(image_bytes, mime, fournisseur)
+                    st.session_state["commande_result"] = result
+                    st.session_state["commande_fournisseur_used"] = fournisseur
+                    st.success("✅ Analyse terminée — vérifiez et corrigez si besoin")
+                except Exception as e:
+                    st.error(f"Erreur lors de l'analyse : {e}")
 
-    if screenshot and st.button("🔍 Analyser le screenshot", type="primary", key="btn_analyze"):
-        with st.spinner(f"Analyse du mail {fournisseur} en cours..."):
-            try:
-                screenshot.seek(0)
-                image_bytes = screenshot.read()
-                mime = screenshot.type or "image/png"
-                result = analyze_screenshot_with_gemini(image_bytes, mime, fournisseur)
-                st.session_state["commande_result"] = result
-                st.session_state["commande_fournisseur_used"] = fournisseur
-                st.success("Analyse terminee — verifiez et corrigez si besoin")
-            except Exception as e:
-                st.error(f"Erreur lors de l'analyse : {e}")
-                return
+    with tab_texte:
+        texte_commande = st.text_area(
+            "Colle ici le texte du mail de commande",
+            height=200,
+            key="commande_texte",
+            placeholder="Ex: Bonjour, j'ai besoin de commander :\n1 palette d'Evian\n10 packs de RedBull\n...",
+            label_visibility="collapsed",
+        )
+        if texte_commande and st.button("🔍 Analyser le texte", type="primary", key="btn_analyze_text"):
+            with st.spinner(f"Analyse en cours..."):
+                try:
+                    result = analyze_text_with_gemini(texte_commande, fournisseur)
+                    st.session_state["commande_result"] = result
+                    st.session_state["commande_fournisseur_used"] = fournisseur
+                    st.success("✅ Analyse terminée — vérifiez et corrigez si besoin")
+                except Exception as e:
+                    st.error(f"Erreur lors de l'analyse : {e}")
 
     if "commande_result" not in st.session_state:
         return
