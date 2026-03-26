@@ -9,6 +9,7 @@ import pandas as pd
 import datetime
 
 from planning_parser import get_today_day_str, JOURS
+import page_machines
 import page_planogrammes
 import page_inventaires
 import page_commandes
@@ -42,7 +43,7 @@ st.markdown("""
 # SESSION STATE
 # ────────────────────────────────────────────────────────
 if "page" not in st.session_state:
-    st.session_state.page = "suivi"
+    st.session_state.page = "machines"
 if "results" not in st.session_state:
     st.session_state.results = {}
 if "jour_analyse" not in st.session_state:
@@ -51,8 +52,17 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_rest = st.columns([2, 2, 2, 2, 2, 1])
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6 = st.columns([2, 2, 2, 2, 2, 2])
 with nav_c1:
+    if st.button(
+        "🖥️  Machines",
+        key="nav_machines",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "machines" else "secondary",
+    ):
+        st.session_state.page = "machines"
+        st.rerun()
+with nav_c2:
     if st.button(
         "📦  Suivi Réapprovisionneurs",
         key="nav_suivi",
@@ -61,7 +71,7 @@ with nav_c1:
     ):
         st.session_state.page = "suivi"
         st.rerun()
-with nav_c2:
+with nav_c3:
     if st.button(
         "🗂️  Planogrammes",
         key="nav_plano",
@@ -70,7 +80,7 @@ with nav_c2:
     ):
         st.session_state.page = "planogrammes"
         st.rerun()
-with nav_c3:
+with nav_c4:
     if st.button(
         "📊  Inventaires",
         key="nav_inv",
@@ -79,7 +89,7 @@ with nav_c3:
     ):
         st.session_state.page = "inventaires"
         st.rerun()
-with nav_c4:
+with nav_c5:
     if st.button(
         "🛒  Commandes",
         key="nav_cmd",
@@ -88,7 +98,7 @@ with nav_c4:
     ):
         st.session_state.page = "commandes"
         st.rerun()
-with nav_c5:
+with nav_c6:
     if st.button(
         "❓  Indéfinis",
         key="nav_indef",
@@ -144,9 +154,23 @@ if st.session_state.page == "suivi":
 
 
 # ════════════════════════════════════════════════════════
+# PAGE : MACHINES
+# ════════════════════════════════════════════════════════
+if st.session_state.page == "machines":
+
+    st.markdown('<div class="main-title">🖥️ Parc Machines</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Visualisez et gérez le parc de distributeurs automatiques en exploitation.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_machines.render()
+
+
+# ════════════════════════════════════════════════════════
 # PAGE : SUIVI RÉAPPROVISIONNEURS
 # ════════════════════════════════════════════════════════
-if st.session_state.page == "suivi":
+elif st.session_state.page == "suivi":
 
     @st.cache_data(show_spinner=False, ttl=300)
     def _get_plannings():
