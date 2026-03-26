@@ -10,6 +10,7 @@ import datetime
 
 from planning_parser import get_today_day_str, JOURS
 import page_machines
+import page_no_audit
 import page_planogrammes
 import page_inventaires
 import page_commandes
@@ -52,7 +53,7 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6 = st.columns([2, 2, 2, 2, 2, 2])
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7 = st.columns([2, 2, 2, 2, 2, 2, 2])
 with nav_c1:
     if st.button(
         "🖥️  Machines",
@@ -73,6 +74,15 @@ with nav_c2:
         st.rerun()
 with nav_c3:
     if st.button(
+        "📉  No Audit / Ventes",
+        key="nav_no_audit",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "no_audit" else "secondary",
+    ):
+        st.session_state.page = "no_audit"
+        st.rerun()
+with nav_c4:
+    if st.button(
         "🗂️  Planogrammes",
         key="nav_plano",
         use_container_width=True,
@@ -80,7 +90,7 @@ with nav_c3:
     ):
         st.session_state.page = "planogrammes"
         st.rerun()
-with nav_c4:
+with nav_c5:
     if st.button(
         "📊  Inventaires",
         key="nav_inv",
@@ -89,7 +99,7 @@ with nav_c4:
     ):
         st.session_state.page = "inventaires"
         st.rerun()
-with nav_c5:
+with nav_c6:
     if st.button(
         "🛒  Commandes",
         key="nav_cmd",
@@ -98,7 +108,7 @@ with nav_c5:
     ):
         st.session_state.page = "commandes"
         st.rerun()
-with nav_c6:
+with nav_c7:
     if st.button(
         "❓  Indéfinis",
         key="nav_indef",
@@ -110,47 +120,6 @@ with nav_c6:
 
 st.divider()
 
-# ────────────────────────────────────────────────────────
-# SIDEBAR — uniquement pour la page Suivi (options jour)
-# ────────────────────────────────────────────────────────
-if st.session_state.page == "suivi":
-    with st.sidebar:
-        st.markdown("## ⚙️ Options")
-        st.divider()
-
-        @st.cache_data(show_spinner="Chargement des plannings...", ttl=300)
-        def _charger():
-            return load_plannings_from_mongo()
-
-        plannings, planning_errors = _charger()
-
-        if plannings:
-            st.success(f"✅ {len(plannings)} plannings chargés")
-            with st.expander("Voir les réappros"):
-                for emp, p in sorted(plannings.items()):
-                    total = sum(len(v) for v in p.values())
-                    st.caption(f"**{emp}** — {total} salles/semaine")
-        else:
-            st.error("❌ Aucun planning trouvé.")
-            for k, v in planning_errors.items():
-                st.error(f"{k}: {v}")
-
-        if planning_errors and plannings:
-            with st.expander(f"⚠️ {len(planning_errors)} erreur(s)"):
-                for k, v in planning_errors.items():
-                    st.warning(f"{k}: {v}")
-
-        st.divider()
-        st.markdown("### Jour d'analyse")
-        jour_selectionne = st.selectbox(
-            "Jour", JOURS,
-            index=JOURS.index(st.session_state.jour_analyse)
-            if st.session_state.jour_analyse in JOURS else 0,
-            label_visibility="collapsed",
-        )
-        st.session_state.jour_analyse = jour_selectionne
-        st.divider()
-        st.caption("Plannings : `MongoDB Atlas`")
 
 
 # ════════════════════════════════════════════════════════
@@ -165,6 +134,20 @@ if st.session_state.page == "machines":
     )
 
     page_machines.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : NO AUDIT / SANS VENTES
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "no_audit":
+
+    st.markdown('<div class="main-title">📉 No Audit / Sans Ventes</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Identifiez les salles absentes de la télémétrie ou sans ventes sur une période donnée.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_no_audit.render()
 
 
 # ════════════════════════════════════════════════════════
@@ -218,7 +201,24 @@ elif st.session_state.page == "suivi":
         st.stop()
 
     results = st.session_state.results
-    jour    = st.session_state.jour_analyse
+
+    # Jour d'analyse
+    st.divider()
+    jour_col, _ = st.columns([1, 4])
+    with jour_col:
+        st.markdown("**Jour d'analyse**")
+        jour_selectionne = st.selectbox(
+            "Jour", JOURS,
+            index=JOURS.index(st.session_state.jour_analyse)
+            if st.session_state.jour_analyse in JOURS else 0,
+            label_visibility="collapsed",
+            key="jour_analyse_select",
+        )
+        if jour_selectionne != st.session_state.jour_analyse:
+            st.session_state.jour_analyse = jour_selectionne
+            st.rerun()
+
+    jour = st.session_state.jour_analyse
 
     # KPIs
     st.divider()
@@ -408,6 +408,26 @@ elif st.session_state.page == "suivi":
                     )
                 except Exception as e:
                     st.error(f"Erreur Excel : {e}")
+
+    # ── Plannings (bas de page) ───────────────────────────
+    st.divider()
+    st.markdown("### ⚙️ Plannings chargés")
+
+    if plannings:
+        st.success(f"✅ {len(plannings)} plannings chargés — `MongoDB Atlas`")
+        with st.expander("Voir les réappros"):
+            for emp, p in sorted(plannings.items()):
+                total = sum(len(v) for v in p.values())
+                st.caption(f"**{emp}** — {total} salles/semaine")
+    else:
+        st.error("❌ Aucun planning trouvé.")
+        for k, v in planning_errors.items():
+            st.error(f"{k}: {v}")
+
+    if planning_errors and plannings:
+        with st.expander(f"⚠️ {len(planning_errors)} erreur(s)"):
+            for k, v in planning_errors.items():
+                st.warning(f"{k}: {v}")
 
 
 # ════════════════════════════════════════════════════════

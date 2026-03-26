@@ -88,7 +88,7 @@ def _save_to_mongo(df: pd.DataFrame) -> int:
 
 def _parse_csv(raw_bytes: bytes) -> pd.DataFrame:
     """Parse le CSV export machines (séparateur ';', encodage latin-1 ou utf-8)."""
-    for enc in ("latin-1", "utf-8-sig", "utf-8"):
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
             import io
             df = pd.read_csv(
@@ -122,8 +122,9 @@ def _filter_machines(df: pd.DataFrame) -> pd.DataFrame:
     if "Client" in df.columns:
         client_col = df["Client"].fillna("").str.strip()
         mask_vide = client_col == ""
-        mask_depot = client_col.str.lower().str.startswith(("dépot", "depot"))
-        df = df[~(mask_vide | mask_depot)]
+        mask_depot  = client_col.str.lower().str.startswith(("dépot", "depot"))
+        mask_madrid = client_col.str.lower().str.contains("madrid", na=False)
+        df = df[~(mask_vide | mask_depot | mask_madrid)]
 
     # Garder uniquement les colonnes voulues (dans l'ordre)
     cols_present = [c for c in COLUMNS_DISPLAY.keys() if c in df.columns]
