@@ -265,6 +265,19 @@ def _inject_commentaires(df: pd.DataFrame, type_: str) -> pd.DataFrame:
 
 
 # ────────────────────────────────────────────────────────
+# EXPORT EXCEL
+# ────────────────────────────────────────────────────────
+
+def _build_rapport_excel(df_audit: pd.DataFrame, df_ventes: pd.DataFrame) -> bytes:
+    """Génère un fichier Excel avec deux feuilles : No Audit et Sans Ventes (commentaires inclus)."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_audit.to_excel(writer, sheet_name="No Audit", index=False)
+        df_ventes.to_excel(writer, sheet_name="Sans Ventes", index=False)
+    return buf.getvalue()
+
+
+# ────────────────────────────────────────────────────────
 # HELPERS UI
 # ────────────────────────────────────────────────────────
 
@@ -295,21 +308,12 @@ def _render_table_with_comments(df: pd.DataFrame, type_: str, key_prefix: str):
         key=f"{key_prefix}_editor",
     )
 
-    c1, c2, _ = st.columns([1.2, 1.2, 5])
+    c1, _ = st.columns([1.2, 6])
     with c1:
         if st.button("💾 Sauvegarder commentaires", key=f"{key_prefix}_save"):
             rows = edited[["Salle", "Commentaire"]].to_dict("records")
             _save_commentaires(rows, type_)
             st.toast("✅ Commentaires sauvegardés.")
-    with c2:
-        csv = df.drop(columns=["Commentaire"]).to_csv(index=False, sep=";", encoding="utf-8")
-        st.download_button(
-            "⬇️ Exporter CSV",
-            data=csv.encode("utf-8"),
-            file_name=f"{type_}_{datetime.date.today()}.csv",
-            mime="text/csv",
-            key=f"{key_prefix}_dl",
-        )
 
     return edited
 
@@ -449,6 +453,24 @@ def render():
                 _render_delete_section(df_ventes, "ventes")
             else:
                 st.success("✅ Toutes les salles auditées hier ont enregistré des ventes.")
+
+    # ════════════════════════════════════════════════════
+    # EXPORT RAPPORT
+    # ════════════════════════════════════════════════════
+    df_audit_exp  = st.session_state.get("no_audit_result",    pd.DataFrame())
+    df_ventes_exp = st.session_state.get("sans_ventes_result", pd.DataFrame())
+    if not df_audit_exp.empty or not df_ventes_exp.empty:
+        st.divider()
+        col_dl, _ = st.columns([1.5, 5])
+        with col_dl:
+            excel_bytes = _build_rapport_excel(df_audit_exp, df_ventes_exp)
+            st.download_button(
+                "📊 Exporter Rapport Excel",
+                data=excel_bytes,
+                file_name=f"rapport_audit_{datetime.date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
     # ════════════════════════════════════════════════════
     # SECTIONS BASSES
