@@ -1,25 +1,36 @@
 # 📦 Suivi Réapprovisionneurs — Application Streamlit
 
-Application web de gestion opérationnelle pour les équipes de réapprovisionnement de distributeurs automatiques.  
+Application web de gestion opérationnelle pour les équipes de réapprovisionnement de distributeurs automatiques.
 Développée avec **Streamlit**, connectée à **MongoDB Atlas** pour le stockage des données.
 
 ---
 
 ## 🗺️ Pages de l'application
 
-L'application est composée de **5 modules** accessibles depuis la barre de navigation en haut de page.
+L'application est composée de **8 modules** accessibles depuis la barre de navigation en haut de page.
 
 | # | Page | Icône | Description |
 |---|------|-------|-------------|
-| 1 | Suivi Réapprovisionneurs | 📦 | Analyse quotidienne des passages en salle |
-| 2 | Planogrammes | 🗂️ | Gestion des plans de remplissage des machines |
-| 3 | Inventaires | 📊 | Contrôle des inventaires machines par réappro |
-| 4 | Commandes | 🛒 | Suivi des commandes fournisseurs |
-| 5 | Indéfinis | ❓ | Détection des lignes mal paramétrées (ventes INDÉFINI) |
+| 1 | Machines | 🖥️ | Visualisation du parc de distributeurs automatiques en exploitation |
+| 2 | Suivi Réapprovisionneurs | 📦 | Analyse quotidienne des passages en salle |
+| 3 | No Audit / Ventes | 📉 | Détection des salles sans audit ou sans ventes depuis X jours |
+| 4 | Planogrammes | 🗂️ | Gestion des plans de remplissage des machines |
+| 5 | Inventaires | 📊 | Contrôle des inventaires machines par réappro |
+| 6 | Commandes | 🛒 | Suivi des commandes fournisseurs |
+| 7 | Indéfinis | ❓ | Détection des lignes mal paramétrées (ventes INDÉFINI) |
+| 8 | CR | 📝 | Génération des comptes rendus hebdomadaires par zone |
 
 ---
 
 ## 📋 Détail des fonctionnalités
+
+### 🖥️ Machines
+
+Visualisation et gestion du parc de distributeurs automatiques.
+
+- Import du parc depuis un export CSV (écrase les données précédentes)
+- Stockage dans MongoDB (collection `machines`)
+- Données réutilisées par les pages No Audit / Ventes et CR
 
 ### 📦 Suivi Réapprovisionneurs
 
@@ -30,6 +41,18 @@ Module principal de suivi quotidien. Croise le planning de chaque réappro avec 
 - 🔄 **Jokers** : détecte quand un réappro a fait la salle d'un collègue
 - 📅 **Tournées décalées** : détecte quand un réappro a effectué sa tournée un autre jour que prévu
 - 📊 **Export Excel** : génère un fichier complet avec 38 onglets colorés (récap, non faites, jokers, décalées, détail par réappro)
+- ⚙️ **Gestion des plannings depuis l'UI** :
+  - 📥 Import / mise à jour de plannings CSV directement dans l'app
+  - 🗑️ Suppression de plannings directement dans l'app
+
+### 📉 No Audit / Ventes
+
+Analyse de la télémétrie pour détecter les machines inactives.
+
+- **No Audit** : salles absentes de la télémétrie depuis X jours (non auditées)
+- **Sans Ventes** : salles auditées mais sans ventes (Price = 0, ou ≤ 1,99 € si option activée)
+- Source des salles : collection MongoDB `machines`
+- Source télémétrie : fichier CSV uploadé (col 0 = Salle, col 1 = Date, col 6 = Prix)
 
 ### 🗂️ Planogrammes
 
@@ -46,7 +69,7 @@ Gestionnaire visuel des plans de remplissage des machines.
 
 Analyse des inventaires machines uploadés au format CSV.
 
-- Détection automatique du type de machine (BF Simple / BF Double / FP IDF / FP Province / WUF)  
+- Détection automatique du type de machine (BF Simple / BF Double / FP IDF / FP Province / WUF)
   — Les machines "Double" sont détectées par la présence de produits Volvic (VOLVICEXOTIC50CL / VOLVICFRAISE50CL)
 - Comparaison du montant HT inventorié aux seuils min/max par type :
 
@@ -81,6 +104,13 @@ Outil de diagnostic pour identifier les lignes machine mal paramétrées qui gé
 - Affichage différencié : 🔴 suspects (non vendus) vs 🟢 lignes correctement vendues
 - Message de diagnostic synthétique par cas
 
+### 📝 CR — Compte Rendu Hebdomadaire
+
+Génération automatique des emails de compte rendu par zone géographique.
+
+- Sources : collections MongoDB `reappros` (zones ↔ réappros), `machines` (parc), `incidents` (problèmes actifs)
+- Génération d'un email formaté par zone
+
 ---
 
 ## 🏗️ Architecture
@@ -91,14 +121,16 @@ PC Local                    GitHub                  Streamlit Cloud
 plannings/ (CSV)            code source      →      app déployée
      │                      (sans secrets)          (lit MongoDB)
      │ import_plannings_mongo.py
-     ▼
-MongoDB Atlas
-(plannings + planogrammes + produits + commandes)
+     │                                              ┌─ Importer planning CSV
+     │                                              │  (expander "📥 Mettre à jour")
+     ▼                                              └─ Supprimer un planning
+MongoDB Atlas                          ◄────────────   (expander "🗑️ Supprimer")
+(plannings + planogrammes + produits + commandes + machines)
 ```
 
-- Les **fichiers CSV planning** restent sur ton PC, ils ne vont **jamais** sur GitHub
+- Les **fichiers CSV planning** peuvent être importés **depuis le PC** (script) **ou depuis l'app** (expander dédié)
 - Le **code** est sur GitHub, déployé automatiquement sur Streamlit Cloud à chaque push
-- Les **données** (plannings, planogrammes, produits, fichier Excel commandes) sont dans MongoDB Atlas
+- Les **données** (plannings, planogrammes, produits, fichier Excel commandes, machines) sont dans MongoDB Atlas
 - Le **fichier de chargement** et les **fichiers d'audit** sont uploadés directement dans l'app au besoin
 
 ---
@@ -107,14 +139,18 @@ MongoDB Atlas
 
 ```
 ├── app.py                      # Application principale — navigation et routing entre pages
+├── page_machines.py            # Module Machines (parc de distributeurs)
+├── page_no_audit.py            # Module No Audit / Sans Ventes
 ├── page_planogrammes.py        # Module Planogrammes (UI complète)
 ├── page_inventaires.py         # Module Inventaires
 ├── page_commandes.py           # Module Commandes (extraction Gemini + Excel)
 ├── page_indefinis.py           # Module Détection des Indéfinis
+├── page_cr.py                  # Module Compte Rendu hebdomadaire
+├── page_controle_reception.py  # Module Contrôle réception (factures fournisseurs)
 ├── planogrammes_storage.py     # Accès MongoDB pour planogrammes et produits_lib
 ├── planning_parser.py          # Parsing des fichiers CSV planning
 ├── chargement_parser.py        # Parsing du fichier de chargement + détection tournées décalées
-├── mongo_storage.py            # Connexion et lecture des plannings depuis MongoDB
+├── mongo_storage.py            # Connexion MongoDB : lecture, upsert et suppression de plannings
 ├── excel_export.py             # Génération du fichier Excel coloré (38 onglets)
 ├── import_plannings_mongo.py   # Script one-shot d'import CSV → MongoDB (local uniquement)
 ├── requirements.txt            # Dépendances Python
@@ -143,13 +179,17 @@ Database  : suivi_reappro
 | `planogrammes` | Un document par planogramme de machine | Planogrammes |
 | `produits_lib` | Bibliothèque de produits (référentiel) | Planogrammes |
 | `suivi_excel` | Fichier Excel de suivi commandes | Commandes |
+| `machines` | Parc de distributeurs automatiques | Machines, No Audit, CR |
+| `reappros` | Répartition zones ↔ réappros | CR |
+| `incidents` | Incidents actifs non résolus | CR |
+| `product_mappings` | Cache des correspondances produits facture ↔ reçu | Contrôle réception |
 
 ### Format d'un document planning
 ```json
 {
   "employe": "RIDF1",
   "semaine": "S13",
-  "updated_at": "2026-03-19",
+  "updated_at": "2026-03-27",
   "planning": {
     "Lundi":    [["FTPA61 - FP BRIE COMTE ROBERT", "3218M1"], "..."],
     "Mardi":    [["BFP40 - BF CLICHY LA GARENNE", "1138M1"], "..."],
@@ -219,17 +259,7 @@ cd Suivi-Reapprovisionneurs---Application-Streamlit
 pip install -r requirements.txt
 ```
 
-### 3. Configurer les secrets locaux
-Créer le fichier `.streamlit/secrets.toml` :
-```toml
-[mongo]
-uri        = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
-db_name    = "suivi_reappro"
-collection = "plannings"
-```
-> ⚠️ Ce fichier est dans `.gitignore` — il ne sera jamais pushé sur GitHub.
-
-### 4. Lancer l'application
+### 3. Lancer l'application
 ```bash
 streamlit run app.py
 ```
@@ -237,25 +267,34 @@ L'application s'ouvre sur http://localhost:8501
 
 ---
 
-## 🗄️ Gestion des plannings (workflow local)
+## 🗄️ Gestion des plannings
 
-Les plannings CSV sont stockés **uniquement sur ton PC** dans le dossier `plannings/`.
+Les plannings peuvent être gérés de **deux façons** : depuis l'app ou depuis le terminal.
 
-### Modifier un planning
-1. Ouvrir le fichier CSV correspondant dans `plannings/` (ex: `plannings/RIDF1.csv`)
-2. Modifier les données directement dans le CSV
-3. Sauvegarder
+### ✅ Depuis l'application (recommandé)
 
-### Ajouter un nouveau réappro
-1. Créer un nouveau fichier CSV dans `plannings/` en respectant le format standard
-2. Lancer l'import — le script le détecte automatiquement
+Dans la page **Suivi Réapprovisionneurs**, section **⚙️ Plannings chargés** :
 
-### Importer dans MongoDB
+**Importer / mettre à jour un planning**
+1. Déplier **📥 Mettre à jour les plannings**
+2. Déposer un ou plusieurs fichiers `{réappro}.csv`
+3. Cliquer **📥 Importer** → chaque planning est inséré ou mis à jour (upsert)
+4. La liste se rafraîchit automatiquement
+
+**Supprimer un planning**
+1. Déplier **🗑️ Supprimer un planning**
+2. Sélectionner un ou plusieurs réappros dans le menu déroulant
+3. Cliquer **🗑️ Supprimer (N)** → les plannings sont supprimés de MongoDB
+4. La liste se rafraîchit automatiquement
+
+### 🖥️ Depuis le terminal (méthode alternative)
+
+Placer les fichiers CSV dans `plannings/` puis :
+
 ```bash
 python import_plannings_mongo.py
 ```
-Le script fait un `upsert` : il **crée ou écrase** chaque document existant.  
-L'app Streamlit relit automatiquement depuis MongoDB (cache rafraîchi toutes les 5 minutes).
+Le script fait un `upsert` : il **crée ou écrase** chaque document existant.
 
 ---
 
@@ -269,19 +308,7 @@ git push origin main
 ```
 > Le dossier `plannings/` et `.streamlit/secrets.toml` sont exclus automatiquement par `.gitignore`
 
-### 2. Configurer les secrets sur Streamlit Cloud
-1. Aller sur [share.streamlit.io](https://share.streamlit.io)
-2. Cliquer sur l'app → **Settings** → **Secrets**
-3. Coller :
-```toml
-[mongo]
-uri        = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
-db_name    = "suivi_reappro"
-collection = "plannings"
-```
-4. Cliquer **Save** → l'app redémarre automatiquement
-
-### 3. Autoriser Streamlit Cloud dans MongoDB Atlas
+### 2. Autoriser Streamlit Cloud dans MongoDB Atlas
 1. Atlas → **Security** → **Network Access**
 2. **Add IP Address** → **Allow Access from Anywhere** (`0.0.0.0/0`)
 3. Confirm
@@ -320,7 +347,7 @@ Le fichier Excel généré contient **38 onglets** :
 ### Suivi réappros (chaque matin)
 ```
 1. Ouvrir l'app → page "Suivi Réapprovisionneurs"
-2. Sélectionner le jour dans la sidebar
+2. Sélectionner le jour dans le sélecteur "Jour d'analyse"
 3. Uploader le fichier de chargement machine du jour (export CSV)
 4. Cliquer "Lancer l'analyse"
 5. Consulter les résultats (onglets : récap, non faites, jokers, décalées)
@@ -340,6 +367,14 @@ Le fichier Excel généré contient **38 onglets** :
 1. Ouvrir l'app → page "Planogrammes"
 2. Créer ou modifier un planogramme
 3. Exporter en PDF si besoin pour affichage sur site
+```
+
+### No Audit / Sans Ventes
+```
+1. Ouvrir l'app → page "No Audit / Ventes"
+2. Uploader le fichier de télémétrie CSV
+3. Configurer la période (nombre de jours)
+4. Consulter les onglets "No Audit" et "Sans Ventes"
 ```
 
 ---
