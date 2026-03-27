@@ -20,6 +20,8 @@ Configuration (secrets Streamlit) :
   collection = "plannings"
 """
 
+import datetime
+
 import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -86,3 +88,28 @@ def load_plannings_from_mongo() -> tuple:
         errors["MongoDB"] = f"Erreur inattendue : {e}"
 
     return plannings, errors
+
+
+def upsert_planning(employe: str, planning: dict, semaine: str) -> None:
+    """Insère ou met à jour le planning d'un réappro dans MongoDB (upsert)."""
+    col = _get_collection()
+    planning_json = {
+        jour: [[c, m] for c, m in salles]
+        for jour, salles in planning.items()
+    }
+    col.update_one(
+        {"employe": employe},
+        {"$set": {
+            "employe":    employe,
+            "planning":   planning_json,
+            "semaine":    semaine,
+            "updated_at": datetime.date.today().isoformat(),
+        }},
+        upsert=True,
+    )
+
+
+def delete_planning(employe: str) -> None:
+    """Supprime le planning d'un réappro depuis MongoDB."""
+    col = _get_collection()
+    col.delete_one({"employe": employe})

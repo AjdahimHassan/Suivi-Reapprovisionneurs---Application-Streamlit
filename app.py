@@ -203,6 +203,73 @@ elif st.session_state.page == "suivi":
             for k, v in planning_errors.items():
                 st.warning(f"{k}: {v}")
 
+    with st.expander("📥 Mettre à jour les plannings"):
+        st.caption("Déposer un ou plusieurs fichiers CSV nommés `{réappro}.csv`")
+        plan_files = st.file_uploader(
+            "Fichiers planning CSV",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="planning_uploader",
+            label_visibility="collapsed",
+        )
+        if plan_files:
+            col_imp, _ = st.columns([1, 4])
+            with col_imp:
+                if st.button("📥 Importer", use_container_width=True, key="btn_import_planning"):
+                    from mongo_storage import upsert_planning
+                    from planning_parser import parse_planning_file
+                    ok, errs = [], []
+                    for f in plan_files:
+                        employe = f.name.removesuffix(".csv").strip()
+                        try:
+                            planning, semaine = parse_planning_file(f.read(), employe)
+                            upsert_planning(employe, planning, semaine)
+                            total = sum(len(v) for v in planning.values())
+                            ok.append(f"{employe} ({total} salles, {semaine})")
+                        except Exception as e:
+                            errs.append(f"{employe} : {e}")
+                    for msg in ok:
+                        st.success(f"✅ {msg}")
+                    for msg in errs:
+                        st.error(f"❌ {msg}")
+                    if ok:
+                        _get_plannings.clear()
+                        st.rerun()
+
+    with st.expander("🗑️ Supprimer un planning"):
+        if plannings:
+            to_delete = st.multiselect(
+                "Réappros à supprimer",
+                options=sorted(plannings.keys()),
+                key="planning_to_delete",
+                label_visibility="collapsed",
+            )
+            if to_delete:
+                col_del, _ = st.columns([1, 4])
+                with col_del:
+                    if st.button(
+                        f"🗑️ Supprimer ({len(to_delete)})",
+                        use_container_width=True,
+                        key="btn_delete_planning",
+                        type="primary",
+                    ):
+                        from mongo_storage import delete_planning
+                        errs = []
+                        for emp in to_delete:
+                            try:
+                                delete_planning(emp)
+                            except Exception as e:
+                                errs.append(f"{emp} : {e}")
+                        deleted = [e for e in to_delete if e not in [err.split(" :")[0] for err in errs]]
+                        for emp in deleted:
+                            st.success(f"✅ {emp} supprimé")
+                        for msg in errs:
+                            st.error(f"❌ {msg}")
+                        _get_plannings.clear()
+                        st.rerun()
+        else:
+            st.caption("_Aucun planning à supprimer._")
+
     # ── Jour d'analyse ────────────────────────────────────
     st.divider()
     jour_col, _ = st.columns([1, 4])
