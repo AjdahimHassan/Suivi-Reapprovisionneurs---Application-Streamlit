@@ -259,17 +259,7 @@ cd Suivi-Reapprovisionneurs---Application-Streamlit
 pip install -r requirements.txt
 ```
 
-### 3. Configurer les secrets locaux
-Créer le fichier `.streamlit/secrets.toml` :
-```toml
-[mongo]
-uri        = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
-db_name    = "suivi_reappro"
-collection = "plannings"
-```
-> ⚠️ Ce fichier est dans `.gitignore` — il ne sera jamais pushé sur GitHub.
-
-### 4. Lancer l'application
+### 3. Lancer l'application
 ```bash
 streamlit run app.py
 ```
