@@ -70,7 +70,8 @@ def _load_incidents() -> dict:
 def _save_commentaires(rows: list[dict], type_: str):
     """
     Upsert des commentaires pour chaque ligne avec commentaire non vide.
-    rows = liste de dicts avec clés "Salle" et "Commentaire".
+    rows = liste de dicts avec clés "Salle", "Commentaire" et optionnellement "since_date".
+    since_date = date métier (dernière apparition ou dernière vente).
     """
     col = _get_incidents_col()
     now = datetime.datetime.utcnow()
@@ -79,17 +80,19 @@ def _save_commentaires(rows: list[dict], type_: str):
         salle = row.get("Salle", "")
         if not commentaire or not salle:
             continue
+        since_date = (row.get("since_date") or "").strip()
         existing = col.find_one({"salle": salle, "type": type_, "status": "actif"})
         if existing:
             col.update_one(
                 {"salle": salle, "type": type_, "status": "actif"},
-                {"$set": {"commentaire": commentaire}},
+                {"$set": {"commentaire": commentaire, "since_date": since_date}},
             )
         else:
             col.insert_one({
                 "salle":       salle,
                 "type":        type_,
                 "commentaire": commentaire,
+                "since_date":  since_date,
                 "created_at":  now,
                 "resolved_at": None,
                 "status":      "actif",
@@ -311,7 +314,16 @@ def _render_table_with_comments(df: pd.DataFrame, type_: str, key_prefix: str):
     c1, _ = st.columns([1.2, 6])
     with c1:
         if st.button("💾 Sauvegarder commentaires", key=f"{key_prefix}_save"):
-            rows = edited[["Salle", "Commentaire"]].to_dict("records")
+            # Inclure la date métier selon le type pour la persister en base
+            date_col = "Dernière apparition" if type_ == "no_audit" else "Dernière vente"
+            cols_to_save = ["Salle", "Commentaire"]
+            if date_col in edited.columns:
+                cols_to_save.append(date_col)
+            rows = (
+                edited[cols_to_save]
+                .rename(columns={date_col: "since_date"})
+                .to_dict("records")
+            )
             _save_commentaires(rows, type_)
             st.toast("✅ Commentaires sauvegardés.")
 
@@ -489,12 +501,17 @@ def _render_bottom_sections():
         with st.expander(f"📋 Commentaires actifs ({len(actifs)})", expanded=True):
             rows = []
             for inc in actifs:
-                created = inc.get("created_at")
+                # "Depuis" = date métier (dernière apparition / dernière vente)
+                # fallback sur created_at pour les anciens incidents sans since_date
+                since = inc.get("since_date") or (
+                    inc.get("created_at").strftime("%d/%m/%Y")
+                    if inc.get("created_at") else "—"
+                )
                 rows.append({
                     "Salle":       inc.get("salle", ""),
                     "Type":        "No Audit" if inc.get("type") == "no_audit" else "Sans Ventes",
                     "Commentaire": inc.get("commentaire", ""),
-                    "Depuis":      created.strftime("%d/%m/%Y") if created else "—",
+                    "Depuis":      since or "—",
                 })
             df_actifs = pd.DataFrame(rows)
             st.dataframe(df_actifs, use_container_width=True, hide_index=True)

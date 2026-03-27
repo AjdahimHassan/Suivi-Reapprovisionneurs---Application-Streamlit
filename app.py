@@ -11,6 +11,7 @@ import datetime
 from planning_parser import get_today_day_str, JOURS
 import page_machines
 import page_no_audit
+import page_cr
 import page_planogrammes
 import page_inventaires
 import page_commandes
@@ -53,7 +54,7 @@ if "jour_analyse" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7 = st.columns([2, 2, 2, 2, 2, 2, 2])
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8 = st.columns([2, 2, 2, 2, 2, 2, 2, 2])
 with nav_c1:
     if st.button(
         "🖥️  Machines",
@@ -116,6 +117,15 @@ with nav_c7:
         type="primary" if st.session_state.page == "indefinis" else "secondary",
     ):
         st.session_state.page = "indefinis"
+        st.rerun()
+with nav_c8:
+    if st.button(
+        "📝  CR",
+        key="nav_cr",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "cr" else "secondary",
+    ):
+        st.session_state.page = "cr"
         st.rerun()
 
 st.divider()
@@ -485,3 +495,17 @@ elif st.session_state.page == "indefinis":
     )
 
     page_indefinis.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : CR
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "cr":
+
+    st.markdown('<div class="main-title">📝 Compte Rendu Hebdomadaire</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Générez le compte rendu hebdomadaire par zone géographique.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_cr.render()
