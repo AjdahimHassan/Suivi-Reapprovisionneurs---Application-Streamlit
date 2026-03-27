@@ -399,6 +399,36 @@ def add_commande_to_excel(wb, fournisseur, date_commande, depot, produits):
 
 def render():
 
+    # ── Sélection du mode ──
+    col_m1, col_m2, col_void = st.columns([2, 2, 4])
+    with col_m1:
+        if st.button(
+            "📥 Saisir une commande",
+            key="mode_saisie",
+            use_container_width=True,
+            type="primary" if st.session_state.get("commande_mode", "saisie") == "saisie" else "secondary",
+        ):
+            st.session_state["commande_mode"] = "saisie"
+            st.rerun()
+    with col_m2:
+        if st.button(
+            "🔍 Contrôler une réception",
+            key="mode_controle",
+            use_container_width=True,
+            type="primary" if st.session_state.get("commande_mode", "saisie") == "controle" else "secondary",
+        ):
+            st.session_state["commande_mode"] = "controle"
+            st.rerun()
+
+    st.divider()
+
+    # Routing
+    mode = st.session_state.get("commande_mode", "saisie")
+    if mode == "controle":
+        import page_controle_reception
+        page_controle_reception.render()
+        return
+
     # ── Gestion du fichier Excel (toujours visible en haut) ──
     st.markdown("### 📂 Fichier Excel de suivi")
     excel_bytes_mongo = load_excel_from_mongo()
