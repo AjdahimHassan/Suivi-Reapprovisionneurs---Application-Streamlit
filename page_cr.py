@@ -258,7 +258,7 @@ def render():
             "Contenu DA",
             value=da_content,
             height=150,
-            key="cr_da_content",
+            key=f"cr_da_content_{zone}",
             label_visibility="collapsed",
         )
 
