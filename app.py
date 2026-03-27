@@ -50,6 +50,10 @@ if "results" not in st.session_state:
     st.session_state.results = {}
 if "jour_analyse" not in st.session_state:
     st.session_state.jour_analyse = get_today_day_str()
+if "chargement_bytes" not in st.session_state:
+    st.session_state["chargement_bytes"] = None
+if "excel_bytes" not in st.session_state:
+    st.session_state["excel_bytes"] = None
 
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
@@ -181,38 +185,25 @@ elif st.session_state.page == "suivi":
     if not plannings:
         st.stop()
 
-    st.markdown("### 📂 Déposer le fichier de chargement machine du jour")
-    uploaded = st.file_uploader(
-        "Fichier export chargement (CSV)", type=["csv"],
-        key="chargement_uploader", label_visibility="collapsed",
-    )
+    # ── Plannings chargés ─────────────────────────────────
+    st.divider()
+    st.markdown("### ⚙️ Plannings chargés")
+    if plannings:
+        st.success(f"✅ {len(plannings)} plannings chargés — `MongoDB Atlas`")
+        with st.expander("Voir les réappros"):
+            for emp, p in sorted(plannings.items()):
+                total = sum(len(v) for v in p.values())
+                st.caption(f"**{emp}** — {total} salles/semaine")
+    else:
+        st.error("❌ Aucun planning trouvé.")
+        for k, v in planning_errors.items():
+            st.error(f"{k}: {v}")
+    if planning_errors and plannings:
+        with st.expander(f"⚠️ {len(planning_errors)} erreur(s)"):
+            for k, v in planning_errors.items():
+                st.warning(f"{k}: {v}")
 
-    col_btn, _ = st.columns([1, 5])
-    with col_btn:
-        lancer = st.button(
-            "🚀 Lancer l'analyse", type="primary",
-            use_container_width=True, disabled=(uploaded is None),
-        )
-
-    if lancer and uploaded:
-        with st.spinner("Analyse en cours..."):
-            try:
-                chargement = parse_chargement_csv(uploaded.read())
-                results = croiser_planning_chargement(
-                    plannings, chargement, st.session_state.jour_analyse
-                )
-                st.session_state.results = results
-                st.success(f"✅ Analyse terminée — {len(results)} réappros traités")
-            except Exception as e:
-                st.error(f"Erreur : {e}")
-                st.stop()
-
-    if not st.session_state.results:
-        st.stop()
-
-    results = st.session_state.results
-
-    # Jour d'analyse
+    # ── Jour d'analyse ────────────────────────────────────
     st.divider()
     jour_col, _ = st.columns([1, 4])
     with jour_col:
@@ -227,6 +218,76 @@ elif st.session_state.page == "suivi":
         if jour_selectionne != st.session_state.jour_analyse:
             st.session_state.jour_analyse = jour_selectionne
             st.rerun()
+
+    # ── Export Excel ───────────────────────────────────────
+    st.divider()
+    st.markdown("### 📥 Export Excel")
+    if st.session_state.results:
+        col_exp, _ = st.columns([1, 4])
+        with col_exp:
+            if st.button("📊 Générer le fichier Excel", use_container_width=True):
+                with st.spinner("Génération..."):
+                    try:
+                        st.session_state["excel_bytes"] = generer_excel(
+                            st.session_state.results, st.session_state.jour_analyse
+                        )
+                        st.session_state["excel_jour"] = st.session_state.jour_analyse
+                    except Exception as e:
+                        st.error(f"Erreur Excel : {e}")
+
+            # Bouton download TOUJOURS rendu en dehors du if st.button(...)
+            if st.session_state.get("excel_bytes"):
+                date_str = datetime.date.today().strftime("%Y%m%d")
+                jour_export = st.session_state.get("excel_jour", st.session_state.jour_analyse)
+                st.download_button(
+                    label="⬇️ Télécharger Excel",
+                    data=st.session_state["excel_bytes"],
+                    file_name=f"suivi_reappro_{date_str}_{jour_export}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+    else:
+        st.caption("_Analysez un fichier de chargement pour générer l'export._")
+
+    st.divider()
+    st.markdown("### 📂 Déposer le fichier de chargement machine du jour")
+    uploaded = st.file_uploader(
+        "Fichier export chargement (CSV)", type=["csv"],
+        key="chargement_uploader", label_visibility="collapsed",
+    )
+
+    # Persister les bytes en session pour survivre aux st.rerun()
+    if uploaded is not None:
+        st.session_state["chargement_bytes"] = uploaded.getvalue()
+
+    has_file = st.session_state.get("chargement_bytes") is not None
+
+    col_btn, _ = st.columns([1, 5])
+    with col_btn:
+        lancer = st.button(
+            "🚀 Lancer l'analyse", type="primary",
+            use_container_width=True, disabled=(not has_file),
+        )
+
+    if lancer and has_file:
+        with st.spinner("Analyse en cours..."):
+            try:
+                chargement = parse_chargement_csv(st.session_state["chargement_bytes"])
+                results = croiser_planning_chargement(
+                    plannings, chargement, st.session_state.jour_analyse
+                )
+                st.session_state.results = results
+                st.session_state["excel_bytes"] = None  # Invalider l'ancien export
+                st.toast(f"✅ Analyse terminée — {len(results)} réappros traités")
+            except Exception as e:
+                st.error(f"Erreur : {e}")
+                st.stop()
+        st.rerun()  # Force re-render : Export Excel voit maintenant st.session_state.results
+
+    if not st.session_state.results:
+        st.stop()
+
+    results = st.session_state.results
 
     jour = st.session_state.jour_analyse
 
@@ -399,45 +460,6 @@ elif st.session_state.page == "suivi":
                     height=min(700, 38 + len(df_d) * 35),
                 )
 
-    # Export Excel
-    st.divider()
-    st.markdown("### 📥 Export Excel")
-    col_exp, _ = st.columns([1, 4])
-    with col_exp:
-        if st.button("📊 Générer le fichier Excel", use_container_width=True):
-            with st.spinner("Génération..."):
-                try:
-                    excel_bytes = generer_excel(results, jour)
-                    date_str = datetime.date.today().strftime("%Y%m%d")
-                    st.download_button(
-                        label="⬇️ Télécharger Excel",
-                        data=excel_bytes,
-                        file_name=f"suivi_reappro_{date_str}_{jour}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-                except Exception as e:
-                    st.error(f"Erreur Excel : {e}")
-
-    # ── Plannings (bas de page) ───────────────────────────
-    st.divider()
-    st.markdown("### ⚙️ Plannings chargés")
-
-    if plannings:
-        st.success(f"✅ {len(plannings)} plannings chargés — `MongoDB Atlas`")
-        with st.expander("Voir les réappros"):
-            for emp, p in sorted(plannings.items()):
-                total = sum(len(v) for v in p.values())
-                st.caption(f"**{emp}** — {total} salles/semaine")
-    else:
-        st.error("❌ Aucun planning trouvé.")
-        for k, v in planning_errors.items():
-            st.error(f"{k}: {v}")
-
-    if planning_errors and plannings:
-        with st.expander(f"⚠️ {len(planning_errors)} erreur(s)"):
-            for k, v in planning_errors.items():
-                st.warning(f"{k}: {v}")
 
 
 # ════════════════════════════════════════════════════════
