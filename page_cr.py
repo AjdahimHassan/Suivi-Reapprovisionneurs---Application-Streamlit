@@ -225,6 +225,13 @@ def render():
     col_zone, col_date, _ = st.columns([2, 2, 4])
     with col_zone:
         zone = st.selectbox("Zone", ZONES, key="cr_zone", disabled=no_reappros)
+
+    # Vider le contenu DA en cache si la zone a changé depuis le dernier rendu
+    if st.session_state.get("_cr_last_zone") != zone:
+        for k in list(st.session_state.keys()):
+            if k.startswith("cr_da_content_"):
+                del st.session_state[k]
+        st.session_state["_cr_last_zone"] = zone
     with col_date:
         date_rapport = st.date_input(
             "Date du rapport",
