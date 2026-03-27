@@ -318,19 +318,7 @@ git push origin main
 ```
 > Le dossier `plannings/` et `.streamlit/secrets.toml` sont exclus automatiquement par `.gitignore`
 
-### 2. Configurer les secrets sur Streamlit Cloud
-1. Aller sur [share.streamlit.io](https://share.streamlit.io)
-2. Cliquer sur l'app → **Settings** → **Secrets**
-3. Coller :
-```toml
-[mongo]
-uri        = "mongodb+srv://admin:admin@tournees.d5m0xjg.mongodb.net/"
-db_name    = "suivi_reappro"
-collection = "plannings"
-```
-4. Cliquer **Save** → l'app redémarre automatiquement
-
-### 3. Autoriser Streamlit Cloud dans MongoDB Atlas
+### 2. Autoriser Streamlit Cloud dans MongoDB Atlas
 1. Atlas → **Security** → **Network Access**
 2. **Add IP Address** → **Allow Access from Anywhere** (`0.0.0.0/0`)
 3. Confirm
