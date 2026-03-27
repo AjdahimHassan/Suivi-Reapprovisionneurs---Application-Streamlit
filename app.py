@@ -24,7 +24,7 @@ from excel_export import generer_excel
 # CONFIG PAGE
 # ────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Outil Réappro",
+    page_title="Distriprot Data",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -36,8 +36,41 @@ st.markdown("""
 [data-testid="collapsedControl"] { display: none !important; }
 
 /* Titres */
-.main-title { font-size:2rem; font-weight:800; color:#1F4E79; margin-bottom:0.2rem; }
+.main-title { font-size:2rem; font-weight:800; color:#1B3D6F; margin-bottom:0.2rem; }
 .subtitle   { font-size:1rem; color:#555; margin-bottom:1.5rem; }
+
+/* Bouton primaire (nav actif + actions principales) */
+.stButton > button[kind="primary"] {
+    background-color: #E8922A !important;
+    border-color: #E8922A !important;
+    color: #ffffff !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #D07A1A !important;
+    border-color: #D07A1A !important;
+    color: #ffffff !important;
+}
+
+/* Bouton secondaire (nav inactif) */
+.stButton > button[kind="secondary"] {
+    color: #1B3D6F !important;
+    border-color: #7BC4E8 !important;
+}
+.stButton > button[kind="secondary"]:hover {
+    background-color: #EEF5FC !important;
+    border-color: #E8922A !important;
+    color: #E8922A !important;
+}
+
+/* Métriques */
+[data-testid="metric-container"] label { color: #1B3D6F; }
+
+/* Empêche le retour à la ligne dans les boutons nav */
+.stButton > button { white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
+
+/* Remonte le contenu au maximum en haut */
+[data-testid="stHeader"] { display: none !important; }
+.block-container { padding-top: 0.5rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -58,7 +91,19 @@ if "excel_bytes" not in st.session_state:
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8 = st.columns([2, 2, 2, 2, 2, 2, 2, 2])
+import os as _os
+
+# Logo — ligne dédiée, aligné à gauche
+_logo_path = "assets/logo.png"
+_logo_col, _ = st.columns([1, 9])
+with _logo_col:
+    if _os.path.exists(_logo_path):
+        st.image(_logo_path, width=90)
+    else:
+        st.markdown('<div style="font-size:1.3rem;font-weight:900;color:#1B3D6F;">DP</div>', unsafe_allow_html=True)
+
+# Barre de navigation — 8 boutons, labels courts pour éviter le retour à la ligne
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8 = st.columns(8)
 with nav_c1:
     if st.button(
         "🖥️  Machines",
@@ -70,7 +115,7 @@ with nav_c1:
         st.rerun()
 with nav_c2:
     if st.button(
-        "📦  Suivi Réapprovisionneurs",
+        "📦  Tournées",
         key="nav_suivi",
         use_container_width=True,
         type="primary" if st.session_state.page == "suivi" else "secondary",
@@ -79,7 +124,7 @@ with nav_c2:
         st.rerun()
 with nav_c3:
     if st.button(
-        "📉  No Audit / Ventes",
+        "📉  No Audit",
         key="nav_no_audit",
         use_container_width=True,
         type="primary" if st.session_state.page == "no_audit" else "secondary",
