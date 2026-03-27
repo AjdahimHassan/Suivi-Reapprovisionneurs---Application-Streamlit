@@ -113,3 +113,56 @@ def delete_planning(employe: str) -> None:
     """Supprime le planning d'un réappro depuis MongoDB."""
     col = _get_collection()
     col.delete_one({"employe": employe})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUARTIX VEHICLES — collection `quartix_vehicles`
+#
+# Un document par plaque véhicule (= nom de feuille dans l'export QUARTIX) :
+# {
+#   "plate":         "VEHICULE_1",
+#   "employe":       "RIDF1",
+#   "depot_address": "3 Rue des Abattoirs, 38120 Saint-Égrève",
+#   "depot_coords":  [45.24055, 5.6652996],
+#   "updated_at":    "2026-03-27"
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_qv_col():
+    """Retourne la collection quartix_vehicles (même DB que plannings)."""
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["quartix_vehicles"]
+
+
+def load_quartix_vehicle(plate: str) -> dict | None:
+    """Charge les infos (employé + dépôt) d'une plaque véhicule depuis MongoDB."""
+    try:
+        return _get_qv_col().find_one({"plate": plate}, {"_id": 0})
+    except Exception:
+        return None
+
+
+def load_all_quartix_vehicles() -> dict:
+    """Retourne {plate: doc} pour toutes les plaques connues en base."""
+    try:
+        docs = list(_get_qv_col().find({}, {"_id": 0}))
+        return {d["plate"]: d for d in docs if "plate" in d}
+    except Exception:
+        return {}
+
+
+def upsert_quartix_vehicle(plate: str, employe: str,
+                            depot_address: str, depot_coords: list) -> None:
+    """Insère ou met à jour les infos d'une plaque véhicule (upsert)."""
+    _get_qv_col().update_one(
+        {"plate": plate},
+        {"$set": {
+            "plate":         plate,
+            "employe":       employe,
+            "depot_address": depot_address,
+            "depot_coords":  list(depot_coords),
+            "updated_at":    datetime.date.today().isoformat(),
+        }},
+        upsert=True,
+    )

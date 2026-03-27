@@ -16,6 +16,7 @@ import page_planogrammes
 import page_inventaires
 import page_commandes
 import page_indefinis
+import page_quartix
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -102,11 +103,11 @@ with _logo_col:
     else:
         st.markdown('<div style="font-size:1.3rem;font-weight:900;color:#1B3D6F;">DP</div>', unsafe_allow_html=True)
 
-# Barre de navigation — 8 boutons, labels courts pour éviter le retour à la ligne
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8 = st.columns(8)
+# Barre de navigation — 9 boutons
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9 = st.columns(9)
 with nav_c1:
     if st.button(
-        "🖥️  Machines",
+        "🖥️ Machines",
         key="nav_machines",
         use_container_width=True,
         type="primary" if st.session_state.page == "machines" else "secondary",
@@ -115,7 +116,7 @@ with nav_c1:
         st.rerun()
 with nav_c2:
     if st.button(
-        "📦  Tournées",
+        "📦 Tournées",
         key="nav_suivi",
         use_container_width=True,
         type="primary" if st.session_state.page == "suivi" else "secondary",
@@ -124,7 +125,7 @@ with nav_c2:
         st.rerun()
 with nav_c3:
     if st.button(
-        "📉  No Audit",
+        "📉 No Audit",
         key="nav_no_audit",
         use_container_width=True,
         type="primary" if st.session_state.page == "no_audit" else "secondary",
@@ -133,7 +134,7 @@ with nav_c3:
         st.rerun()
 with nav_c4:
     if st.button(
-        "🗂️  Planogrammes",
+        "🗂️ Planogrammes",
         key="nav_plano",
         use_container_width=True,
         type="primary" if st.session_state.page == "planogrammes" else "secondary",
@@ -142,7 +143,7 @@ with nav_c4:
         st.rerun()
 with nav_c5:
     if st.button(
-        "📊  Inventaires",
+        "📊 Inventaires",
         key="nav_inv",
         use_container_width=True,
         type="primary" if st.session_state.page == "inventaires" else "secondary",
@@ -151,7 +152,7 @@ with nav_c5:
         st.rerun()
 with nav_c6:
     if st.button(
-        "🛒  Commandes",
+        "🛒 Commandes",
         key="nav_cmd",
         use_container_width=True,
         type="primary" if st.session_state.page == "commandes" else "secondary",
@@ -160,7 +161,7 @@ with nav_c6:
         st.rerun()
 with nav_c7:
     if st.button(
-        "❓  Indéfinis",
+        "❓ Indéfinis",
         key="nav_indef",
         use_container_width=True,
         type="primary" if st.session_state.page == "indefinis" else "secondary",
@@ -169,12 +170,21 @@ with nav_c7:
         st.rerun()
 with nav_c8:
     if st.button(
-        "📝  CR",
+        "📝 CR",
         key="nav_cr",
         use_container_width=True,
         type="primary" if st.session_state.page == "cr" else "secondary",
     ):
         st.session_state.page = "cr"
+        st.rerun()
+with nav_c9:
+    if st.button(
+        "🗺️ Quartix",
+        key="nav_quartix",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "quartix" else "secondary",
+    ):
+        st.session_state.page = "quartix"
         st.rerun()
 
 st.divider()
@@ -643,3 +653,17 @@ elif st.session_state.page == "cr":
     )
 
     page_cr.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : QUARTIX
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "quartix":
+
+    st.markdown('<div class="main-title">🗺️ Trajets QUARTIX</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Visualisez le trajet complet d\'un réappro — tracé de route, arrêts et durées.</div>',
+        unsafe_allow_html=True,
+    )
+
+    page_quartix.render()
