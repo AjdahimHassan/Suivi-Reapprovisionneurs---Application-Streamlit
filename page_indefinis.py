@@ -244,7 +244,7 @@ def analyser_prix(ventes_df: pd.DataFrame, produits: list) -> tuple:
     Retourne :
       anomalies_df  : lignes avec écart > tolérance
       non_ref_codes : set de codes absents de la bibliothèque
-      nb_lignes     : nb de lignes analysées (après dédoublonnage machine/produit/prix)
+      nb_groupes    : nb de combinaisons uniques (machine × produit) analysées
     """
     # Bibliothèque : {code: prix_ht_float}
     lib = {}
@@ -264,7 +264,7 @@ def analyser_prix(ventes_df: pd.DataFrame, produits: list) -> tuple:
         .reset_index()
     )
 
-    nb_lignes = len(groupes)
+    nb_groupes = len(groupes)
     anomalies  = []
     non_ref    = set()
 
@@ -293,7 +293,7 @@ def analyser_prix(ventes_df: pd.DataFrame, produits: list) -> tuple:
             by="Écart (€)", key=lambda s: s.abs(), ascending=False
         ).reset_index(drop=True)
 
-    return anomalies_df, non_ref, nb_lignes
+    return anomalies_df, non_ref, nb_groupes
 
 
 # ──────────────────────────────────────────────────────────
@@ -567,22 +567,26 @@ def render():
             st.error(f"Erreur lecture du fichier ventes : {e}")
             return
 
+        nb_lignes_brutes = len(ventes_df)
+
         with st.spinner("Analyse en cours…"):
-            anomalies_df, non_ref, nb_lignes = analyser_prix(ventes_df, produits)
+            anomalies_df, non_ref, nb_groupes = analyser_prix(ventes_df, produits)
 
         st.divider()
 
         # ── KPIs ──
         nb_anomalies = len(anomalies_df)
         nb_non_ref   = len(non_ref)
-        nb_ok        = nb_lignes - nb_anomalies - nb_non_ref
-        pct_ok       = round(nb_ok / nb_lignes * 100) if nb_lignes else 0
+        nb_ok        = nb_groupes - nb_anomalies - nb_non_ref
+        pct_ok       = round(nb_ok / nb_groupes * 100) if nb_groupes else 0
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("📊 Lignes analysées", nb_lignes,
-                  help="Nombre de combinaisons uniques (machine, produit, prix observé)")
-        k2.metric("✅ Conformes", f"{pct_ok} %")
-        k3.metric("❌ Mauvais prix", nb_anomalies)
+        k1.metric("📊 Lignes analysées", f"{nb_lignes_brutes:,}".replace(",", " "),
+                  help=f"{nb_groupes:,} combinaisons uniques (machine × produit) — {nb_lignes_brutes:,} lignes brutes dans le fichier".replace(",", " "))
+        k2.metric("✅ Conformes", f"{pct_ok} %",
+                  help=f"Sur {nb_groupes} combinaisons uniques machine/produit")
+        k3.metric("❌ Mauvais prix", nb_anomalies,
+                  help="Combinaisons machine/produit avec au moins un prix HT anormal")
         k4.metric("⚠️ Non référencés", nb_non_ref,
                   help="Codes produits absents de la bibliothèque planogrammes")
 
