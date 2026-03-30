@@ -9,7 +9,6 @@ Page QUARTIX — Visualisation des trajets réappros
 """
 
 import re
-import pickle
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -24,11 +23,17 @@ from mongo_storage import (
     load_all_quartix_vehicles,
     upsert_quartix_vehicle,
     load_plannings_from_mongo,
+    load_geocode_cache,
+    save_geocode_entry,
+    load_routes_cache,
+    save_route_entry,
+    clear_geocode_cache,
+    clear_routes_cache,
 )
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-CACHE_FILE     = "quartix_geocode_cache.pkl"
+import requests as _requests
 DEPOT_RADIUS_M = 1000   # rayon autour du dépôt pour détecter un passage (1 km)
 MIN_STOP_MIN   = 5      # durée minimale d'arrêt pour compter comme un passage (min)
 BEFORE_WORK_H  = 11     # heure limite "avant tournée" — départ doit être < 11h
@@ -50,26 +55,90 @@ C_RED        = "#C0392B"
 C_PURPLE     = "#9B59B6"
 
 
+# ── Expansion des abréviations françaises pour Nominatim ─────────────────────
+# Nominatim (OpenStreetMap) peine à reconnaître les abréviations comme "Trav.",
+# "Av.", "Bd." etc. On les développe avant l'appel API pour maximiser les hits.
+
+_ADDR_ABBREVS = [
+    (re.compile(r'\bAv\.\s*'),   'Avenue '),
+    (re.compile(r'\bBd\.?\s*'),  'Boulevard '),
+    (re.compile(r'\bTrav\.\s*'), 'Traverse '),
+    (re.compile(r'\bPl\.\s*'),   'Place '),
+    (re.compile(r'\bImp\.\s*'),  'Impasse '),
+    (re.compile(r'\bCrs\.\s*'),  'Cours '),
+    (re.compile(r'\bAll\.\s*'),  'Allée '),
+    (re.compile(r'\bRte\.\s*'),  'Route '),
+    # Apostrophe manquante : "lHermite" → "l'Hermite", "lEglise" → "l'Eglise"
+    (re.compile(r'\bl([A-ZÉÀÂÊÎÙÛ])'), r"l'\1"),
+    (re.compile(r'\bChe\.\s*'),  'Chemin '),
+    (re.compile(r'\bSt\.\s*'),   'Saint '),
+    (re.compile(r'\bSte\.\s*'),  'Sainte '),
+    (re.compile(r'\bVla\.\s*'),  'Villa '),
+    (re.compile(r'\bSq\.\s*'),   'Square '),
+]
+
+
+def _expand_address(addr: str) -> str:
+    """Développe les abréviations courantes pour améliorer le géocodage Nominatim."""
+    for pattern, replacement in _ADDR_ABBREVS:
+        addr = pattern.sub(replacement, addr)
+    return addr.strip()
+
+
+# Préfixe QUARTIX parasite qui précède parfois les adresses (peut se répéter)
+_ARRET_MOTEUR_RE = re.compile(
+    r"(?:Véhicule\s+à\s+l.arrêt[^,]*,\s*moteur\s+en\s+marche\s*)+",
+    re.IGNORECASE,
+)
+
+
+def _clean_addr(addr: str) -> str:
+    """
+    Nettoie une adresse brute issue de l'export QUARTIX :
+      1. Supprime le préfixe 'Véhicule à l'arrêt, moteur en marche' (parfois répété)
+      2. Normalise les espaces
+    Retourne la chaîne originale strippée si rien n'a été trouvé.
+    """
+    cleaned = _ARRET_MOTEUR_RE.sub("", addr).strip()
+    return cleaned if cleaned else addr.strip()
+
+
 # ── Géocodage ────────────────────────────────────────────────────────────────
 
-def _load_cache() -> dict:
+def _get_osrm_route(coord_a: tuple, coord_b: tuple, routes_cache: dict) -> list:
+    """
+    Retourne la liste de [lat, lon] décrivant la route réelle entre A et B.
+    Utilise le cache MongoDB ; appelle l'API OSRM si absent ; fallback ligne droite.
+    coord_a / coord_b = (lat, lon)
+    """
+    key = (tuple(coord_a), tuple(coord_b))
+    if key in routes_cache:
+        return routes_cache[key]
     try:
-        with open(CACHE_FILE, "rb") as f:
-            return pickle.load(f)
-    except Exception:
-        return {}
-
-
-def _save_cache(cache: dict) -> None:
-    try:
-        with open(CACHE_FILE, "wb") as f:
-            pickle.dump(cache, f)
+        url = (
+            f"https://router.project-osrm.org/route/v1/driving/"
+            f"{coord_a[1]},{coord_a[0]};{coord_b[1]},{coord_b[0]}"
+            f"?overview=full&geometries=geojson"
+        )
+        resp = _requests.get(url, timeout=5)
+        data = resp.json()
+        if data.get("code") == "Ok":
+            raw   = data["routes"][0]["geometry"]["coordinates"]
+            route = [[c[1], c[0]] for c in raw]  # [lon,lat] → [lat,lon]
+            routes_cache[key] = route
+            save_route_entry(coord_a, coord_b, route)
+            return route
     except Exception:
         pass
+    # Fallback : ligne droite
+    route = [list(coord_a), list(coord_b)]
+    routes_cache[key] = route
+    save_route_entry(coord_a, coord_b, route)
+    return route
 
 
 def _geocode_all(addresses: list[str], cache: dict) -> dict:
-    """Géocode uniquement les adresses absentes du cache, met à jour le cache."""
+    """Géocode uniquement les adresses absentes du cache MongoDB, sauvegarde au fil de l'eau."""
     missing = [a for a in addresses if a and str(a).strip() and a not in cache]
     if not missing:
         return cache
@@ -83,11 +152,18 @@ def _geocode_all(addresses: list[str], cache: dict) -> dict:
     )
     bar = st.progress(0, text="Géocodage des adresses…")
     for i, addr in enumerate(missing):
+        # Essai 1 : adresse originale
         loc = geocode_fn(str(addr), timeout=10)
-        cache[addr] = (loc.latitude, loc.longitude) if loc else None
+        # Essai 2 : abréviations étendues (si échec et adresse différente)
+        if not loc:
+            expanded = _expand_address(str(addr))
+            if expanded != str(addr):
+                loc = geocode_fn(expanded, timeout=10)
+        coords = (loc.latitude, loc.longitude) if loc else None
+        cache[addr] = coords
+        save_geocode_entry(addr, coords)   # ← sauvegarde MongoDB (None ignoré)
         bar.progress((i + 1) / len(missing), text=f"Géocodage… {i+1}/{len(missing)}")
     bar.empty()
-    _save_cache(cache)
     return cache
 
 
@@ -174,19 +250,33 @@ def _check_depot_visit_day(
     before_tour = False
     after_tour  = False
 
+    def _near_depot(addr: str) -> bool:
+        coords = cache.get(addr)
+        return bool(coords and geodesic(coords, depot_coords).meters <= DEPOT_RADIUS_M)
+
+    def _stop_after_arrival(i: int) -> float:
+        """Durée d'arrêt après l'ARRIVÉE du trajet i = écart avant le départ du trajet i+1."""
+        if i + 1 >= n:
+            return 0.0
+        arr = grp.loc[i, "_arr"]
+        nxt = grp.loc[i + 1, "_dep"]
+        if pd.notna(arr) and pd.notna(nxt):
+            return max(0.0, (nxt - arr).total_seconds() / 60)
+        return 0.0
+
     # ── Avant tournée : N premiers trajets avec contrainte horaire ──
     for i in range(min(FIRST_N_TRIPS, n)):
         row = grp.loc[i]
-        if row["_dep"].hour >= BEFORE_WORK_H:
-            continue
-        coords = cache.get(str(row["Lieu de départ"]))
-        if not coords:
-            continue
-        if geodesic(coords, depot_coords).meters > DEPOT_RADIUS_M:
-            continue
-        if _stop_duration_at(grp, i) >= MIN_STOP_MIN:
-            before_tour = True
-            break
+        # Check départ
+        if row["_dep"].hour < BEFORE_WORK_H:
+            if _near_depot(str(row["Lieu de départ"])) and _stop_duration_at(grp, i) >= MIN_STOP_MIN:
+                before_tour = True
+                break
+        # Check arrivée
+        if pd.notna(row["_arr"]) and row["_arr"].hour < BEFORE_WORK_H:
+            if _near_depot(str(row["Lieu d'arrivée"])) and _stop_after_arrival(i) >= MIN_STOP_MIN:
+                before_tour = True
+                break
 
     # ── Après tournée : N derniers trajets, tout dernier exclu ──
     if n >= 2:
@@ -194,12 +284,12 @@ def _check_depot_visit_day(
         start = max(0, n - LAST_N_TRIPS)
         for i in range(start, n - 1):
             row = grp.loc[i]
-            coords = cache.get(str(row["Lieu de départ"]))
-            if not coords:
-                continue
-            if geodesic(coords, depot_coords).meters > DEPOT_RADIUS_M:
-                continue
-            if _stop_duration_at(grp, i) >= MIN_STOP_MIN:
+            # Check départ du trajet i
+            if _near_depot(str(row["Lieu de départ"])) and _stop_duration_at(grp, i) >= MIN_STOP_MIN:
+                after_tour = True
+                break
+            # Check arrivée du trajet i (ex : arrivée au dépôt, repart trajet suivant)
+            if _near_depot(str(row["Lieu d'arrivée"])) and _stop_after_arrival(i) >= MIN_STOP_MIN:
                 after_tour = True
                 break
 
@@ -297,17 +387,32 @@ def render() -> None:
     df_raw["_arr"] = pd.to_datetime(df_raw["Arrivée"], errors="coerce")
     df_raw = df_raw.dropna(subset=["_dep"]).sort_values("_dep").reset_index(drop=True)
 
+    # Nettoyage des adresses : supprime le préfixe "Véhicule à l'arrêt, moteur en marche"
+    for _col in ["Lieu de départ", "Lieu d'arrivée"]:
+        df_raw[_col] = df_raw[_col].astype(str).map(_clean_addr)
+
     if df_raw.empty:
         st.warning("Aucune donnée valide dans cette feuille.")
         return
 
     available_days = sorted(df_raw["_dep"].dt.date.unique(), reverse=True)
+    day_fmts = [d.strftime("%d/%m/%Y") for d in available_days]
+
+    # Initialise l'index du jour sélectionné dans session_state
+    day_idx_key = f"q_day_idx_{selected_vehicle}"
+    if day_idx_key not in st.session_state:
+        st.session_state[day_idx_key] = 0
+
     with col_d:
         sel_day_fmt = st.selectbox(
             "📅 Journée",
-            [d.strftime("%d/%m/%Y") for d in available_days],
+            day_fmts,
+            index=st.session_state[day_idx_key],
             key="q_day",
         )
+        # Sync l'index si l'utilisateur change via le selectbox
+        st.session_state[day_idx_key] = day_fmts.index(sel_day_fmt)
+
     selected_day = next(d for d in available_days if d.strftime("%d/%m/%Y") == sel_day_fmt)
 
     # ── 4. Panel véhicule : employé + dépôt ──────────────
@@ -394,7 +499,7 @@ def render() -> None:
                         st.warning("Veuillez saisir une adresse de dépôt.")
                     else:
                         with st.spinner("Géocodage de l'adresse…"):
-                            tmp_cache = _load_cache()
+                            tmp_cache = load_geocode_cache()
                             tmp_cache = _geocode_all([addr_to_save], tmp_cache)
                             coords = tmp_cache.get(addr_to_save)
 
@@ -432,55 +537,103 @@ def render() -> None:
     for c in ["Lieu de départ", "Lieu d'arrivée"]:
         addrs.update(df[c].dropna().astype(str).unique())
 
-    cache = _load_cache()
+    cache = load_geocode_cache()
     cache = _geocode_all(list(addrs), cache)
 
     # ── 6. Construction des arrêts ordonnés ───────────────
+    # Logique : pour chaque trajet on émet le point de DÉPART puis le point d'ARRIVÉE.
+    # Si deux trajets consécutifs partagent le même nom d'adresse (arrivée[i] == départ[i+1]),
+    # on n'ajoute qu'un seul point (pas de doublon). Cela garantit que chaque adresse
+    # présente dans la feuille Excel apparaît sur la carte.
+    n = len(df)
     stops = []
-    for i, row in df.iterrows():
-        dep_addr = str(row["Lieu de départ"])
-        dep_coords = cache.get(dep_addr)
+    prev_arr_addr = None  # dernière adresse d'arrivée ajoutée
 
+    for i in range(n):
+        row      = df.iloc[i]
+        dep_addr = str(row["Lieu de départ"])
+        arr_addr = str(row["Lieu d'arrivée"])
+        next_row = df.iloc[i + 1] if i < n - 1 else None
+
+        # ── Point de départ ──
+        # Ajouté uniquement s'il diffère de l'arrivée du trajet précédent
+        # (évite le doublon quand arrivée[i-1] == départ[i])
+        if dep_addr != prev_arr_addr:
+            stops.append({
+                "addr":     dep_addr,
+                "coords":   cache.get(dep_addr),
+                "time":     row["_dep"],
+                "stop_min": 0.0,
+                "trip_dur": row.get("Durée du sous-trajet"),
+                "dist":     row.get("Distance totale"),
+                "is_first": (len(stops) == 0),
+                "is_last":  False,
+            })
+
+        # ── Point d'arrivée ──
         stop_min = 0.0
-        if i > 0:
-            prev_arr = df.loc[i - 1, "_arr"]
-            if pd.notna(prev_arr) and pd.notna(row["_dep"]):
-                stop_min = (row["_dep"] - prev_arr).total_seconds() / 60
+        if next_row is not None and pd.notna(row["_arr"]) and pd.notna(next_row["_dep"]):
+            stop_min = max(0.0, (next_row["_dep"] - row["_arr"]).total_seconds() / 60)
 
         stops.append({
-            "addr":     dep_addr,
-            "coords":   dep_coords,
-            "time":     row["_dep"],
-            "stop_min": max(0.0, stop_min),
-            "trip_dur": row.get("Durée du sous-trajet"),
-            "dist":     row.get("Distance totale"),
-            "is_first": (i == 0),
-            "is_last":  False,
+            "addr":     arr_addr,
+            "coords":   cache.get(arr_addr),
+            "time":     row["_arr"],
+            "stop_min": stop_min,
+            "trip_dur": next_row.get("Durée du sous-trajet") if next_row is not None else None,
+            "dist":     next_row.get("Distance totale")       if next_row is not None else None,
+            "is_first": False,
+            "is_last":  (i == n - 1),
         })
 
-    last_row = df.iloc[-1]
-    arr_addr = str(last_row["Lieu d'arrivée"])
-    stops.append({
-        "addr":     arr_addr,
-        "coords":   cache.get(arr_addr),
-        "time":     last_row["_arr"],
-        "stop_min": 0.0,
-        "trip_dur": None,
-        "dist":     None,
-        "is_first": False,
-        "is_last":  True,
-    })
+        prev_arr_addr = arr_addr
 
     valid = [s for s in stops if s["coords"]]
     if len(valid) < 2:
         st.error(
             "Pas assez d'adresses géocodées pour tracer le trajet. "
-            "Vérifiez que les adresses du fichier sont reconnues par OpenStreetMap."
+            "Corrigez les adresses ci-dessous pour débloquer la carte."
         )
-        if st.checkbox("🔍 Voir les adresses non trouvées"):
-            for s in stops:
-                if not s["coords"]:
-                    st.caption(f"❌ {s['addr']}")
+        # Affiche quand même le panneau de correction des adresses manquantes
+        all_stop_addrs = list(dict.fromkeys(s["addr"] for s in stops))
+        missing_addrs  = [a for a in all_stop_addrs if not cache.get(a)]
+        if missing_addrs:
+            st.markdown(
+                f"<div style='background:#fff3cd;border-left:4px solid {C_ORANGE};"
+                f"padding:10px 14px;border-radius:6px;margin-bottom:8px'>"
+                f"<b>⚠️ {len(missing_addrs)} adresse(s) non reconnue(s)</b></div>",
+                unsafe_allow_html=True,
+            )
+            geocoder_fn = RateLimiter(
+                Nominatim(user_agent="distriprot_fix").geocode,
+                min_delay_seconds=1,
+            )
+            for orig_addr in missing_addrs:
+                fix_key = f"q_addr_fix_{hash(orig_addr)}"
+                if fix_key not in st.session_state:
+                    st.session_state[fix_key] = _expand_address(orig_addr)
+                col_addr, col_btn = st.columns([5, 1])
+                with col_addr:
+                    st.text_input(f"❌ {orig_addr}", key=fix_key, label_visibility="visible")
+                with col_btn:
+                    st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
+                    if st.button("Valider", key=f"q_btn_fix_{hash(orig_addr)}", use_container_width=True):
+                        corrected = st.session_state[fix_key].strip()
+                        if corrected:
+                            with st.spinner(f"Géocodage de « {corrected} »…"):
+                                try:
+                                    loc = geocoder_fn(corrected, timeout=10)
+                                except Exception:
+                                    loc = None
+                            if loc:
+                                save_geocode_entry(orig_addr, (loc.latitude, loc.longitude))
+                                if corrected != orig_addr:
+                                    save_geocode_entry(corrected, (loc.latitude, loc.longitude))
+                                st.success(f"✅ {loc.address}")
+                                st.rerun()
+                            else:
+                                st.error("Introuvable. Essayez une autre formulation.")
+                    st.markdown("</div>", unsafe_allow_html=True)
         return
 
     # ── 7. KPIs ───────────────────────────────────────────
@@ -512,21 +665,32 @@ def render() -> None:
              if depot_coords else "Dépôt non configuré — renseignez l'adresse ci-dessus",
     )
 
+    # ── Navigation journée ◀ / ▶ ──────────────────────────
+    nav_left, nav_mid, nav_right = st.columns([1, 6, 1])
+    with nav_left:
+        if st.button("◀ Jour préc.", key="q_day_prev", use_container_width=True,
+                     disabled=st.session_state[day_idx_key] >= len(available_days) - 1):
+            st.session_state[day_idx_key] += 1
+            st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<p style='text-align:center;color:#888;margin:0;padding-top:6px'>"
+            f"{sel_day_fmt} — {st.session_state[day_idx_key] + 1} / {len(available_days)}</p>",
+            unsafe_allow_html=True,
+        )
+    with nav_right:
+        if st.button("Jour suiv. ▶", key="q_day_next", use_container_width=True,
+                     disabled=st.session_state[day_idx_key] <= 0):
+            st.session_state[day_idx_key] -= 1
+            st.rerun()
+
     st.divider()
 
     # ── 8. Carte Folium ───────────────────────────────────
     center = [np.mean(lats), np.mean(lons)]
     m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
 
-    # Tracé route
-    folium.PolyLine(
-        locations=[s["coords"] for s in valid],
-        color=C_BLUE_DARK,
-        weight=3,
-        opacity=0.75,
-    ).add_to(m)
-
-    # Cercle dépôt (1 km) si connu
+    # Cercle dépôt dessiné EN PREMIER (couche de fond) pour ne pas masquer les marqueurs
     if depot_coords:
         folium.Circle(
             location=list(depot_coords),
@@ -540,17 +704,31 @@ def render() -> None:
             tooltip=f"Zone dépôt — rayon {DEPOT_RADIUS_M}m",
         ).add_to(m)
 
-    # Marqueurs d'arrêt
-    for s in valid:
+    # Tracé route — segments OSRM (routes réelles), avec fallback ligne droite
+    routes_cache = load_routes_cache()
+    osrm_bar = st.empty()
+    new_routes = sum(
+        1 for i in range(len(valid) - 1)
+        if (tuple(valid[i]["coords"]), tuple(valid[i+1]["coords"])) not in routes_cache
+    )
+    if new_routes:
+        osrm_bar.info(f"🗺️ Calcul des routes ({new_routes} segment(s))…")
+    for i in range(len(valid) - 1):
+        seg = _get_osrm_route(valid[i]["coords"], valid[i + 1]["coords"], routes_cache)
+        folium.PolyLine(seg, color=C_BLUE_DARK, weight=3, opacity=0.75).add_to(m)
+    osrm_bar.empty()
+
+    # Marqueurs d'arrêt numérotés (DivIcon)
+    # num_label = position dans valid (toujours 1, 2, 3… même si des stops sont sans coords)
+    for num_label, s in enumerate(valid, start=1):
         color, radius = _stop_style(s["stop_min"], s["is_first"], s["is_last"])
         time_str = s["time"].strftime("%H:%M") if pd.notna(s["time"]) else "?"
         dur_str  = f"{int(s['stop_min'])}min" if s["stop_min"] >= 1 else ""
         trip_min = _parse_min(s["trip_dur"])
 
-        label_first = "🚀 Départ dépôt" if s["is_first"] else ""
-        label_last  = "🏁 Retour dépôt" if s["is_last"]  else ""
+        label_first = "🚀 Départ" if s["is_first"] else ""
+        label_last  = "🏁 Arrivée finale" if s["is_last"] else ""
 
-        # Distance au dépôt si connu
         dist_depot_str = ""
         if depot_coords and s["coords"]:
             dm = geodesic(s["coords"], depot_coords).meters
@@ -560,7 +738,7 @@ def render() -> None:
         <div style="font-family:sans-serif;font-size:13px;min-width:200px;max-width:300px;">
             {"<b style='color:" + C_GREEN + "'>" + label_first + "</b><br>" if label_first else ""}
             {"<b style='color:" + C_RED   + "'>" + label_last  + "</b><br>" if label_last  else ""}
-            <b style="color:{C_BLUE_DARK}">{s['addr']}</b>
+            <b style="color:{C_BLUE_DARK}">#{num_label} — {s['addr']}</b>
             <hr style="margin:4px 0">
             🕐 <b>{time_str}</b>
             {"<br>⏸️ Arrêt : <b>" + dur_str + "</b>" if dur_str else ""}
@@ -569,18 +747,28 @@ def render() -> None:
             {dist_depot_str}
         </div>
         """
-        tooltip = f"{time_str} — {s['addr'][:42]}{'…' if len(s['addr']) > 42 else ''}"
+        tooltip = f"#{num_label} · {time_str} — {s['addr'][:38]}{'…' if len(s['addr']) > 38 else ''}"
         if dur_str:
             tooltip += f"  ⏸ {dur_str}"
 
-        folium.CircleMarker(
+        # Diamètre minimum 24px pour lisibilité ; centrage via line-height (fiable dans Leaflet)
+        diam      = max(24, radius * 2)
+        font_size = max(9, diam // 3)
+        folium.Marker(
             location=s["coords"],
-            radius=radius,
-            color=color,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.88,
-            weight=2,
+            icon=folium.DivIcon(
+                html=(
+                    f'<div style="'
+                    f'width:{diam}px;height:{diam}px;border-radius:50%;'
+                    f'background:{color};border:2px solid white;'
+                    f'text-align:center;line-height:{diam}px;'
+                    f'font-size:{font_size}px;font-weight:bold;color:white;'
+                    f'box-shadow:0 2px 5px rgba(0,0,0,.45);'
+                    f'">{num_label}</div>'
+                ),
+                icon_size=(diam, diam),
+                icon_anchor=(diam // 2, diam // 2),
+            ),
             popup=folium.Popup(popup_html, max_width=320),
             tooltip=tooltip,
         ).add_to(m)
@@ -592,8 +780,8 @@ def render() -> None:
                 box-shadow:0 2px 12px rgba(0,0,0,.2);
                 font-family:sans-serif;font-size:12px;line-height:2.0">
         <b style="color:{C_BLUE_DARK};font-size:13px">Légende</b><br>
-        <span style="color:{C_GREEN};font-size:18px">●</span>&nbsp;Départ dépôt<br>
-        <span style="color:{C_RED};font-size:18px">●</span>&nbsp;Retour dépôt<br>
+        <span style="color:{C_GREEN};font-size:18px">●</span>&nbsp;Départ (1er arrêt)<br>
+        <span style="color:{C_RED};font-size:18px">●</span>&nbsp;Arrivée finale<br>
         <span style="color:{C_BLUE_LIGHT};font-size:18px">●</span>&nbsp;Arrêt &lt; 2 min<br>
         <span style="color:{C_BLUE_DARK};font-size:18px">●</span>&nbsp;Arrêt 2 – 15 min<br>
         <span style="color:{C_ORANGE};font-size:18px">●</span>&nbsp;Pause 15 – 45 min<br>
@@ -609,6 +797,66 @@ def render() -> None:
     ])
 
     st_folium(m, use_container_width=True, height=600, returned_objects=[])
+
+    # ── 8b. Adresses de la journée ────────────────────────
+    # Collecte unique de toutes les adresses de la journée (stops)
+    all_stop_addrs = list(dict.fromkeys(s["addr"] for s in stops))  # ordre d'apparition, dédupliqué
+    missing_addrs  = [a for a in all_stop_addrs if not cache.get(a)]
+    found_addrs    = [a for a in all_stop_addrs if cache.get(a)]
+
+    if missing_addrs:
+        st.markdown(
+            f"<div style='background:#fff3cd;border-left:4px solid {C_ORANGE};"
+            f"padding:10px 14px;border-radius:6px;margin-bottom:8px'>"
+            f"<b>⚠️ {len(missing_addrs)} adresse(s) non reconnue(s)</b> — "
+            f"corrigez et validez pour les voir sur la carte.</div>",
+            unsafe_allow_html=True,
+        )
+        geocoder_fn = RateLimiter(
+            Nominatim(user_agent="distriprot_fix").geocode,
+            min_delay_seconds=1,
+        )
+        for orig_addr in missing_addrs:
+            fix_key = f"q_addr_fix_{hash(orig_addr)}"
+            if fix_key not in st.session_state:
+                st.session_state[fix_key] = _expand_address(orig_addr)
+            col_addr, col_btn = st.columns([5, 1])
+            with col_addr:
+                st.text_input(
+                    f"❌ {orig_addr}",
+                    key=fix_key,
+                    label_visibility="visible",
+                )
+            with col_btn:
+                st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
+                if st.button("Valider", key=f"q_btn_fix_{hash(orig_addr)}", use_container_width=True):
+                    corrected = st.session_state[fix_key].strip()
+                    if corrected:
+                        with st.spinner(f"Géocodage de « {corrected} »…"):
+                            try:
+                                loc = geocoder_fn(corrected, timeout=10)
+                                if not loc and corrected != _expand_address(corrected):
+                                    loc = geocoder_fn(_expand_address(corrected), timeout=10)
+                            except Exception:
+                                loc = None
+                        if loc:
+                            coords = (loc.latitude, loc.longitude)
+                            # Sauvegarder sous la clé ORIGINALE pour que les stops soient résolus
+                            save_geocode_entry(orig_addr, coords)
+                            # Sauvegarder aussi sous la clé corrigée si différente
+                            if corrected != orig_addr:
+                                save_geocode_entry(corrected, coords)
+                            st.success(f"✅ Trouvé : {loc.address}")
+                            st.rerun()
+                        else:
+                            st.error("Introuvable. Essayez une autre formulation.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+    if found_addrs:
+        with st.expander(f"✅ {len(found_addrs)} adresse(s) reconnue(s)", expanded=False):
+            for a in found_addrs:
+                coords = cache[a]
+                st.caption(f"✅ {a}  —  `{coords[0]:.5f}, {coords[1]:.5f}`")
 
     # ── 9. Tableau détail ─────────────────────────────────
     st.divider()
@@ -628,7 +876,7 @@ def render() -> None:
     )
 
     all_veh_docs = load_all_quartix_vehicles()
-    cache_stats  = _load_cache()   # cache en lecture seule pour les stats
+    cache_stats  = load_geocode_cache()   # cache en lecture seule pour les stats
 
     stat_rows = []
     for plate in vehicle_sheets:
@@ -721,3 +969,29 @@ Un passage est comptabilisé si **toutes** ces conditions sont réunies :
 Ces paramètres sont des **constantes configurables** dans le code :
 `DEPOT_RADIUS_M`, `MIN_STOP_MIN`, `BEFORE_WORK_H`, `FIRST_N_TRIPS`, `LAST_N_TRIPS`
         """)
+
+    # ── 12. Administration du cache ───────────────────────
+    st.divider()
+    with st.expander("🗑️ Administration du cache"):
+        st.caption(
+            "Le cache stocke les coordonnées GPS (géocodage) et les routes OSRM calculées. "
+            "Supprimez-le si des adresses corrigées ne s'affichent pas correctement, "
+            "ou pour forcer un recalcul complet."
+        )
+        col_gc, col_rc, col_both, _ = st.columns([2, 2, 2, 3])
+        with col_gc:
+            if st.button("🗑️ Vider cache géocodage", use_container_width=True):
+                n = clear_geocode_cache()
+                st.success(f"✅ {n} adresse(s) supprimée(s).")
+                st.rerun()
+        with col_rc:
+            if st.button("🗑️ Vider cache routes", use_container_width=True):
+                n = clear_routes_cache()
+                st.success(f"✅ {n} route(s) supprimée(s).")
+                st.rerun()
+        with col_both:
+            if st.button("🗑️ Tout vider", type="primary", use_container_width=True):
+                ng = clear_geocode_cache()
+                nr = clear_routes_cache()
+                st.success(f"✅ Cache vidé — {ng} adresse(s) et {nr} route(s) supprimées.")
+                st.rerun()

@@ -166,3 +166,128 @@ def upsert_quartix_vehicle(plate: str, employe: str,
         }},
         upsert=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUARTIX GEOCODE CACHE — collection `quartix_geocode_cache`
+#
+# Stocke les résultats de géocodage Nominatim pour éviter les appels API répétés.
+# Un document par adresse :
+# { "address": "3 Rue des Abattoirs, 38120 Saint-Égrève", "coords": [45.24, 5.66] }
+# coords = null si le géocodage a échoué.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_geocode_cache_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["quartix_geocode_cache"]
+
+
+def load_geocode_cache() -> dict:
+    """
+    Charge le cache géocodage depuis MongoDB.
+    Retourne uniquement les entrées avec coords valides {address: (lat, lon)}.
+    Les adresses absentes du cache (ou anciennement en échec) seront réessayées
+    avec expansion des abréviations françaises.
+    """
+    try:
+        docs = list(_get_geocode_cache_col().find(
+            {"coords": {"$ne": None}},          # ignore les éventuels None résiduels
+            {"_id": 0, "address": 1, "coords": 1},
+        ))
+        return {
+            d["address"]: tuple(d["coords"])
+            for d in docs if "address" in d and d.get("coords")
+        }
+    except Exception:
+        return {}
+
+
+def save_geocode_entry(address: str, coords) -> None:
+    """
+    Sauvegarde une entrée de géocodage réussie dans MongoDB (upsert silencieux).
+    Les coords None ne sont PAS sauvegardées : l'adresse sera réessayée
+    à la prochaine session (après expansion des abréviations).
+    """
+    if not coords:
+        return
+    try:
+        _get_geocode_cache_col().update_one(
+            {"address": address},
+            {"$set": {"address": address, "coords": list(coords)}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUARTIX ROUTES CACHE — collection `quartix_routes_cache`
+#
+# Stocke les routes OSRM entre deux points GPS.
+# { "key": "lat1_lon1|lat2_lon2", "route": [[lat, lon], ...] }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_routes_cache_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["quartix_routes_cache"]
+
+
+def _route_key(coord_a, coord_b) -> str:
+    return f"{coord_a[0]:.8f}_{coord_a[1]:.8f}|{coord_b[0]:.8f}_{coord_b[1]:.8f}"
+
+
+def load_routes_cache() -> dict:
+    """Charge tout le cache routes en mémoire. Retourne {(coord_a, coord_b): [[lat,lon],...]}."""
+    try:
+        docs = list(_get_routes_cache_col().find({}, {"_id": 0, "key": 1, "route": 1}))
+        cache = {}
+        for d in docs:
+            if "key" not in d or "route" not in d:
+                continue
+            try:
+                a_str, b_str = d["key"].split("|")
+                a = tuple(float(x) for x in a_str.split("_"))
+                b = tuple(float(x) for x in b_str.split("_"))
+                cache[(a, b)] = d["route"]
+            except Exception:
+                pass
+        return cache
+    except Exception:
+        return {}
+
+
+def save_route_entry(coord_a, coord_b, route: list) -> None:
+    """Sauvegarde une route OSRM dans MongoDB (upsert silencieux)."""
+    try:
+        key = _route_key(coord_a, coord_b)
+        _get_routes_cache_col().update_one(
+            {"key": key},
+            {"$set": {"key": key, "route": route}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CACHE MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clear_geocode_cache() -> int:
+    """Supprime tous les documents du cache géocodage. Retourne le nombre supprimé."""
+    try:
+        result = _get_geocode_cache_col().delete_many({})
+        return result.deleted_count
+    except Exception:
+        return 0
+
+
+def clear_routes_cache() -> int:
+    """Supprime tous les documents du cache routes OSRM. Retourne le nombre supprimé."""
+    try:
+        result = _get_routes_cache_col().delete_many({})
+        return result.deleted_count
+    except Exception:
+        return 0

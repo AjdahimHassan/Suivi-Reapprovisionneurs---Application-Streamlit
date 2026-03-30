@@ -1,6 +1,10 @@
 .DS_Store
 __pycache__/
 *.pyc
--e 
+-e
 # Secrets locaux
 .streamlit/secrets.toml
+
+# Caches locaux — contiennent des adresses et coordonnées GPS sensibles
+*.pkl
+depot_address.json
