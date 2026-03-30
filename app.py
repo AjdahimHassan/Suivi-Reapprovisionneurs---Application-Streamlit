@@ -17,6 +17,7 @@ import page_inventaires
 import page_commandes
 import page_indefinis
 import page_quartix
+import page_picklist
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -103,8 +104,8 @@ with _logo_col:
     else:
         st.markdown('<div style="font-size:1.3rem;font-weight:900;color:#1B3D6F;">DP</div>', unsafe_allow_html=True)
 
-# Barre de navigation — 9 boutons
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9 = st.columns(9)
+# Barre de navigation — 10 boutons
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9, nav_c10 = st.columns(10)
 with nav_c1:
     if st.button(
         "🖥️ Machines",
@@ -185,6 +186,15 @@ with nav_c9:
         type="primary" if st.session_state.page == "quartix" else "secondary",
     ):
         st.session_state.page = "quartix"
+        st.rerun()
+with nav_c10:
+    if st.button(
+        "📋 Picklist",
+        key="nav_picklist",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "picklist" else "secondary",
+    ):
+        st.session_state.page = "picklist"
         st.rerun()
 
 st.divider()
@@ -667,3 +677,11 @@ elif st.session_state.page == "quartix":
     )
 
     page_quartix.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : PICKLIST VS CHARGEMENT
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "picklist":
+
+    page_picklist.render()
