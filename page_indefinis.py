@@ -3,6 +3,10 @@ import pandas as pd
 import io
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from planogrammes_storage import load_produits
 from mongo_storage import load_plannings_from_mongo
 
@@ -259,6 +263,55 @@ def analyser_prix(df: pd.DataFrame, produits: list, tolerance: float = _TOLERANC
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PLANNO AUDIT (configuration machine ligne par ligne)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_planno_audit(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Parse le fichier CSV d'audit planno (Audit IUC180).
+    Colonnes attendues : SOURCE AUDIT, CODE MACHINE, CODE CLIENT,
+                         MODELE MACHINE, CODE PRODUIT, PU, LDP, PAYMENT
+    """
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            raw = file_bytes.decode(enc)
+            break
+        except Exception:
+            continue
+
+    df = pd.read_csv(io.StringIO(raw), sep=";", quotechar='"', dtype=str)
+    df.columns = [c.strip().replace('"', "") for c in df.columns]
+
+    # Renommage normalisé
+    rename = {
+        "SOURCE AUDIT":   "SOURCE_AUDIT",
+        "CODE MACHINE":   "CODE_MACHINE",
+        "CODE CLIENT":    "CODE_CLIENT",
+        "MODELE MACHINE": "MODELE",
+        "CODE PRODUIT":   "CODE_PRODUIT",
+        "PU":             "PU",
+        "LDP":            "LDP",
+        "PAYMENT":        "PAYMENT",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+
+    if "PU" in df.columns:
+        df["PU"] = pd.to_numeric(
+            df["PU"].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
+        )
+    if "LDP" in df.columns:
+        df["LDP"] = pd.to_numeric(
+            df["LDP"].astype(str).str.strip(), errors="coerce"
+        )
+    if "CODE_MACHINE" in df.columns:
+        df["CODE_MACHINE"] = df["CODE_MACHINE"].astype(str).str.strip().str.upper()
+    if "CODE_PRODUIT" in df.columns:
+        df["CODE_PRODUIT"] = df["CODE_PRODUIT"].astype(str).str.strip().str.upper()
+
+    return df.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EXPORT PAR RÉAPPRO
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -403,6 +456,266 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict, filtr
     # Retourner les bytes
     buf = io.BytesIO()
     wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPORT MACHINE (fichier de ventes par machine avec surlignage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generer_export_machine(
+    df: pd.DataFrame,
+    prix_ko_ttc: dict,
+    machine: str,
+    salle: str,
+) -> bytes:
+    """
+    Génère un fichier Excel soigné pour les ventes d'une machine.
+    Les lignes dont le PU correspond à un prix KO (TTC) sont surlignées en rouge.
+    Retourne les bytes prêts pour st.download_button.
+    """
+    # ── Styles ──────────────────────────────────────────────────────────────
+    TITLE_FILL = PatternFill("solid", fgColor="1F4E79")
+    TITLE_FONT = Font(bold=True, color="FFFFFF", size=13)
+    HDR_FILL   = PatternFill("solid", fgColor="2E75B6")
+    HDR_FONT   = Font(bold=True, color="FFFFFF", size=11)
+    KO_FILL    = PatternFill("solid", fgColor="F5C6CB")
+    KO_FONT    = Font(color="7B1A1A")
+    ALT_FILL   = PatternFill("solid", fgColor="F2F7FC")
+    thin       = Side(style="thin", color="B8CCE4")
+    border     = Border(left=thin, right=thin, top=thin, bottom=thin)
+    CENTER     = Alignment(horizontal="center", vertical="center")
+    LEFT       = Alignment(horizontal="left", vertical="center")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = machine[:31]
+
+    cols = list(df.columns)
+    nb_cols = len(cols)
+
+    # ── Ligne titre ──────────────────────────────────────────────────────────
+    titre = f"Machine : {machine}   |   {salle}"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=nb_cols)
+    tc = ws.cell(1, 1, titre)
+    tc.fill  = TITLE_FILL
+    tc.font  = TITLE_FONT
+    tc.alignment = CENTER
+    ws.row_dimensions[1].height = 28
+
+    # ── Ligne en-tête colonnes ────────────────────────────────────────────────
+    for col_idx, col_name in enumerate(cols, 1):
+        c = ws.cell(2, col_idx, col_name)
+        c.fill      = HDR_FILL
+        c.font      = HDR_FONT
+        c.alignment = CENTER
+        c.border    = border
+    ws.row_dimensions[2].height = 22
+
+    # ── Données ───────────────────────────────────────────────────────────────
+    _TVA_RATES = [0.055, 0.10, 0.20]
+
+    def _is_ko(code_produit, pu_val):
+        code = str(code_produit).upper()
+        if code not in prix_ko_ttc or pu_val is None or pd.isna(pu_val):
+            return False
+        return any(abs(float(pu_val) - p) < 0.06 for p in prix_ko_ttc[code])
+
+    for row_idx, (_, row) in enumerate(df.iterrows(), start=3):
+        code_val = row.get("CODE_PRODUIT", "")
+        pu_val   = row.get("PU", None)
+        is_ko    = _is_ko(code_val, pu_val)
+
+        # Remplissage alterné pour les lignes OK
+        if is_ko:
+            row_fill = KO_FILL
+            row_font = KO_FONT
+        else:
+            row_fill = ALT_FILL if row_idx % 2 == 0 else None
+            row_font = Font(size=10)
+
+        for col_idx, col_name in enumerate(cols, 1):
+            val = row.get(col_name, "")
+            c = ws.cell(row_idx, col_idx, val)
+            c.border = border
+            if row_fill:
+                c.fill = row_fill
+            if row_font:
+                c.font = row_font
+
+            # Formats par colonne
+            if col_name == "PU" and val is not None and not (isinstance(val, float) and pd.isna(val)):
+                c.number_format = "0.00 €"
+                c.alignment = CENTER
+            elif col_name == "Prix attendu (TTC)" and val is not None and val != "":
+                c.alignment = CENTER
+            elif col_name == "LDP":
+                c.number_format = "0"
+                c.alignment = CENTER
+            else:
+                c.alignment = LEFT
+
+        ws.row_dimensions[row_idx].height = 18
+
+    # ── Largeurs colonnes ────────────────────────────────────────────────────
+    col_widths = {
+        "CODE_PRODUIT":    28,
+        "LDP":             8,
+        "PU":              14,
+        "Prix attendu (TTC)": 20,
+    }
+    for col_idx, col_name in enumerate(cols, 1):
+        letter = openpyxl.utils.get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = col_widths.get(col_name, 18)
+
+    # ── Figer la ligne d'en-tête ─────────────────────────────────────────────
+    ws.freeze_panes = "A3"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPORT PNG MACHINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generer_png_machine(
+    df: pd.DataFrame,
+    prix_ko_ttc: dict,
+    machine: str,
+    salle: str,
+) -> bytes:
+    """
+    Génère une image PNG du tableau de ventes d'une machine.
+    Lignes KO = fond rouge, header = bleu foncé.
+    """
+    # Couleurs
+    C_HEADER  = "#1F4E79"
+    C_HDR_TXT = "white"
+    C_TITLE   = "#1F4E79"
+    C_KO_BG   = "#F5C6CB"
+    C_KO_TXT  = "#7B1A1A"
+    C_ALT     = "#EBF2FA"
+    C_WHITE   = "white"
+    C_BORDER  = "#B8CCE4"
+
+    cols = list(df.columns)
+    n_rows = len(df)
+    n_cols = len(cols)
+
+    # Largeurs relatives par colonne
+    col_w_map = {
+        "CODE_PRODUIT":    3.5,
+        "LDP":             1.0,
+        "PU":              1.6,
+        "Prix attendu (TTC)": 2.2,
+    }
+    col_widths = [col_w_map.get(c, 2.0) for c in cols]
+    total_w = sum(col_widths)
+
+    # Dimensions figure
+    row_h    = 0.42   # hauteur par ligne de données (inch)
+    hdr_h    = 0.50   # hauteur header
+    title_h  = 0.55   # hauteur titre
+    fig_h    = title_h + hdr_h + n_rows * row_h + 0.2
+    fig_w    = max(total_w * 1.1, 8)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+    fig.patch.set_facecolor("white")
+
+    # ── Titre ──────────────────────────────────────────────────────────────
+    fig.text(
+        0.5, 1 - (title_h / 2) / fig_h,
+        f"Machine : {machine}   |   {salle}",
+        ha="center", va="center",
+        fontsize=13, fontweight="bold", color=C_HDR_TXT,
+        bbox=dict(boxstyle="square,pad=0", facecolor=C_TITLE, edgecolor="none"),
+        transform=fig.transFigure,
+    )
+
+    # Calcul des positions x normalisées
+    margin = 0.02
+    usable = 1 - 2 * margin
+    x_positions = []
+    cum = 0
+    for w in col_widths:
+        x_positions.append(margin + usable * cum / total_w)
+        cum += w
+    x_positions.append(margin + usable)  # bord droit
+
+    def _row_y(row_idx):
+        """Y du bas de la ligne (normalized)."""
+        top = 1 - title_h / fig_h
+        return top - (hdr_h + row_idx * row_h) / fig_h
+
+    def _draw_cell(left, right, y_bottom, height, bg, text, txt_color, bold=False, fontsize=9.5, halign="center"):
+        norm_h = height / fig_h
+        rect = mpatches.FancyBboxPatch(
+            (left, y_bottom), right - left, norm_h,
+            boxstyle="square,pad=0",
+            facecolor=bg, edgecolor=C_BORDER, linewidth=0.5,
+            transform=fig.transFigure, clip_on=False,
+        )
+        fig.add_artist(rect)
+        tx = (left + right) / 2 if halign == "center" else left + 0.008
+        fig.text(
+            tx, y_bottom + norm_h / 2,
+            str(text) if text is not None and not (isinstance(text, float) and pd.isna(text)) else "",
+            ha=halign, va="center",
+            fontsize=fontsize, fontweight="bold" if bold else "normal",
+            color=txt_color,
+            transform=fig.transFigure, clip_on=False,
+        )
+
+    # ── Header colonnes ────────────────────────────────────────────────────
+    top = 1 - title_h / fig_h
+    for i, col_name in enumerate(cols):
+        _draw_cell(
+            x_positions[i], x_positions[i + 1],
+            top - hdr_h / fig_h, hdr_h,
+            C_HEADER, col_name, C_HDR_TXT,
+            bold=True, fontsize=10,
+        )
+
+    # ── Détection KO ──────────────────────────────────────────────────────
+    def _is_ko_row(row):
+        code = str(row.get("CODE_PRODUIT", "")).upper()
+        pu = row.get("PU", None)
+        if code not in prix_ko_ttc or pu is None or (isinstance(pu, float) and pd.isna(pu)):
+            return False
+        return any(abs(float(pu) - p) < 0.06 for p in prix_ko_ttc[code])
+
+    # ── Lignes de données ──────────────────────────────────────────────────
+    for r_idx, (_, row) in enumerate(df.iterrows()):
+        is_ko = _is_ko_row(row)
+        bg     = C_KO_BG if is_ko else (C_ALT if r_idx % 2 == 0 else C_WHITE)
+        txt_c  = C_KO_TXT if is_ko else "#1A1A1A"
+        y_bot  = _row_y(r_idx + 1)  # +1 pour passer l'header
+
+        for i, col_name in enumerate(cols):
+            val = row.get(col_name, "")
+            # Formatage des valeurs numériques
+            if col_name == "PU" and isinstance(val, float) and not pd.isna(val):
+                val = f"{val:.2f} €"
+            elif col_name == "LDP" and isinstance(val, float) and not pd.isna(val):
+                val = str(int(val))
+
+            halign = "left" if col_name == "CODE_PRODUIT" else "center"
+            _draw_cell(
+                x_positions[i], x_positions[i + 1],
+                y_bot, row_h,
+                bg, val, txt_c,
+                bold=is_ko, fontsize=9, halign=halign,
+            )
+
+    plt.tight_layout(pad=0)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
     buf.seek(0)
     return buf.read()
 
@@ -563,6 +876,22 @@ def render():
                         with st.spinner("Chargement du planning…"):
                             plannings, errs = load_plannings_from_mongo()
                         reappro_map = build_reappro_mapping(plannings) if not errs else {}
+
+                        # Construire lib_ttc : {code: [prix_ttc1, prix_ttc2, ...]}
+                        # depuis le champ prix_ttc stocké en bibliothèque
+                        lib_ttc = {}
+                        for p in produits:
+                            code = str(p.get("code", "")).strip().upper()
+                            ttc_raw = p.get("prix_ttc", None)
+                            if code and ttc_raw:
+                                try:
+                                    ttc = round(float(str(ttc_raw).replace(",", ".")), 2)
+                                    lib_ttc.setdefault(code, [])
+                                    if ttc not in lib_ttc[code]:
+                                        lib_ttc[code].append(ttc)
+                                except (ValueError, TypeError):
+                                    pass
+
                         # Stocker dans session_state pour survivre aux reruns
                         st.session_state["prix_resultats"] = {
                             "anomalies_df": anomalies_df,
@@ -570,6 +899,7 @@ def render():
                             "nb_lignes": len(df_ventes_prix),
                             "reappro_map": reappro_map,
                             "planning_errs": errs,
+                            "lib_ttc": lib_ttc,
                         }
 
             # Afficher les résultats depuis session_state (persiste entre reruns)
@@ -580,6 +910,7 @@ def render():
                 nb_lignes    = res["nb_lignes"]
                 reappro_map  = res["reappro_map"]
                 errs         = res["planning_errs"]
+                lib_ttc      = res.get("lib_ttc", {})
 
                 nb_anomalies  = len(anomalies_df)
                 nb_non_ref    = len(non_ref)
@@ -678,7 +1009,10 @@ def render():
                             sous_df = anomalies_df[anomalies_df["Machine"] == machine]
                             salle = sous_df["Salle"].iloc[0] if "Salle" in sous_df.columns and not sous_df.empty else ""
                             label = f"{machine} — {salle}" if salle else machine
+                            ss_key = f"ventes_machine_{machine}"
+
                             with st.expander(f"**{label}** — {len(sous_df)} anomalie(s)", expanded=False):
+                                # Tableau des anomalies ERP
                                 styled_m = sous_df.style.apply(_color_row, axis=1).format(
                                     {
                                         "Prix attendu (HT)": "{:.3f} €",
@@ -687,6 +1021,118 @@ def render():
                                     }
                                 )
                                 st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
+                                st.divider()
+
+                                # ── Upload fichier ventes spécifique à cette machine ──
+                                f_ventes_machine = st.file_uploader(
+                                    f"📂 Importer le fichier de ventes pour {machine}",
+                                    type=["csv"],
+                                    key=f"upload_{machine}",
+                                )
+                                if f_ventes_machine:
+                                    try:
+                                        st.session_state[ss_key] = parse_planno_audit(f_ventes_machine.read())
+                                    except Exception as e:
+                                        st.error(f"Erreur lecture fichier : {e}")
+
+                                if ss_key in st.session_state:
+                                    df_ventes_m = st.session_state[ss_key]
+
+                                    # Construire l'ensemble des prix TTC "mauvais" par produit
+                                    # en convertissant Prix réel HT → TTC via les TVA courantes
+                                    _TVA_RATES = [0.055, 0.10, 0.20]
+                                    prix_ko_ttc = {}  # {code: set_of_bad_ttc_prices}
+                                    for _, anom_row in sous_df.iterrows():
+                                        code = str(anom_row["Code"]).upper()
+                                        pu_ht = anom_row.get("Prix réel (HT)", None)
+                                        if pu_ht is None:
+                                            continue
+                                        approx_ttc = {round(pu_ht * (1 + r), 2) for r in _TVA_RATES}
+                                        prix_ko_ttc.setdefault(code, set()).update(approx_ttc)
+
+                                    def _is_ligne_ko(code_produit, pu_val):
+                                        code = str(code_produit).upper()
+                                        if code not in prix_ko_ttc or pu_val is None:
+                                            return False
+                                        return any(
+                                            abs(pu_val - p) < 0.06
+                                            for p in prix_ko_ttc[code]
+                                        )
+
+                                    def _color_ventes_m(row):
+                                        if _is_ligne_ko(row.get("CODE_PRODUIT", ""), row.get("PU")):
+                                            return ["background-color: #f5c6cb; color: #7b1a1a;"] * len(row)
+                                        return [""] * len(row)
+
+                                    # Colonnes : CODE_PRODUIT | LDP | PU | Prix attendu (TTC)
+                                    cols_base = [c for c in ("CODE_PRODUIT", "LDP", "PU") if c in df_ventes_m.columns]
+
+                                    def _prix_attendu_ttc(code_produit, pu_val, machine_code):
+                                        """
+                                        Pour les lignes KO, retourne le prix TTC attendu
+                                        depuis la bibliothèque produits, en tenant compte
+                                        du type de machine (BF → prix bas, FP → prix haut).
+                                        """
+                                        code = str(code_produit).upper()
+                                        if not _is_ligne_ko(code, pu_val):
+                                            return None
+                                        ttc_list = lib_ttc.get(code, [])
+                                        if not ttc_list:
+                                            return None
+                                        if len(ttc_list) == 1:
+                                            return f"{ttc_list[0]:.2f} €"
+                                        # Plusieurs prix valides → sélectionner selon le préfixe de la salle
+                                        # (ex: "BF LANGON" → BF, "FP TARBES" → FP)
+                                        ttc_sorted = sorted(ttc_list)
+                                        prefix = str(machine_code).upper().strip()
+                                        if prefix.startswith("BF"):
+                                            return f"{ttc_sorted[0]:.2f} €"   # prix le plus bas
+                                        if prefix.startswith("FP"):
+                                            return f"{ttc_sorted[-1]:.2f} €"  # prix le plus haut
+                                        # Préfixe inconnu : afficher tous les prix
+                                        return " / ".join(f"{v:.2f} €" for v in ttc_sorted)
+
+                                    df_display = df_ventes_m[cols_base].copy().reset_index(drop=True)
+                                    df_display["Prix attendu (TTC)"] = df_display.apply(
+                                        lambda row: _prix_attendu_ttc(
+                                            row.get("CODE_PRODUIT", ""), row.get("PU", None), salle
+                                        ),
+                                        axis=1,
+                                    )
+
+                                    st.markdown("**📋 Ventes de la machine** — lignes surlignées = prix à corriger")
+                                    fmt = {}
+                                    if "PU" in df_display.columns:
+                                        fmt["PU"] = "{:.2f} €"
+                                    styled_v = df_display.style.apply(_color_ventes_m, axis=1).format(fmt)
+                                    st.dataframe(styled_v, use_container_width=True, hide_index=True)
+
+                                    # ── Exports Excel + PNG ─────────────────────
+                                    excel_m = _generer_export_machine(
+                                        df_display, prix_ko_ttc, machine, salle
+                                    )
+                                    png_m = _generer_png_machine(
+                                        df_display, prix_ko_ttc, machine, salle
+                                    )
+                                    fname_base = f"ventes_{machine}_{salle.replace(' ', '_')}"
+                                    col_xl, col_png = st.columns(2)
+                                    with col_xl:
+                                        st.download_button(
+                                            label=f"📥 Exporter {machine} (Excel)",
+                                            data=excel_m,
+                                            file_name=f"{fname_base}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key=f"dl_machine_{machine}",
+                                        )
+                                    with col_png:
+                                        st.download_button(
+                                            label=f"🖼️ Exporter {machine} (PNG)",
+                                            data=png_m,
+                                            file_name=f"{fname_base}.png",
+                                            mime="image/png",
+                                            key=f"dl_machine_png_{machine}",
+                                        )
 
                     with vue_complet:
                         styled_c = anomalies_df.style.apply(_color_row, axis=1).format(
