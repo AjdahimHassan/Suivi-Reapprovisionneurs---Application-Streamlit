@@ -278,7 +278,11 @@ def build_reappro_mapping(plannings: dict) -> dict:
     return mapping
 
 
-def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> bytes:
+def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict, filtrer: list = None) -> bytes:
+    """
+    Génère un fichier Excel avec une feuille Résumé + une feuille par réappro.
+    Si `filtrer` est fourni (liste de codes réappro), seuls ceux-ci sont inclus.
+    """
     """
     Génère un fichier Excel avec une feuille Résumé + une feuille par réappro.
     Chaque feuille liste les salles problématiques avec le détail des produits.
@@ -313,6 +317,9 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> by
     df["Réappro"] = df["Code_client"].apply(
         lambda x: reappro_map.get(str(x).strip().upper(), "Non assigné")
     )
+    # Filtrer sur la sélection si fournie
+    if filtrer:
+        df = df[df["Réappro"].isin(filtrer)]
 
     wb = openpyxl.Workbook()
 
@@ -526,115 +533,174 @@ def render():
             "Export ERP Audit Télémétrie (.csv)", type=["csv"], key="prix_erp"
         )
 
+        # Réinitialiser les résultats si le fichier change
         if not f_erp:
+            st.session_state.pop("prix_resultats", None)
             st.info("Importez le fichier ERP pour lancer l'analyse.")
-        elif st.button("🔍 Analyser", key="btn_analyser_prix"):
-            try:
-                df_ventes_prix = parse_ventes_prix(f_erp.read())
-            except Exception as e:
-                st.error(f"Erreur lecture fichier ERP : {e}")
-                return
+        else:
+            if st.button("🔍 Analyser", key="btn_analyser_prix"):
+                try:
+                    df_ventes_prix = parse_ventes_prix(f_erp.read())
+                except Exception as e:
+                    st.error(f"Erreur lecture fichier ERP : {e}")
+                    df_ventes_prix = None
 
-            if df_ventes_prix.empty:
-                st.warning("Aucune ligne exploitable dans le fichier.")
-                return
+                if df_ventes_prix is not None and df_ventes_prix.empty:
+                    st.warning("Aucune ligne exploitable dans le fichier.")
+                    df_ventes_prix = None
 
-            with st.spinner("Chargement de la bibliothèque produits…"):
-                produits = load_produits()
+                if df_ventes_prix is not None:
+                    with st.spinner("Chargement de la bibliothèque produits…"):
+                        produits = load_produits()
 
-            if not produits:
-                st.warning(
-                    "La bibliothèque produits est vide. "
-                    "Ajoutez des produits dans Planogrammes → Bibliothèque."
-                )
-                return
-
-            anomalies_df, non_ref = analyser_prix(df_ventes_prix, produits)
-
-            nb_lignes = len(df_ventes_prix)
-            nb_anomalies = len(anomalies_df)
-            nb_non_ref = len(non_ref)
-            nb_salles_ko = anomalies_df["Salle"].nunique() if not anomalies_df.empty else 0
-            pct_ok = round((nb_lignes - nb_anomalies) / nb_lignes * 100, 1) if nb_lignes else 0.0
-
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Lignes analysées", nb_lignes)
-            k2.metric("Conformes", f"{pct_ok} %")
-            k3.metric("Anomalies de prix", nb_anomalies)
-            k4.metric("Salles concernées", nb_salles_ko)
-            k5.metric("Codes non référencés", nb_non_ref)
-
-            st.divider()
-
-            if anomalies_df.empty:
-                st.success("Tous les produits référencés sont vendus au bon prix HT.")
-            else:
-                st.markdown(
-                    f"**{nb_anomalies} ligne(s) avec un écart supérieur à ±{_TOLERANCE_HT} €**"
-                )
-
-                def _color_row(row):
-                    ecart = abs(row["Écart (€)"])
-                    if ecart >= 0.50:
-                        bg = "background-color: #f5c6cb; color: #7b1a1a;"
-                    elif ecart >= 0.20:
-                        bg = "background-color: #ffd8a8; color: #6b3a00;"
+                    if not produits:
+                        st.warning(
+                            "La bibliothèque produits est vide. "
+                            "Ajoutez des produits dans Planogrammes → Bibliothèque."
+                        )
                     else:
-                        bg = "background-color: #fff3cd; color: #664d00;"
-                    return [bg] * len(row)
+                        anomalies_df, non_ref = analyser_prix(df_ventes_prix, produits)
+                        with st.spinner("Chargement du planning…"):
+                            plannings, errs = load_plannings_from_mongo()
+                        reappro_map = build_reappro_mapping(plannings) if not errs else {}
+                        # Stocker dans session_state pour survivre aux reruns
+                        st.session_state["prix_resultats"] = {
+                            "anomalies_df": anomalies_df,
+                            "non_ref": non_ref,
+                            "nb_lignes": len(df_ventes_prix),
+                            "reappro_map": reappro_map,
+                            "planning_errs": errs,
+                        }
 
-                # ── Export par réappro ──────────────────────────────────────
-                with st.spinner("Chargement du planning…"):
-                    plannings, errs = load_plannings_from_mongo()
+            # Afficher les résultats depuis session_state (persiste entre reruns)
+            if "prix_resultats" in st.session_state:
+                res          = st.session_state["prix_resultats"]
+                anomalies_df = res["anomalies_df"]
+                non_ref      = res["non_ref"]
+                nb_lignes    = res["nb_lignes"]
+                reappro_map  = res["reappro_map"]
+                errs         = res["planning_errs"]
 
-                if errs:
-                    st.warning(
-                        "Planning indisponible, l'export par réappro est désactivé. "
-                        f"Erreur : {list(errs.values())[0]}"
-                    )
-                else:
-                    reappro_map = build_reappro_mapping(plannings)
-                    excel_bytes = generer_export_reappros(anomalies_df, reappro_map)
-                    st.download_button(
-                        label="📥 Télécharger l'export par réappro (Excel)",
-                        data=excel_bytes,
-                        file_name="controle_prix_reappros.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
+                nb_anomalies  = len(anomalies_df)
+                nb_non_ref    = len(non_ref)
+                nb_salles_ko  = anomalies_df["Salle"].nunique() if not anomalies_df.empty else 0
+                pct_ok        = round((nb_lignes - nb_anomalies) / nb_lignes * 100, 1) if nb_lignes else 0.0
+
+                k1, k2, k3, k4, k5 = st.columns(5)
+                k1.metric("Lignes analysées", nb_lignes)
+                k2.metric("Conformes", f"{pct_ok} %")
+                k3.metric("Anomalies de prix", nb_anomalies)
+                k4.metric("Salles concernées", nb_salles_ko)
+                k5.metric("Codes non référencés", nb_non_ref)
 
                 st.divider()
 
-                vue_machine, vue_complet = st.tabs(["🏭 Détail par machine", "📋 Détail complet"])
-
-                with vue_machine:
-                    machines = anomalies_df["Machine"].unique() if "Machine" in anomalies_df.columns else []
-                    for machine in sorted(machines):
-                        sous_df = anomalies_df[anomalies_df["Machine"] == machine]
-                        salle = sous_df["Salle"].iloc[0] if "Salle" in sous_df.columns and not sous_df.empty else ""
-                        label = f"{machine} — {salle}" if salle else machine
-                        with st.expander(f"**{label}** — {len(sous_df)} anomalie(s)", expanded=False):
-                            styled_m = sous_df.style.apply(_color_row, axis=1).format(
-                                {
-                                    "Prix attendu (HT)": "{:.3f} €",
-                                    "Prix réel (HT)": "{:.3f} €",
-                                    "Écart (€)": "{:+.3f} €",
-                                }
-                            )
-                            st.dataframe(styled_m, use_container_width=True, hide_index=True)
-
-                with vue_complet:
-                    styled_c = anomalies_df.style.apply(_color_row, axis=1).format(
-                        {
-                            "Prix attendu (HT)": "{:.3f} €",
-                            "Prix réel (HT)": "{:.3f} €",
-                            "Écart (€)": "{:+.3f} €",
-                        }
+                if anomalies_df.empty:
+                    st.success("Tous les produits référencés sont vendus au bon prix HT.")
+                else:
+                    st.markdown(
+                        f"**{nb_anomalies} ligne(s) avec un écart supérieur à ±{_TOLERANCE_HT} €**"
                     )
-                    st.dataframe(styled_c, use_container_width=True, hide_index=True)
 
-            if non_ref:
-                with st.expander(
-                    f"Codes produits non référencés dans la bibliothèque ({nb_non_ref})"
-                ):
-                    for code in sorted(non_ref):
-                        st.markdown(f"- `{code}`")
+                    def _color_row(row):
+                        ecart = abs(row["Écart (€)"])
+                        if ecart >= 0.50:
+                            bg = "background-color: #f5c6cb; color: #7b1a1a;"
+                        elif ecart >= 0.20:
+                            bg = "background-color: #ffd8a8; color: #6b3a00;"
+                        else:
+                            bg = "background-color: #fff3cd; color: #664d00;"
+                        return [bg] * len(row)
+
+                    # ── Export par réappro ──────────────────────────────────
+                    if errs:
+                        st.warning(
+                            "Planning indisponible, l'export par réappro est désactivé. "
+                            f"Erreur : {list(errs.values())[0]}"
+                        )
+                    else:
+                        df_tmp = anomalies_df.copy()
+                        df_tmp["Réappro"] = df_tmp["Code_client"].apply(
+                            lambda x: reappro_map.get(str(x).strip().upper(), "Non assigné")
+                        )
+                        tous_reappros = sorted(df_tmp["Réappro"].unique().tolist())
+
+                        st.markdown("**Sélectionner les réappros à exporter :**")
+                        col_sel, col_btn = st.columns([4, 1])
+                        with col_sel:
+                            selection = st.multiselect(
+                                label="Réappros",
+                                options=tous_reappros,
+                                default=[],
+                                placeholder="Ajouter un réappro…",
+                                label_visibility="collapsed",
+                                key="export_reappro_select",
+                            )
+                        with col_btn:
+                            if st.button("Tout sélectionner", key="btn_tout_select"):
+                                selection = tous_reappros
+
+                        col_dl1, col_dl2 = st.columns(2)
+                        with col_dl1:
+                            if selection:
+                                excel_sel = generer_export_reappros(anomalies_df, reappro_map, filtrer=selection)
+                                fname = (
+                                    f"controle_prix_{'_'.join(selection)}.xlsx"
+                                    if len(selection) <= 3
+                                    else "controle_prix_selection.xlsx"
+                                )
+                                st.download_button(
+                                    label=f"📥 Exporter la sélection ({len(selection)} réappro(s))",
+                                    data=excel_sel,
+                                    file_name=fname,
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="dl_selection",
+                                )
+                            else:
+                                st.button("📥 Exporter la sélection", disabled=True, key="dl_selection_off")
+                        with col_dl2:
+                            excel_all = generer_export_reappros(anomalies_df, reappro_map)
+                            st.download_button(
+                                label="📥 Exporter tous les réappros",
+                                data=excel_all,
+                                file_name="controle_prix_reappros.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_all",
+                            )
+
+                    st.divider()
+
+                    vue_machine, vue_complet = st.tabs(["🏭 Détail par machine", "📋 Détail complet"])
+
+                    with vue_machine:
+                        machines = anomalies_df["Machine"].unique() if "Machine" in anomalies_df.columns else []
+                        for machine in sorted(machines):
+                            sous_df = anomalies_df[anomalies_df["Machine"] == machine]
+                            salle = sous_df["Salle"].iloc[0] if "Salle" in sous_df.columns and not sous_df.empty else ""
+                            label = f"{machine} — {salle}" if salle else machine
+                            with st.expander(f"**{label}** — {len(sous_df)} anomalie(s)", expanded=False):
+                                styled_m = sous_df.style.apply(_color_row, axis=1).format(
+                                    {
+                                        "Prix attendu (HT)": "{:.3f} €",
+                                        "Prix réel (HT)": "{:.3f} €",
+                                        "Écart (€)": "{:+.3f} €",
+                                    }
+                                )
+                                st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
+                    with vue_complet:
+                        styled_c = anomalies_df.style.apply(_color_row, axis=1).format(
+                            {
+                                "Prix attendu (HT)": "{:.3f} €",
+                                "Prix réel (HT)": "{:.3f} €",
+                                "Écart (€)": "{:+.3f} €",
+                            }
+                        )
+                        st.dataframe(styled_c, use_container_width=True, hide_index=True)
+
+                if non_ref:
+                    with st.expander(
+                        f"Codes produits non référencés dans la bibliothèque ({nb_non_ref})"
+                    ):
+                        for code in sorted(non_ref):
+                            st.markdown(f"- `{code}`")
