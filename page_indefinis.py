@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import io
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from planogrammes_storage import load_produits
+from mongo_storage import load_plannings_from_mongo
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONGLET 1 — INDÉFINIS
@@ -174,13 +177,14 @@ def parse_ventes_prix(file_bytes: bytes) -> pd.DataFrame:
         df = df[df[col_type].astype(str).str.strip().str.lower() == "audit telemetrie"]
 
     col_map = {
-        "Code DA": "Machine",
-        "Nom client": "Salle",
-        "Code produit": "Code",
-        "Libellé produit": "Produit",
-        "Quantité": "Quantité",
-        "Montant HT": "Montant_HT",
-        "Date": "Date",
+        "Code DA":          "Machine",
+        "Stock Destination": "Code_client",
+        "Nom client":       "Salle",
+        "Code produit":     "Code",
+        "Libellé produit":  "Produit",
+        "Quantité":         "Quantité",
+        "Montant HT":       "Montant_HT",
+        "Date":             "Date",
     }
     df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
 
@@ -195,7 +199,7 @@ def parse_ventes_prix(file_bytes: bytes) -> pd.DataFrame:
 
     df["PU_HT"] = (df["Montant_HT"] / df["Quantité"]).round(3)
 
-    cols = [c for c in ("Date", "Machine", "Salle", "Code", "Produit", "Quantité", "Montant_HT", "PU_HT") if c in df.columns]
+    cols = [c for c in ("Date", "Machine", "Code_client", "Salle", "Code", "Produit", "Quantité", "Montant_HT", "PU_HT") if c in df.columns]
     return df[cols].reset_index(drop=True)
 
 
@@ -236,6 +240,7 @@ def analyser_prix(df: pd.DataFrame, produits: list, tolerance: float = _TOLERANC
             anomalies.append({
                 "Date": row.get("Date", ""),
                 "Machine": row.get("Machine", ""),
+                "Code_client": str(row.get("Code_client", "")).strip().upper(),
                 "Salle": row.get("Salle", ""),
                 "Code": code,
                 "Produit": row.get("Produit", ""),
@@ -251,6 +256,147 @@ def analyser_prix(df: pd.DataFrame, produits: list, tolerance: float = _TOLERANC
         ).reset_index(drop=True)
 
     return anomalies_df, non_ref
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPORT PAR RÉAPPRO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_reappro_mapping(plannings: dict) -> dict:
+    """
+    Construit un dictionnaire {code_client_upper: reappro} depuis les plannings MongoDB.
+    Le code client est la partie avant " - " dans le champ client du planning.
+    Ex: "FPPY01F - FP TARBES" → code = "FPPY01F"
+    """
+    mapping = {}
+    for reappro, jours in plannings.items():
+        for salles in jours.values():
+            for client, _ in salles:
+                code = client.split(" - ")[0].strip().upper()
+                if code:
+                    mapping[code] = reappro
+    return mapping
+
+
+def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> bytes:
+    """
+    Génère un fichier Excel avec une feuille Résumé + une feuille par réappro.
+    Chaque feuille liste les salles problématiques avec le détail des produits.
+    """
+    # Styles communs
+    HDR_FILL   = PatternFill("solid", fgColor="1F4E79")
+    HDR_FONT   = Font(bold=True, color="FFFFFF")
+    SALLE_FILL = PatternFill("solid", fgColor="D9E1F2")
+    SALLE_FONT = Font(bold=True, color="1F4E79")
+    FILL_RED   = PatternFill("solid", fgColor="F5C6CB")
+    FILL_ORA   = PatternFill("solid", fgColor="FFD8A8")
+    FILL_YEL   = PatternFill("solid", fgColor="FFF3CD")
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def _ecart_fill(ecart):
+        a = abs(ecart)
+        if a >= 0.50: return FILL_RED
+        if a >= 0.20: return FILL_ORA
+        return FILL_YEL
+
+    def _apply_hdr(ws, headers, row=1):
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(row=row, column=col, value=h)
+            c.fill = HDR_FILL
+            c.font = HDR_FONT
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = border
+
+    # Assigner chaque anomalie à un réappro
+    df = anomalies_df.copy()
+    df["Réappro"] = df["Code_client"].apply(
+        lambda x: reappro_map.get(str(x).strip().upper(), "Non assigné")
+    )
+
+    wb = openpyxl.Workbook()
+
+    # ── Feuille Résumé ──────────────────────────────────────────────────────
+    ws_res = wb.active
+    ws_res.title = "Résumé"
+    hdrs = ["Réappro", "Salles KO", "Nb anomalies"]
+    _apply_hdr(ws_res, hdrs)
+
+    resume = (
+        df.groupby("Réappro")
+        .agg(Salles_KO=("Salle", "nunique"), Nb_anomalies=("Code", "count"))
+        .reset_index()
+        .sort_values("Nb_anomalies", ascending=False)
+    )
+    for r_idx, row in enumerate(resume.itertuples(index=False), start=2):
+        ws_res.cell(r_idx, 1, row.Réappro)
+        ws_res.cell(r_idx, 2, row.Salles_KO)
+        ws_res.cell(r_idx, 3, row.Nb_anomalies)
+        for col in range(1, 4):
+            ws_res.cell(r_idx, col).border = border
+
+    ws_res.column_dimensions["A"].width = 18
+    ws_res.column_dimensions["B"].width = 14
+    ws_res.column_dimensions["C"].width = 16
+
+    # ── Une feuille par réappro ──────────────────────────────────────────────
+    COLS_XLS = ["Salle", "Code", "Produit", "Prix attendu (HT)", "Prix réel (HT)", "Écart (€)"]
+    COL_W    = [35, 22, 40, 20, 18, 14]
+
+    for reappro in sorted(df["Réappro"].unique()):
+        sub = df[df["Réappro"] == reappro].sort_values(["Salle", "Produit"])
+        ws = wb.create_sheet(title=reappro[:31])  # Excel limite à 31 caractères
+        _apply_hdr(ws, COLS_XLS)
+
+        current_row = 2
+        current_salle = None
+
+        for _, r in sub.iterrows():
+            salle = r.get("Salle", "")
+            # Ligne de séparation entre salles
+            if salle != current_salle:
+                current_salle = salle
+                for col in range(1, 7):
+                    c = ws.cell(current_row, col)
+                    c.fill = SALLE_FILL
+                    c.font = SALLE_FONT
+                    c.border = border
+                ws.cell(current_row, 1, salle)
+                ws.merge_cells(
+                    start_row=current_row, start_column=1,
+                    end_row=current_row, end_column=6
+                )
+                current_row += 1
+
+            vals = [
+                salle,
+                r.get("Code", ""),
+                r.get("Produit", ""),
+                r.get("Prix attendu (HT)", ""),
+                r.get("Prix réel (HT)", ""),
+                r.get("Écart (€)", ""),
+            ]
+            fill = _ecart_fill(r.get("Écart (€)", 0))
+            for col, val in enumerate(vals, 1):
+                c = ws.cell(current_row, col, val)
+                c.fill = fill
+                c.border = border
+                if col in (4, 5):
+                    c.number_format = "0.000 €"
+                    c.alignment = Alignment(horizontal="center")
+                elif col == 6:
+                    c.number_format = '+0.000 €;-0.000 €;0.000 €'
+                    c.alignment = Alignment(horizontal="center")
+            current_row += 1
+
+        for i, (col_letter, w) in enumerate(zip("ABCDEF", COL_W), 1):
+            ws.column_dimensions[col_letter].width = w
+
+    # Retourner les bytes
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -407,13 +553,15 @@ def render():
             nb_lignes = len(df_ventes_prix)
             nb_anomalies = len(anomalies_df)
             nb_non_ref = len(non_ref)
+            nb_salles_ko = anomalies_df["Salle"].nunique() if not anomalies_df.empty else 0
             pct_ok = round((nb_lignes - nb_anomalies) / nb_lignes * 100, 1) if nb_lignes else 0.0
 
-            k1, k2, k3, k4 = st.columns(4)
+            k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("Lignes analysées", nb_lignes)
             k2.metric("Conformes", f"{pct_ok} %")
             k3.metric("Anomalies de prix", nb_anomalies)
-            k4.metric("Codes non référencés", nb_non_ref)
+            k4.metric("Salles concernées", nb_salles_ko)
+            k5.metric("Codes non référencés", nb_non_ref)
 
             st.divider()
 
@@ -433,6 +581,27 @@ def render():
                     else:
                         bg = "background-color: #fff3cd; color: #664d00;"
                     return [bg] * len(row)
+
+                # ── Export par réappro ──────────────────────────────────────
+                with st.spinner("Chargement du planning…"):
+                    plannings, errs = load_plannings_from_mongo()
+
+                if errs:
+                    st.warning(
+                        "Planning indisponible, l'export par réappro est désactivé. "
+                        f"Erreur : {list(errs.values())[0]}"
+                    )
+                else:
+                    reappro_map = build_reappro_mapping(plannings)
+                    excel_bytes = generer_export_reappros(anomalies_df, reappro_map)
+                    st.download_button(
+                        label="📥 Télécharger l'export par réappro (Excel)",
+                        data=excel_bytes,
+                        file_name="controle_prix_reappros.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+                st.divider()
 
                 vue_machine, vue_complet = st.tabs(["🏭 Détail par machine", "📋 Détail complet"])
 
