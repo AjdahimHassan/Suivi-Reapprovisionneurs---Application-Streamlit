@@ -1,643 +1,470 @@
-"""
-Page : Détection des Indéfinis + Contrôle des Prix
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Onglet 1 — Indéfinis :
-  - Charge un fichier de ventes (export audit machine)
-  - Charge un fichier de planogramme (configuration machine)
-  - Détecte les lignes "INDEFINI"
-  - Identifie les lignes du planno au même prix qui n'ont PAS vendu
-    → Ce sont les suspects d'un mauvais paramétrage
-
-Onglet 2 — Contrôle des prix :
-  - Charge un export de ventes ERP (Audit Telemetrie)
-  - Compare le prix unitaire HT observé avec le prix HT de référence
-    de la bibliothèque produits (MongoDB produits_lib)
-  - Identifie les produits vendus au mauvais prix, par machine/salle
-"""
-
 import streamlit as st
 import pandas as pd
 import io
-
 from planogrammes_storage import load_produits
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ONGLET 1 — INDÉFINIS
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ──────────────────────────────────────────────────────────
-# PARSING — Onglet Indéfinis
-# ──────────────────────────────────────────────────────────
+def _detect_sep(raw: str) -> str:
+    first_line = raw.split("\n")[0]
+    return ";" if first_line.count(";") >= first_line.count(",") else ","
+
 
 def parse_ventes(file_bytes: bytes) -> pd.DataFrame:
-    """Parse le fichier export audit (ventes réelles)."""
-    content = file_bytes.decode("utf-8-sig")
-    df = pd.read_csv(
-        io.StringIO(content),
-        sep=";",
-        dtype=str,
-    )
-    df.columns = [c.strip().strip('"') for c in df.columns]
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            raw = file_bytes.decode(enc)
+            break
+        except Exception:
+            continue
+    sep = _detect_sep(raw)
+    df = pd.read_csv(io.StringIO(raw), sep=sep, quotechar='"', dtype=str)
+    df.columns = [c.strip().replace('"', "") for c in df.columns]
+
+    rename = {}
     for col in df.columns:
-        df[col] = df[col].str.strip().str.strip('"')
+        cu = col.upper()
+        if "CODE" in cu and "PRODUIT" in cu:
+            rename[col] = "CODE_PRODUIT"
+        elif cu in ("PU", "PRIX UNITAIRE", "PRIX_UNITAIRE", "PRIXUNITAIRE"):
+            rename[col] = "PU"
+        elif "LDP" in cu or "LIGNE" in cu:
+            rename[col] = "LDP"
+        elif "MACHINE" in cu:
+            rename[col] = "CODE_MACHINE"
+        elif "CLIENT" in cu and "CODE" in cu:
+            rename[col] = "CODE_CLIENT"
+    df = df.rename(columns=rename)
 
-    # Dédupliquer les colonnes (garder la première occurrence)
-    df = df.loc[:, ~df.columns.duplicated()]
+    if "CODE_PRODUIT" not in df.columns:
+        raise ValueError("Colonne CODE_PRODUIT introuvable dans le fichier de ventes.")
 
-    # Normaliser les noms de colonnes attendus
-    rename_map = {}
-    for c in df.columns:
-        cl = c.upper()
-        if "CODE PRODUIT" in cl or "PRODUIT" in cl:
-            rename_map[c] = "CODE_PRODUIT"
-        elif "PU" == cl or "PRIX" in cl:
-            rename_map[c] = "PU"
-        elif "LDP" in cl or "LIGNE" in cl:
-            rename_map[c] = "LDP"
-        elif "CODE MACHINE" in cl or "MACHINE" in cl:
-            rename_map[c] = "CODE_MACHINE"
-        elif "CODE CLIENT" in cl or "CLIENT" in cl:
-            rename_map[c] = "CODE_CLIENT"
-    df = df.rename(columns=rename_map)
-
-    # Dédupliquer après rename (au cas où deux colonnes source → même nom cible)
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    # Convertir PU en float
     if "PU" in df.columns:
-        df["PU"] = df["PU"].str.replace(",", ".").str.strip()
-        df["PU"] = pd.to_numeric(df["PU"], errors="coerce")
-    if "LDP" in df.columns:
-        df["LDP"] = pd.to_numeric(df["LDP"], errors="coerce")
+        df["PU"] = pd.to_numeric(
+            df["PU"].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
+        )
 
+    if "LDP" in df.columns:
+        df["LDP"] = pd.to_numeric(
+            df["LDP"].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
+        )
+
+    df["CODE_PRODUIT"] = df["CODE_PRODUIT"].astype(str).str.strip().str.upper()
     return df
 
 
 def parse_planno(file_bytes: bytes) -> pd.DataFrame:
-    """Parse le fichier planogramme (configuration machine)."""
-    content = file_bytes.decode("utf-8-sig")
-    lines = content.splitlines()
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            raw = file_bytes.decode(enc)
+            break
+        except Exception:
+            continue
+    sep = _detect_sep(raw)
+    lines = raw.splitlines()
 
-    # Trouver la ligne d'en-tête (celle qui contient "Code")
-    header_idx = 1  # fallback
+    header_idx = 0
     for i, line in enumerate(lines):
-        stripped = line.strip().strip('"')
-        if stripped.startswith("Code"):
+        if line.strip().lower().startswith("code") or line.strip().lower().startswith('"code'):
             header_idx = i
             break
 
-    data_lines = "\n".join(lines[header_idx:])
-    df = pd.read_csv(
-        io.StringIO(data_lines),
-        sep=";",
-        dtype=str,
-    )
+    body = "\n".join(lines[header_idx:])
+    df = pd.read_csv(io.StringIO(body), sep=sep, quotechar='"', dtype=str)
+    df.columns = [c.strip().replace('"', "") for c in df.columns]
 
-    # Nettoyer les noms de colonnes
-    df.columns = [str(c).strip().strip('"') for c in df.columns]
-
-    # Supprimer colonnes Unnamed ou vides
-    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
-    df = df.loc[:, df.columns.str.strip() != ""]
-
-    # Nettoyer les valeurs (toutes les colonnes sont str ici)
+    rename = {}
     for col in df.columns:
-        df[col] = df[col].astype(str).str.strip().str.strip('"')
-
-    # Renommer les colonnes utiles — ordre important : LIGNE avant PRIX
-    rename_map = {}
-    for c in df.columns:
-        cl = c.upper().replace("É", "E").replace("È", "E").replace("Û", "U")
-        if cl == "CODE":
-            rename_map[c] = "CODE_PRODUIT"
-        elif cl.startswith("LIBEL"):
-            rename_map[c] = "LIBELLE"
-        elif "LIGNE" in cl:          # "Ligne de prix" → LDP  (testé AVANT PRIX)
-            rename_map[c] = "LDP"
-        elif "PRIX" in cl:           # "Prix u.b. TTC" → PU
-            rename_map[c] = "PU"
-        elif cl.startswith("NIV"):
-            rename_map[c] = "NIV_HAUT"
-        elif "UNIT" in cl:
-            rename_map[c] = "UNITE"
-
-    df = df.rename(columns=rename_map)
-
-    if "PU" in df.columns:
-        df["PU"] = df["PU"].str.replace(",", ".").str.strip()
-        df["PU"] = pd.to_numeric(df["PU"], errors="coerce")
-    if "LDP" in df.columns:
-        df["LDP"] = df["LDP"].str.replace(",", ".").str.strip()
-        df["LDP"] = pd.to_numeric(df["LDP"], errors="coerce")
+        cu = col.upper()
+        if "CODE" in cu and "PRODUIT" in cu:
+            rename[col] = "CODE_PRODUIT"
+        elif cu == "CODE":
+            rename[col] = "CODE_PRODUIT"
+        elif "LIBELLE" in cu or "LIBELLÉ" in cu or "NOM" in cu:
+            rename[col] = "LIBELLE"
+        elif "LDP" in cu or ("LIGNE" in cu and "PRIX" in cu):
+            rename[col] = "LDP"
+        elif cu in ("PU", "PRIX UNITAIRE", "PRIX_UNITAIRE"):
+            rename[col] = "PU"
+        elif "NIV" in cu and "HAUT" in cu:
+            rename[col] = "NIV_HAUT"
+        elif "UNITE" in cu or "UNITÉ" in cu:
+            rename[col] = "UNITE"
+    df = df.rename(columns=rename)
 
     if "CODE_PRODUIT" not in df.columns:
-        raise ValueError(
-            f"Colonne 'Code' introuvable dans le planno. Colonnes détectées : {list(df.columns)}"
+        raise ValueError("Colonne CODE_PRODUIT introuvable dans le planogramme.")
+
+    if "PU" in df.columns:
+        df["PU"] = pd.to_numeric(
+            df["PU"].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
+        )
+    if "LDP" in df.columns:
+        df["LDP"] = pd.to_numeric(
+            df["LDP"].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
         )
 
-    df = df.dropna(subset=["CODE_PRODUIT"])
-    df = df[df["CODE_PRODUIT"].str.strip().str.upper() != "NAN"]
-    df = df[df["CODE_PRODUIT"].str.strip() != ""]
-
+    df["CODE_PRODUIT"] = df["CODE_PRODUIT"].astype(str).str.strip().str.upper()
+    df = df[df["CODE_PRODUIT"].notna() & (df["CODE_PRODUIT"] != "") & (df["CODE_PRODUIT"] != "NAN")]
     return df
 
 
-# ──────────────────────────────────────────────────────────
-# ANALYSE — Onglet Indéfinis
-# ──────────────────────────────────────────────────────────
-
-def analyser_indefinis(df_ventes: pd.DataFrame, df_planno: pd.DataFrame) -> list[dict]:
-    """
-    Pour chaque ligne INDEFINI dans les ventes :
-      1. Récupère son prix
-      2. Cherche dans le planno les lignes au même prix
-      3. Parmi celles-ci, identifie celles qui N'ont PAS vendu
-      → Ces lignes sont les suspects (mal paramétrées)
-    Retourne une liste de cas analysés.
-    """
-    indefinis = df_ventes[df_ventes["CODE_PRODUIT"].str.upper() == "INDEFINI"].copy()
-
-    if indefinis.empty:
+def analyser_indefinis(df_ventes: pd.DataFrame, df_planno: pd.DataFrame) -> list:
+    indefinis = df_ventes[df_ventes["CODE_PRODUIT"] == "INDEFINI"].copy()
+    if indefinis.empty or "PU" not in indefinis.columns:
         return []
 
-    # Lignes qui ont vendu (hors INDEFINI)
-    vendus_ldp = set(
-        df_ventes[df_ventes["CODE_PRODUIT"].str.upper() != "INDEFINI"]["LDP"].dropna().astype(int)
+    codes_vendus = set(
+        df_ventes[df_ventes["CODE_PRODUIT"] != "INDEFINI"]["CODE_PRODUIT"].unique()
     )
 
-    cas = []
+    resultats = []
+    prix_traites = set()
+
     for _, row in indefinis.iterrows():
-        prix_indef = row.get("PU")
-        ldp_indef = row.get("LDP")
-
-        if pd.isna(prix_indef):
+        prix = row.get("PU")
+        if pd.isna(prix) or prix in prix_traites:
             continue
+        prix_traites.add(prix)
 
-        # Lignes planno au même prix
-        planno_meme_prix = df_planno[
-            df_planno["PU"].round(4) == round(prix_indef, 4)
-        ].copy()
+        if "PU" in df_planno.columns:
+            meme_prix = df_planno[abs(df_planno["PU"] - prix) < 0.01].copy()
+        else:
+            meme_prix = pd.DataFrame()
 
-        # Lignes planno au même prix qui N'ONT PAS vendu
-        suspects = planno_meme_prix[
-            ~planno_meme_prix["LDP"].isin(vendus_ldp)
-        ].copy()
+        suspects = meme_prix[~meme_prix["CODE_PRODUIT"].isin(codes_vendus)]
+        autres_vendus = meme_prix[meme_prix["CODE_PRODUIT"].isin(codes_vendus)]
 
-        # Lignes planno au même prix qui ONT vendu
-        autres_vendus = planno_meme_prix[
-            planno_meme_prix["LDP"].isin(vendus_ldp)
-        ].copy()
-
-        cas.append({
-            "ldp_indefini": int(ldp_indef) if not pd.isna(ldp_indef) else "?",
-            "prix": prix_indef,
-            "planno_meme_prix": planno_meme_prix,
+        resultats.append({
+            "prix": prix,
+            "indefini_rows": indefinis[abs(indefinis["PU"] - prix) < 0.01],
+            "planno_meme_prix": meme_prix,
             "suspects": suspects,
             "autres_vendus": autres_vendus,
         })
 
-    return cas
+    return resultats
 
 
-# ──────────────────────────────────────────────────────────
-# PARSING — Onglet Contrôle des prix
-# ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ONGLET 2 — CONTRÔLE DES PRIX
+# ─────────────────────────────────────────────────────────────────────────────
 
-def parse_ventes_prix(content: bytes) -> pd.DataFrame:
-    """
-    Parse l'export ERP de ventes (Audit Telemetrie).
-    Colonnes attendues : Stock Destination, Nom client, Code produit,
-                         Libellé produit, Quantité, Montant HT
-    Retourne un DataFrame avec colonnes normalisées et PU_HT calculé.
-    """
-    df = pd.read_csv(io.BytesIO(content), sep=";", dtype=str, encoding="utf-8-sig")
-    df.columns = df.columns.str.strip().str.strip('"')
-
-    for col in ["Stock Destination", "Nom client", "Code produit",
-                "Libellé produit", "Quantité", "Montant HT"]:
-        if col in df.columns:
-            df[col] = df[col].str.strip().str.strip('"')
-
-    df["Quantité"]   = pd.to_numeric(df["Quantité"],   errors="coerce").fillna(0)
-    df["Montant HT"] = pd.to_numeric(
-        df["Montant HT"].str.replace(",", "."), errors="coerce"
-    ).fillna(0)
-
-    df = df[df["Quantité"] > 0].copy()
-    df["PU_HT"] = (df["Montant HT"] / df["Quantité"]).round(3)
-
-    return df.rename(columns={
-        "Stock Destination": "Machine",
-        "Nom client":        "Salle",
-        "Code produit":      "Code",
-        "Libellé produit":   "Produit",
-    })
+_TOLERANCE_HT = 0.05
 
 
-# ──────────────────────────────────────────────────────────
-# ANALYSE — Onglet Contrôle des prix
-# ──────────────────────────────────────────────────────────
+def parse_ventes_prix(file_bytes: bytes) -> pd.DataFrame:
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            raw = file_bytes.decode(enc)
+            break
+        except Exception:
+            continue
 
-_TOLERANCE_HT = 0.05   # écart max toléré en € (arrondi machine)
+    df = pd.read_csv(io.StringIO(raw), sep=";", quotechar='"', dtype=str)
+    df.columns = [c.strip().replace('"', "") for c in df.columns]
+
+    # Filtre "Audit Telemetrie" si la colonne existe
+    col_type = next(
+        (c for c in df.columns if "type" in c.lower() and "che" in c.lower()), None
+    )
+    if col_type:
+        df = df[df[col_type].astype(str).str.strip().str.lower() == "audit telemetrie"]
+
+    col_map = {
+        "Code DA": "Machine",
+        "Nom client": "Salle",
+        "Code produit": "Code",
+        "Libellé produit": "Produit",
+        "Quantité": "Quantité",
+        "Montant HT": "Montant_HT",
+        "Date": "Date",
+    }
+    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+
+    for num_col in ("Quantité", "Montant_HT"):
+        if num_col in df.columns:
+            df[num_col] = pd.to_numeric(
+                df[num_col].astype(str).str.replace(",", ".").str.strip(), errors="coerce"
+            )
+
+    df = df[df["Quantité"].notna() & (df["Quantité"] > 0)]
+    df = df[df["Montant_HT"].notna()]
+
+    df["PU_HT"] = (df["Montant_HT"] / df["Quantité"]).round(3)
+
+    cols = [c for c in ("Date", "Machine", "Salle", "Code", "Produit", "Quantité", "Montant_HT", "PU_HT") if c in df.columns]
+    return df[cols].reset_index(drop=True)
 
 
-def analyser_prix(ventes_df: pd.DataFrame, produits: list) -> tuple:
-    """
-    Compare le PU_HT observé dans les ventes avec le prix_ht de la bibliothèque.
-    Retourne :
-      anomalies_df  : lignes avec écart > tolérance
-      non_ref_codes : set de codes absents de la bibliothèque
-      nb_groupes    : nb de combinaisons uniques (machine × produit) analysées
-    """
-    # Bibliothèque : {code: prix_ht_float}
+def analyser_prix(df: pd.DataFrame, produits: list, tolerance: float = _TOLERANCE_HT):
+    # Construit {code: [prix1, prix2, ...]} pour gérer les produits
+    # qui ont plusieurs prix valides selon la machine (ex: Red Bull 2,84 € ou 3,03 €)
     lib = {}
     for p in produits:
-        code = p.get("code", "").strip()
-        prix = p.get("prix_ht", "")
+        code = str(p.get("code", "")).strip().upper()
+        prix = p.get("prix_ht", None)
         if code and prix:
             try:
-                lib[code] = round(float(str(prix).replace(",", ".")), 3)
-            except ValueError:
+                prix_float = round(float(str(prix).replace(",", ".")), 3)
+                lib.setdefault(code, [])
+                if prix_float not in lib[code]:
+                    lib[code].append(prix_float)
+            except (ValueError, TypeError):
                 pass
 
-    # Grouper par (Machine, Salle, Code, Produit) → prix uniques observés
-    groupes = (
-        ventes_df.groupby(["Machine", "Salle", "Code", "Produit"])["PU_HT"]
-        .apply(lambda x: sorted(x.unique()))
-        .reset_index()
-    )
+    anomalies = []
+    non_ref = set()
 
-    nb_groupes = len(groupes)
-    anomalies  = []
-    non_ref    = set()
-
-    for _, row in groupes.iterrows():
-        code = row["Code"]
+    for _, row in df.iterrows():
+        code = str(row.get("Code", "")).strip().upper()
+        pu = row.get("PU_HT")
+        if pd.isna(pu):
+            continue
         if code not in lib:
             non_ref.add(code)
             continue
-        ref = lib[code]
-        for prix in row["PU_HT"]:
-            ecart = round(prix - ref, 3)
-            if abs(ecart) > _TOLERANCE_HT:
-                anomalies.append({
-                    "Machine":         row["Machine"],
-                    "Salle":           row["Salle"],
-                    "Code":            code,
-                    "Produit":         row["Produit"],
-                    "Prix HT attendu": ref,
-                    "Prix HT réel":    prix,
-                    "Écart (€)":       ecart,
-                })
+        prix_valides = lib[code]
+        # OK si le prix réel est proche d'AU MOINS UN prix valide
+        ecarts = [round(pu - p, 3) for p in prix_valides]
+        ecart_min = min(ecarts, key=abs)
+        if abs(ecart_min) > tolerance:
+            # Affiche le prix valide le plus proche comme référence
+            attendu = prix_valides[ecarts.index(ecart_min)]
+            anomalies.append({
+                "Date": row.get("Date", ""),
+                "Machine": row.get("Machine", ""),
+                "Salle": row.get("Salle", ""),
+                "Code": code,
+                "Produit": row.get("Produit", ""),
+                "Prix attendu (HT)": attendu,
+                "Prix réel (HT)": pu,
+                "Écart (€)": ecart_min,
+            })
 
     anomalies_df = pd.DataFrame(anomalies)
     if not anomalies_df.empty:
         anomalies_df = anomalies_df.sort_values(
-            by="Écart (€)", key=lambda s: s.abs(), ascending=False
+            "Écart (€)", key=abs, ascending=False
         ).reset_index(drop=True)
 
-    return anomalies_df, non_ref, nb_groupes
+    return anomalies_df, non_ref
 
 
-# ──────────────────────────────────────────────────────────
-# RENDER
-# ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDU PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────────────
 
 def render():
+    st.title("Indéfinis & Contrôle des prix")
 
     tab1, tab2 = st.tabs(["🔍 Indéfinis", "💰 Contrôle des prix"])
 
-    # ══════════════════════════════════════════════════════
-    # ONGLET 1 — Indéfinis (code inchangé)
-    # ══════════════════════════════════════════════════════
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 1 — INDÉFINIS
+    # ──────────────────────────────────────────────────────────────────────────
     with tab1:
-        st.markdown("""
-        <style>
-        .indef-card {
-            background: #1a1a2e;
-            border-left: 5px solid #E74C3C;
-            border-radius: 8px;
-            padding: 1rem 1.2rem;
-            margin-bottom: 1.5rem;
-        }
-        .suspect-badge {
-            display: inline-block;
-            background: #C0392B;
-            color: white;
-            font-weight: 700;
-            padding: 2px 10px;
-            border-radius: 4px;
-            font-size: 0.85rem;
-            margin-right: 6px;
-        }
-        .ok-badge {
-            display: inline-block;
-            background: #1E7E34;
-            color: white;
-            font-weight: 700;
-            padding: 2px 10px;
-            border-radius: 4px;
-            font-size: 0.85rem;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+        st.markdown("### Détection des produits indéfinis")
+        st.caption(
+            "Importez le fichier de ventes (export machine) et le planogramme (CSV). "
+            "L'outil détecte les lignes INDÉFINI et identifie les produits suspects "
+            "au même prix dans le planogramme."
+        )
 
-        # ── Upload ──
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### 📤 Fichier de ventes (audit machine)")
-            st.caption("Export contenant les lignes vendues avec CODE PRODUIT, PU, LDP")
+        col_a, col_b = st.columns(2)
+        with col_a:
             f_ventes = st.file_uploader(
-                "Ventes", type=["csv"], key="indef_ventes",
-                label_visibility="collapsed"
+                "Fichier de ventes (CSV machine)", type=["csv"], key="indef_ventes"
             )
-        with col2:
-            st.markdown("#### 📋 Fichier planogramme (configuration machine)")
-            st.caption("Export de configuration contenant Code, Libellé, Prix, Ligne de prix")
+        with col_b:
             f_planno = st.file_uploader(
-                "Planno", type=["csv"], key="indef_planno",
-                label_visibility="collapsed"
+                "Planogramme (CSV)", type=["csv"], key="indef_planno"
             )
 
-        if not f_ventes or not f_planno:
-            st.info("👆 Déposez les deux fichiers pour lancer l'analyse.")
+        if not f_ventes and not f_planno:
+            st.info("Importez les deux fichiers pour lancer l'analyse.")
         else:
-            # ── Parse ──
-            try:
-                df_ventes = parse_ventes(f_ventes.read())
-                df_planno = parse_planno(f_planno.read())
-            except Exception as e:
-                st.error(f"Erreur lors du parsing : {e}")
-                return
+            df_ventes = None
+            if f_ventes:
+                try:
+                    df_ventes = parse_ventes(f_ventes.read())
+                except Exception as e:
+                    st.error(f"Erreur lecture ventes : {e}")
 
-            # ── Vérifications colonnes ──
-            missing_v = [c for c in ["CODE_PRODUIT", "PU", "LDP"] if c not in df_ventes.columns]
-            missing_p = [c for c in ["CODE_PRODUIT", "PU", "LDP"] if c not in df_planno.columns]
-            if missing_v:
-                st.error(f"Colonnes manquantes dans le fichier ventes : {missing_v}")
-                st.write("Colonnes détectées :", list(df_ventes.columns))
-                return
-            if missing_p:
-                st.error(f"Colonnes manquantes dans le fichier planno : {missing_p}")
-                st.write("Colonnes détectées :", list(df_planno.columns))
-                return
+            df_planno = None
+            if f_planno:
+                try:
+                    df_planno = parse_planno(f_planno.read())
+                except Exception as e:
+                    st.error(f"Erreur lecture planogramme : {e}")
 
-            # ── Analyse ──
-            cas = analyser_indefinis(df_ventes, df_planno)
+            if df_ventes is not None and df_planno is not None:
+                missing_v = [c for c in ("CODE_PRODUIT", "PU") if c not in df_ventes.columns]
+                missing_p = [c for c in ("CODE_PRODUIT", "PU") if c not in df_planno.columns]
+                if missing_v:
+                    st.error(f"Colonnes manquantes dans ventes : {missing_v}")
+                elif missing_p:
+                    st.error(f"Colonnes manquantes dans planogramme : {missing_p}")
+                else:
+                    resultats = analyser_indefinis(df_ventes, df_planno)
 
-            st.divider()
+                    nb_indefinis = len(df_ventes[df_ventes["CODE_PRODUIT"] == "INDEFINI"])
+                    nb_suspects = sum(len(r["suspects"]) for r in resultats)
+                    nb_planno = len(df_planno)
 
-            if not cas:
-                st.success("✅ Aucun produit INDÉFINI détecté dans ce fichier de ventes.")
-            else:
-                # KPIs
-                nb_indefinis = len(cas)
-                nb_suspects_total = sum(len(c["suspects"]) for c in cas)
-
-                k1, k2, k3 = st.columns(3)
-                k1.metric("⚠️ Lignes INDÉFINI", nb_indefinis)
-                k2.metric("🔍 Lignes suspectes (planno)", nb_suspects_total,
-                          help="Lignes au même prix dans le planno qui n'ont pas vendu")
-                k3.metric("📋 Lignes planno analysées",
-                          sum(len(c["planno_meme_prix"]) for c in cas))
-
-                st.divider()
-
-                # ── Détail par indéfini ──
-                for i, cas_item in enumerate(cas, 1):
-                    ldp = cas_item["ldp_indefini"]
-                    prix = cas_item["prix"]
-                    suspects = cas_item["suspects"]
-                    autres_vendus = cas_item["autres_vendus"]
-                    planno_meme_prix = cas_item["planno_meme_prix"]
-
-                    st.markdown(f"""
-                    <div class="indef-card">
-                        <b style="color:#E74C3C; font-size:1.1rem;">
-                            ⚠️ INDÉFINI #{i} — Ligne {ldp} — Prix : {prix:.2f} €
-                        </b>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    col_s, col_v = st.columns(2)
-
-                    with col_s:
-                        st.markdown(f"##### 🔴 Lignes suspectes ({len(suspects)} trouvée(s))")
-                        st.caption("Ces lignes sont dans le planno au même prix mais **n'ont pas vendu** — probable mauvais paramétrage")
-                        if suspects.empty:
-                            st.success("Aucune ligne suspecte — toutes les lignes planno à ce prix ont vendu.")
-                        else:
-                            cols_show = ["LDP", "CODE_PRODUIT"]
-                            if "LIBELLE" in suspects.columns:
-                                cols_show.append("LIBELLE")
-                            if "NIV_HAUT" in suspects.columns:
-                                cols_show.append("NIV_HAUT")
-                            cols_show.append("PU")
-                            df_show = suspects[[c for c in cols_show if c in suspects.columns]].copy()
-                            df_show = df_show.sort_values("LDP")
-                            df_show.columns = [
-                                c.replace("LDP", "Ligne").replace("CODE_PRODUIT", "Code Produit")
-                                 .replace("LIBELLE", "Libellé").replace("NIV_HAUT", "Capacité")
-                                 .replace("PU", "Prix (€)")
-                                for c in df_show.columns
-                            ]
-                            st.dataframe(
-                                df_show.style.applymap(
-                                    lambda _: "background-color:#C0392B; color:#FFFFFF; font-weight:600"
-                                ),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-
-                    with col_v:
-                        st.markdown(f"##### 🟢 Lignes planno qui ont vendu ({len(autres_vendus)})")
-                        st.caption("Ces lignes au même prix ont correctement vendu — servent de référence")
-                        if autres_vendus.empty:
-                            st.warning("Aucune ligne à ce prix n'a vendu (hormis l'indéfini).")
-                        else:
-                            cols_show2 = ["LDP", "CODE_PRODUIT"]
-                            if "LIBELLE" in autres_vendus.columns:
-                                cols_show2.append("LIBELLE")
-                            cols_show2.append("PU")
-                            df_show2 = autres_vendus[[c for c in cols_show2 if c in autres_vendus.columns]].copy()
-                            df_show2 = df_show2.sort_values("LDP")
-                            df_show2.columns = [
-                                c.replace("LDP", "Ligne").replace("CODE_PRODUIT", "Code Produit")
-                                 .replace("LIBELLE", "Libellé").replace("PU", "Prix (€)")
-                                for c in df_show2.columns
-                            ]
-                            st.dataframe(
-                                df_show2.style.applymap(
-                                    lambda _: "background-color:#1E7E34; color:#FFFFFF; font-weight:600"
-                                ),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-
-                    if not suspects.empty:
-                        lignes_str = ", ".join(str(int(l)) for l in suspects["LDP"].dropna())
-                        produits_str = ", ".join(suspects["CODE_PRODUIT"].dropna().unique())
-                        st.info(
-                            f"💡 **Diagnostic** : La ligne **{ldp}** vend en INDÉFINI à **{prix:.2f} €**. "
-                            f"Les lignes **{lignes_str}** ({produits_str}) sont configurées au même prix "
-                            f"dans le planno mais n'ont pas vendu. "
-                            f"Vérifiez le paramétrage de ces lignes sur la machine."
-                        )
-                    else:
-                        st.success(
-                            f"✅ Toutes les lignes planno à **{prix:.2f} €** ont vendu. "
-                            f"La ligne {ldp} est peut-être un produit absent du planno."
-                        )
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Lignes INDÉFINI", nb_indefinis)
+                    k2.metric("Lignes suspectes", nb_suspects)
+                    k3.metric("Lignes planno analysées", nb_planno)
 
                     st.divider()
 
-            # ── Vue d'ensemble ventes ──
-            with st.expander("🔍 Voir toutes les lignes du fichier ventes"):
-                cols_v = ["LDP", "CODE_PRODUIT", "PU"]
-                if "CODE_MACHINE" in df_ventes.columns:
-                    cols_v = ["CODE_MACHINE"] + cols_v
-                if "CODE_CLIENT" in df_ventes.columns:
-                    cols_v = ["CODE_CLIENT"] + cols_v
-                seen = set()
-                cols_v_dedup = []
-                for c in cols_v:
-                    if c in df_ventes.columns and c not in seen:
-                        cols_v_dedup.append(c)
-                        seen.add(c)
-                df_v_show = df_ventes[cols_v_dedup].copy()
-                df_v_show = df_v_show.loc[:, ~df_v_show.columns.duplicated()]
-                df_v_show = df_v_show.sort_values("LDP").reset_index(drop=True)
-                df_v_show = df_v_show.rename(columns={
-                    "LDP": "Ligne", "CODE_PRODUIT": "Code Produit",
-                    "PU": "Prix (€)", "CODE_MACHINE": "Machine", "CODE_CLIENT": "Client"
-                })
-                df_v_show.insert(0, "⚠️", df_v_show["Code Produit"].str.upper().apply(
-                    lambda x: "🔴 INDÉFINI" if x == "INDEFINI" else ""
-                ))
-                st.dataframe(df_v_show, use_container_width=True, hide_index=True)
+                    if not resultats:
+                        st.success("Aucune ligne INDÉFINI trouvée dans le fichier de ventes.")
+                    else:
+                        for r in resultats:
+                            prix = r["prix"]
+                            suspects = r["suspects"]
+                            autres = r["autres_vendus"]
 
-            with st.expander("📋 Voir toutes les lignes du planogramme"):
-                cols_p = ["LDP", "CODE_PRODUIT"]
-                if "LIBELLE" in df_planno.columns:
-                    cols_p.append("LIBELLE")
-                if "NIV_HAUT" in df_planno.columns:
-                    cols_p.append("NIV_HAUT")
-                cols_p.append("PU")
-                df_p_show = df_planno[[c for c in cols_p if c in df_planno.columns]].copy()
-                df_p_show = df_p_show.sort_values("LDP")
-                st.dataframe(df_p_show, use_container_width=True, hide_index=True)
+                            st.markdown(
+                                f"<div style='background:#1a1010;border-left:4px solid #e74c3c;"
+                                f"padding:12px 16px;border-radius:6px;margin-bottom:8px;'>"
+                                f"<b style='color:#e74c3c'>INDÉFINI</b> &nbsp;|&nbsp; "
+                                f"Prix : <b>{prix:.2f} €</b> &nbsp;|&nbsp; "
+                                f"{len(suspects)} suspect(s) &nbsp;|&nbsp; {len(autres)} référence(s)"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
 
-    # ══════════════════════════════════════════════════════
-    # ONGLET 2 — Contrôle des prix
-    # ══════════════════════════════════════════════════════
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.markdown("**🔴 Suspects** — produits au même prix sans vente")
+                                if suspects.empty:
+                                    st.caption("Aucun suspect.")
+                                else:
+                                    cols_s = [c for c in ("CODE_PRODUIT", "LIBELLE", "LDP", "PU", "NIV_HAUT") if c in suspects.columns]
+                                    st.dataframe(suspects[cols_s], use_container_width=True, hide_index=True)
+
+                            with c2:
+                                st.markdown("**🟢 Références** — produits au même prix ayant vendu")
+                                if autres.empty:
+                                    st.caption("Aucune référence trouvée.")
+                                else:
+                                    cols_r = [c for c in ("CODE_PRODUIT", "LIBELLE", "LDP", "PU") if c in autres.columns]
+                                    st.dataframe(autres[cols_r], use_container_width=True, hide_index=True)
+
+                            st.markdown("---")
+
+                    with st.expander("Toutes les ventes"):
+                        st.dataframe(df_ventes, use_container_width=True, hide_index=True)
+
+                    with st.expander("Tout le planogramme"):
+                        st.dataframe(df_planno, use_container_width=True, hide_index=True)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 2 — CONTRÔLE DES PRIX
+    # ──────────────────────────────────────────────────────────────────────────
     with tab2:
-        st.markdown("#### 📤 Fichier de ventes ERP")
+        st.markdown("### Vérification des prix de vente HT")
         st.caption(
-            "Export CSV Audit Telemetrie — colonnes : Stock Destination, Nom client, "
-            "Code produit, Libellé produit, Quantité, Montant HT"
-        )
-        f_prix = st.file_uploader(
-            "Ventes ERP", type=["csv"], key="prix_ventes",
-            label_visibility="collapsed",
+            "Importez l'export ERP (Audit Télémétrie, CSV séparé par ';'). "
+            "Les prix réels (Montant HT ÷ Quantité) sont comparés aux prix HT "
+            f"de la bibliothèque produits. Tolérance : ±{_TOLERANCE_HT} €."
         )
 
-        if not f_prix:
-            st.info("👆 Déposez le fichier de ventes pour lancer le contrôle des prix.")
-            st.caption(
-                "Les prix de référence sont chargés automatiquement depuis la bibliothèque "
-                "produits (MongoDB — page Planogrammes)."
-            )
-            return
+        f_erp = st.file_uploader(
+            "Export ERP Audit Télémétrie (.csv)", type=["csv"], key="prix_erp"
+        )
 
-        col_btn, _ = st.columns([1, 5])
-        with col_btn:
-            lancer = st.button("🔍 Analyser", type="primary",
-                               use_container_width=True, key="btn_analyser_prix")
-
-        if not lancer:
-            return
-
-        with st.spinner("Chargement de la bibliothèque produits…"):
+        if not f_erp:
+            st.info("Importez le fichier ERP pour lancer l'analyse.")
+        elif st.button("🔍 Analyser", key="btn_analyser_prix"):
             try:
-                produits = load_produits()
+                df_ventes_prix = parse_ventes_prix(f_erp.read())
             except Exception as e:
-                st.error(f"Impossible de charger la bibliothèque produits : {e}")
+                st.error(f"Erreur lecture fichier ERP : {e}")
                 return
 
-        try:
-            ventes_df = parse_ventes_prix(f_prix.getvalue())
-        except Exception as e:
-            st.error(f"Erreur lecture du fichier ventes : {e}")
-            return
+            if df_ventes_prix.empty:
+                st.warning("Aucune ligne exploitable dans le fichier.")
+                return
 
-        nb_lignes_brutes = len(ventes_df)
+            with st.spinner("Chargement de la bibliothèque produits…"):
+                produits = load_produits()
 
-        with st.spinner("Analyse en cours…"):
-            anomalies_df, non_ref, nb_groupes = analyser_prix(ventes_df, produits)
-
-        st.divider()
-
-        # ── KPIs ──
-        nb_anomalies = len(anomalies_df)
-        nb_non_ref   = len(non_ref)
-        nb_ok        = nb_groupes - nb_anomalies - nb_non_ref
-        pct_ok       = round(nb_ok / nb_groupes * 100) if nb_groupes else 0
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("📊 Lignes analysées", f"{nb_lignes_brutes:,}".replace(",", " "),
-                  help=f"{nb_groupes:,} combinaisons uniques (machine × produit) — {nb_lignes_brutes:,} lignes brutes dans le fichier".replace(",", " "))
-        k2.metric("✅ Conformes", f"{pct_ok} %",
-                  help=f"Sur {nb_groupes} combinaisons uniques machine/produit")
-        k3.metric("❌ Mauvais prix", nb_anomalies,
-                  help="Combinaisons machine/produit avec au moins un prix HT anormal")
-        k4.metric("⚠️ Non référencés", nb_non_ref,
-                  help="Codes produits absents de la bibliothèque planogrammes")
-
-        st.divider()
-
-        # ── Tableau des anomalies ──
-        if anomalies_df.empty:
-            st.success("✅ Tous les produits sont vendus au bon prix HT (tolérance ±0,05 €).")
-        else:
-            st.markdown(f"### ❌ {nb_anomalies} anomalie(s) de prix détectée(s)")
-            st.caption(
-                "Produits dont le prix HT réel s'écarte de plus de 0,05 € du prix HT de référence. "
-                "Trié par écart absolu décroissant."
-            )
-
-            def _style_anomalies(row):
-                ecart = row["Écart (€)"]
-                if abs(ecart) >= 0.50:
-                    bg = "#c0392b"; color = "color:white;"
-                elif abs(ecart) >= 0.20:
-                    bg = "#f8d7da"; color = ""
-                else:
-                    bg = "#ffeeba"; color = ""
-                return [f"background-color:{bg};{color}"] * len(row)
-
-            def _fmt_ecart(val):
-                return f"+{val:.3f}" if val > 0 else f"{val:.3f}"
-
-            styled = (
-                anomalies_df.style
-                .apply(_style_anomalies, axis=1)
-                .format({
-                    "Prix HT attendu": "{:.3f} €",
-                    "Prix HT réel":    "{:.3f} €",
-                    "Écart (€)":       _fmt_ecart,
-                })
-            )
-            st.dataframe(
-                styled,
-                use_container_width=True,
-                height=min(40 + 35 * len(anomalies_df), 600),
-                hide_index=True,
-            )
-
-        # ── Produits non référencés ──
-        if non_ref:
-            with st.expander(f"⚠️ {len(non_ref)} produit(s) non référencé(s) en bibliothèque"):
-                st.caption(
-                    "Ces codes produits apparaissent dans les ventes mais sont absents "
-                    "de la bibliothèque produits de la page Planogrammes. "
-                    "Ajoutez-les à la bibliothèque pour qu'ils soient contrôlés."
+            if not produits:
+                st.warning(
+                    "La bibliothèque produits est vide. "
+                    "Ajoutez des produits dans Planogrammes → Bibliothèque."
                 )
-                for code in sorted(non_ref):
-                    st.markdown(f"- `{code}`")
+                return
+
+            anomalies_df, non_ref = analyser_prix(df_ventes_prix, produits)
+
+            nb_lignes = len(df_ventes_prix)
+            nb_anomalies = len(anomalies_df)
+            nb_non_ref = len(non_ref)
+            pct_ok = round((nb_lignes - nb_anomalies) / nb_lignes * 100, 1) if nb_lignes else 0.0
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Lignes analysées", nb_lignes)
+            k2.metric("Conformes", f"{pct_ok} %")
+            k3.metric("Anomalies de prix", nb_anomalies)
+            k4.metric("Codes non référencés", nb_non_ref)
+
+            st.divider()
+
+            if anomalies_df.empty:
+                st.success("Tous les produits référencés sont vendus au bon prix HT.")
+            else:
+                st.markdown(
+                    f"**{nb_anomalies} ligne(s) avec un écart supérieur à ±{_TOLERANCE_HT} €**"
+                )
+
+                def _color_row(row):
+                    ecart = abs(row["Écart (€)"])
+                    if ecart >= 0.50:
+                        bg = "background-color: #f5c6cb; color: #7b1a1a;"
+                    elif ecart >= 0.20:
+                        bg = "background-color: #ffd8a8; color: #6b3a00;"
+                    else:
+                        bg = "background-color: #fff3cd; color: #664d00;"
+                    return [bg] * len(row)
+
+                vue_machine, vue_complet = st.tabs(["🏭 Détail par machine", "📋 Détail complet"])
+
+                with vue_machine:
+                    machines = anomalies_df["Machine"].unique() if "Machine" in anomalies_df.columns else []
+                    for machine in sorted(machines):
+                        sous_df = anomalies_df[anomalies_df["Machine"] == machine]
+                        salle = sous_df["Salle"].iloc[0] if "Salle" in sous_df.columns and not sous_df.empty else ""
+                        label = f"{machine} — {salle}" if salle else machine
+                        with st.expander(f"**{label}** — {len(sous_df)} anomalie(s)", expanded=False):
+                            styled_m = sous_df.style.apply(_color_row, axis=1).format(
+                                {
+                                    "Prix attendu (HT)": "{:.3f} €",
+                                    "Prix réel (HT)": "{:.3f} €",
+                                    "Écart (€)": "{:+.3f} €",
+                                }
+                            )
+                            st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
+                with vue_complet:
+                    styled_c = anomalies_df.style.apply(_color_row, axis=1).format(
+                        {
+                            "Prix attendu (HT)": "{:.3f} €",
+                            "Prix réel (HT)": "{:.3f} €",
+                            "Écart (€)": "{:+.3f} €",
+                        }
+                    )
+                    st.dataframe(styled_c, use_container_width=True, hide_index=True)
+
+            if non_ref:
+                with st.expander(
+                    f"Codes produits non référencés dans la bibliothèque ({nb_non_ref})"
+                ):
+                    for code in sorted(non_ref):
+                        st.markdown(f"- `{code}`")
