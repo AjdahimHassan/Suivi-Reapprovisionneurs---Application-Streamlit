@@ -340,8 +340,8 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> by
     ws_res.column_dimensions["C"].width = 16
 
     # ── Une feuille par réappro ──────────────────────────────────────────────
-    COLS_XLS = ["Salle", "Code", "Produit", "Prix attendu (HT)", "Prix réel (HT)", "Écart (€)"]
-    COL_W    = [35, 22, 40, 20, 18, 14]
+    COLS_XLS = ["Salle", "Machine", "Code", "Produit", "Prix attendu (HT)", "Prix réel (HT)", "Écart (€)"]
+    COL_W    = [35, 18, 22, 40, 20, 18, 14]
 
     for reappro in sorted(df["Réappro"].unique()):
         sub = df[df["Réappro"] == reappro].sort_values(["Salle", "Produit"])
@@ -356,7 +356,7 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> by
             # Ligne de séparation entre salles
             if salle != current_salle:
                 current_salle = salle
-                for col in range(1, 7):
+                for col in range(1, 8):
                     c = ws.cell(current_row, col)
                     c.fill = SALLE_FILL
                     c.font = SALLE_FONT
@@ -364,12 +364,13 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> by
                 ws.cell(current_row, 1, salle)
                 ws.merge_cells(
                     start_row=current_row, start_column=1,
-                    end_row=current_row, end_column=6
+                    end_row=current_row, end_column=7
                 )
                 current_row += 1
 
             vals = [
                 salle,
+                r.get("Machine", ""),
                 r.get("Code", ""),
                 r.get("Produit", ""),
                 r.get("Prix attendu (HT)", ""),
@@ -381,15 +382,15 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict) -> by
                 c = ws.cell(current_row, col, val)
                 c.fill = fill
                 c.border = border
-                if col in (4, 5):
+                if col in (5, 6):
                     c.number_format = "0.000 €"
                     c.alignment = Alignment(horizontal="center")
-                elif col == 6:
+                elif col == 7:
                     c.number_format = '+0.000 €;-0.000 €;0.000 €'
                     c.alignment = Alignment(horizontal="center")
             current_row += 1
 
-        for i, (col_letter, w) in enumerate(zip("ABCDEF", COL_W), 1):
+        for i, (col_letter, w) in enumerate(zip("ABCDEFG", COL_W), 1):
             ws.column_dimensions[col_letter].width = w
 
     # Retourner les bytes
