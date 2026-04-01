@@ -516,6 +516,17 @@ def _render_bottom_sections():
             df_actifs = pd.DataFrame(rows)
             st.dataframe(df_actifs, use_container_width=True, hide_index=True)
 
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df_actifs.to_excel(writer, sheet_name="Commentaires actifs", index=False)
+            buf.seek(0)
+            st.download_button(
+                label="⬇️ Exporter Excel",
+                data=buf.getvalue(),
+                file_name=f"commentaires_actifs_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
     # ── Historique résolus ────────────────────────────────
     resolus = incidents["resolu"]
     if resolus:
