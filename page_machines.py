@@ -118,6 +118,10 @@ def _filter_machines(df: pd.DataFrame) -> pd.DataFrame:
     if "Statut" in df.columns:
         df = df[df["Statut"].str.strip().str.upper() == "EN EXPLOITATION"]
 
+    # Filtre code : exclure les machines dont le code se termine par "M2"
+    if "Code" in df.columns:
+        df = df[~df["Code"].fillna("").str.strip().str.upper().str.endswith("M2")]
+
     # Filtre client
     if "Client" in df.columns:
         client_col = df["Client"].fillna("").str.strip()
