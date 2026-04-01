@@ -8,7 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from planogrammes_storage import load_produits
-from mongo_storage import load_plannings_from_mongo
+from mongo_storage import load_plannings_from_mongo, load_salles_traitees, valider_salle, devalider_salle
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONGLET 1 — INDÉFINIS
@@ -921,6 +921,17 @@ def render():
                             plannings, errs = load_plannings_from_mongo()
                         reappro_map = build_reappro_mapping(plannings) if not errs else {}
 
+                        # Exclure les machines déjà validées en BDD
+                        machines_deja_traitees = {d["machine"] for d in load_salles_traitees()}
+                        if machines_deja_traitees and "Machine" in anomalies_df.columns:
+                            anomalies_df = anomalies_df[
+                                ~anomalies_df["Machine"].isin(machines_deja_traitees)
+                            ].reset_index(drop=True)
+                        if machines_deja_traitees and "Machine" in df_ventes_prix.columns:
+                            df_ventes_prix = df_ventes_prix[
+                                ~df_ventes_prix["Machine"].isin(machines_deja_traitees)
+                            ]
+
                         # Construire lib_ttc : {code: [prix_ttc1, prix_ttc2, ...]}
                         # depuis le champ prix_ttc stocké en bibliothèque
                         lib_ttc = {}
@@ -1050,10 +1061,15 @@ def render():
 
                     st.divider()
 
-                    vue_machine, vue_complet = st.tabs(["🏭 Détail par machine", "📋 Détail complet"])
+                    vue_machine, vue_complet, vue_traitees = st.tabs(["🏭 Détail par machine", "📋 Détail complet", "✅ Salles traitées"])
 
                     with vue_machine:
                         machines = anomalies_df["Machine"].unique() if "Machine" in anomalies_df.columns else []
+
+                        # ── Exclure les machines déjà traitées ───────────────
+                        salles_traitees_docs = load_salles_traitees()
+                        machines_traitees    = {d["machine"] for d in salles_traitees_docs}
+                        machines_actives     = [m for m in machines if m not in machines_traitees]
 
                         # ── Barre de recherche ───────────────────────────────
                         search = st.text_input(
@@ -1064,20 +1080,20 @@ def render():
 
                         # Mapping machine → réappro pour la recherche
                         reappro_par_machine = {}
-                        for m in machines:
+                        for m in machines_actives:
                             sous = anomalies_df[anomalies_df["Machine"] == m]
                             code_cl = sous["Code_client"].iloc[0] if not sous.empty else ""
                             reappro_par_machine[m] = reappro_map.get(str(code_cl).strip().upper(), "").lower()
 
                         if search:
                             machines_filtrees = [
-                                m for m in sorted(machines)
+                                m for m in sorted(machines_actives)
                                 if search in str(m).lower() or search in reappro_par_machine.get(m, "")
                             ]
                             if not machines_filtrees:
                                 st.info("Aucun résultat pour cette recherche.")
                         else:
-                            machines_filtrees = sorted(machines)
+                            machines_filtrees = sorted(machines_actives)
 
                         for machine in machines_filtrees:
                             sous_df = anomalies_df[anomalies_df["Machine"] == machine]
@@ -1095,6 +1111,30 @@ def render():
                                     }
                                 )
                                 st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
+                                # ── Bouton Valider ───────────────────────────────
+                                col_val, _ = st.columns([2, 5])
+                                with col_val:
+                                    if st.button("✅ Marquer comme traité", key=f"valider_{machine}"):
+                                        indef_count = int((sous_df["Code"].astype(str).str.upper() == "INDEFINI").sum())
+                                        prix_count  = int((sous_df["Code"].astype(str).str.upper() != "INDEFINI").sum())
+                                        raison_parts = []
+                                        if indef_count:
+                                            raison_parts.append(f"{indef_count} produit(s) INDÉFINI")
+                                        if prix_count:
+                                            raison_parts.append(f"{prix_count} anomalie(s) de prix")
+                                        raison = " | ".join(raison_parts) if raison_parts else "Anomalies corrigées"
+                                        anom_cols = [c for c in ("Code", "Produit", "Prix attendu (HT)", "Prix réel (HT)", "Écart (€)") if c in sous_df.columns]
+                                        anom_list = []
+                                        for rec in sous_df[anom_cols].to_dict("records"):
+                                            clean = {k: (None if isinstance(v, float) and pd.isna(v) else v) for k, v in rec.items()}
+                                            anom_list.append(clean)
+                                        code_client = sous_df["Code_client"].iloc[0] if "Code_client" in sous_df.columns else ""
+                                        if valider_salle(machine, salle, str(code_client), raison, anom_list):
+                                            st.success(f"✅ {salle} marquée comme traitée.")
+                                            st.rerun()
+                                        else:
+                                            st.error("Erreur lors de la validation.")
 
                                 st.divider()
 
@@ -1294,6 +1334,39 @@ def render():
                             }
                         )
                         st.dataframe(styled_c, use_container_width=True, hide_index=True)
+
+                    with vue_traitees:
+                        docs_traites = load_salles_traitees()
+                        if not docs_traites:
+                            st.info("Aucune salle marquée comme traitée pour l'instant.")
+                        else:
+                            st.markdown(f"**{len(docs_traites)} salle(s) traitée(s)**")
+                            for doc in docs_traites:
+                                titre_doc = f"✅  {doc.get('machine', '')} — {doc.get('salle', '')}   |   {doc.get('date_traitement', '')}"
+                                with st.expander(titre_doc, expanded=False):
+                                    st.markdown(f"**Résumé :** {doc.get('raison', '—')}")
+                                    anom = doc.get("anomalies", [])
+                                    if anom:
+                                        df_anom = pd.DataFrame(anom)
+                                        # Formatage conditionnel des colonnes prix
+                                        fmt_anom = {
+                                            "Prix attendu (HT)": lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                            "Prix réel (HT)":    lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                            "Écart (€)":         lambda v: f"{v:+.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                        }
+                                        fmt_anom_apply = {k: v for k, v in fmt_anom.items() if k in df_anom.columns}
+                                        st.dataframe(
+                                            df_anom.style.format(fmt_anom_apply),
+                                            use_container_width=True, hide_index=True,
+                                        )
+                                    col_deval, _ = st.columns([2, 5])
+                                    with col_deval:
+                                        if st.button("↩️ Dévalider", key=f"devalider_{doc.get('machine', '')}"):
+                                            if devalider_salle(doc["machine"]):
+                                                st.success("Salle retirée des traitées.")
+                                                st.rerun()
+                                            else:
+                                                st.error("Erreur lors de la dévalidation.")
 
                 if non_ref:
                     with st.expander(

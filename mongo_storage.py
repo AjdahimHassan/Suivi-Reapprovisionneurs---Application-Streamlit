@@ -291,3 +291,58 @@ def clear_routes_cache() -> int:
         return result.deleted_count
     except Exception:
         return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SALLES TRAITÉES — contrôle des prix
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_salles_traitees_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["salles_traitees"]
+
+
+def load_salles_traitees() -> list:
+    """Retourne tous les documents de salles traitées, triés par date décroissante."""
+    try:
+        col  = _get_salles_traitees_col()
+        docs = list(col.find({}).sort("date_traitement", -1))
+        for d in docs:
+            if "_id" in d:
+                d["_id"] = str(d["_id"])
+        return docs
+    except Exception:
+        return []
+
+
+def valider_salle(machine: str, salle: str, code_client: str, raison: str, anomalies: list) -> bool:
+    """Insère ou met à jour une salle traitée. Retourne True si succès."""
+    try:
+        col = _get_salles_traitees_col()
+        col.update_one(
+            {"machine": machine},
+            {"$set": {
+                "machine":          machine,
+                "salle":            salle,
+                "code_client":      code_client,
+                "statut":           "traité",
+                "raison":           raison,
+                "anomalies":        anomalies,
+                "date_traitement":  datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+            }},
+            upsert=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def devalider_salle(machine: str) -> bool:
+    """Supprime une salle des traitées. Retourne True si succès."""
+    try:
+        _get_salles_traitees_col().delete_one({"machine": machine})
+        return True
+    except Exception:
+        return False
+        return 0
