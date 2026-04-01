@@ -352,6 +352,8 @@ def generer_export_reappros(anomalies_df: pd.DataFrame, reappro_map: dict, filtr
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     def _ecart_fill(ecart):
+        if ecart is None or (isinstance(ecart, float) and pd.isna(ecart)):
+            return FILL_RED  # INDEFINI → rouge
         a = abs(ecart)
         if a >= 0.50: return FILL_RED
         if a >= 0.20: return FILL_ORA
@@ -1087,9 +1089,9 @@ def render():
                                 # Tableau des anomalies ERP
                                 styled_m = sous_df.style.apply(_color_row, axis=1).format(
                                     {
-                                        "Prix attendu (HT)": "{:.3f} €",
-                                        "Prix réel (HT)": "{:.3f} €",
-                                        "Écart (€)": "{:+.3f} €",
+                                        "Prix attendu (HT)": lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                        "Prix réel (HT)":    lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                        "Écart (€)":         lambda v: f"{v:+.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
                                     }
                                 )
                                 st.dataframe(styled_m, use_container_width=True, hide_index=True)
@@ -1286,9 +1288,9 @@ def render():
                     with vue_complet:
                         styled_c = anomalies_df.style.apply(_color_row, axis=1).format(
                             {
-                                "Prix attendu (HT)": "{:.3f} €",
-                                "Prix réel (HT)": "{:.3f} €",
-                                "Écart (€)": "{:+.3f} €",
+                                "Prix attendu (HT)": lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                "Prix réel (HT)":    lambda v: f"{v:.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
+                                "Écart (€)":         lambda v: f"{v:+.3f} €" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—",
                             }
                         )
                         st.dataframe(styled_c, use_container_width=True, hide_index=True)
