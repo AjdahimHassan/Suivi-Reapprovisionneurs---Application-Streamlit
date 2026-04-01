@@ -6,6 +6,7 @@ un export CSV. Les données sont persistées dans MongoDB (collection "machines"
 Chaque import écrase intégralement les données précédentes.
 """
 
+import io
 import streamlit as st
 import pandas as pd
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -90,7 +91,6 @@ def _parse_csv(raw_bytes: bytes) -> pd.DataFrame:
     """Parse le CSV export machines (séparateur ';', encodage latin-1 ou utf-8)."""
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
-            import io
             df = pd.read_csv(
                 io.BytesIO(raw_bytes),
                 sep=";",
@@ -213,6 +213,18 @@ def render():
             use_container_width=True,
             hide_index=True,
             height=min(700, 38 + len(df_display) * 35),
+        )
+
+        # ── Export Excel ──────────────────────────────────────
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df_display.to_excel(writer, sheet_name="Machines", index=False)
+        buf.seek(0)
+        st.download_button(
+            label="⬇️ Exporter Excel",
+            data=buf.getvalue(),
+            file_name=f"machines_{pd.Timestamp.today().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
     else:
