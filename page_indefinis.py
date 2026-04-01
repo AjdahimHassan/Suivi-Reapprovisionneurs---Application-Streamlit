@@ -896,6 +896,25 @@ def render():
                         )
                     else:
                         anomalies_df, non_ref = analyser_prix(df_ventes_prix, produits)
+
+                        # Ajouter les lignes INDEFINI comme anomalies à part entière
+                        if "Code" in df_ventes_prix.columns:
+                            indef_mask = df_ventes_prix["Code"].astype(str).str.upper() == "INDEFINI"
+                            indef_rows = df_ventes_prix[indef_mask].copy()
+                            if not indef_rows.empty:
+                                indef_anom = pd.DataFrame({
+                                    "Date":              indef_rows.get("Date", pd.Series([""] * len(indef_rows))).values,
+                                    "Machine":           indef_rows["Machine"].values,
+                                    "Code_client":       indef_rows["Code_client"].astype(str).str.strip().str.upper().values,
+                                    "Salle":             indef_rows["Salle"].values,
+                                    "Code":              "INDEFINI",
+                                    "Produit":           indef_rows.get("Produit", pd.Series(["Produit non identifié"] * len(indef_rows))).values,
+                                    "Prix attendu (HT)": None,
+                                    "Prix réel (HT)":    indef_rows["PU_HT"].values,
+                                    "Écart (€)":         None,
+                                })
+                                anomalies_df = pd.concat([anomalies_df, indef_anom], ignore_index=True)
+
                         with st.spinner("Chargement du planning…"):
                             plannings, errs = load_plannings_from_mongo()
                         reappro_map = build_reappro_mapping(plannings) if not errs else {}
@@ -957,7 +976,12 @@ def render():
                     )
 
                     def _color_row(row):
-                        ecart = abs(row["Écart (€)"])
+                        if str(row.get("Code", "")).upper() == "INDEFINI":
+                            return ["background-color: #f5c6cb; color: #7b1a1a;"] * len(row)
+                        ecart = row.get("Écart (€)")
+                        if ecart is None or (isinstance(ecart, float) and pd.isna(ecart)):
+                            return [""] * len(row)
+                        ecart = abs(ecart)
                         if ecart >= 0.50:
                             bg = "background-color: #f5c6cb; color: #7b1a1a;"
                         elif ecart >= 0.20:
@@ -1028,7 +1052,32 @@ def render():
 
                     with vue_machine:
                         machines = anomalies_df["Machine"].unique() if "Machine" in anomalies_df.columns else []
-                        for machine in sorted(machines):
+
+                        # ── Barre de recherche ───────────────────────────────
+                        search = st.text_input(
+                            "Rechercher",
+                            placeholder="Code machine (ex: 1036M1) ou réappro (ex: Jean Dupont)…",
+                            key="search_machine_reappro",
+                        ).strip().lower()
+
+                        # Mapping machine → réappro pour la recherche
+                        reappro_par_machine = {}
+                        for m in machines:
+                            sous = anomalies_df[anomalies_df["Machine"] == m]
+                            code_cl = sous["Code_client"].iloc[0] if not sous.empty else ""
+                            reappro_par_machine[m] = reappro_map.get(str(code_cl).strip().upper(), "").lower()
+
+                        if search:
+                            machines_filtrees = [
+                                m for m in sorted(machines)
+                                if search in str(m).lower() or search in reappro_par_machine.get(m, "")
+                            ]
+                            if not machines_filtrees:
+                                st.info("Aucun résultat pour cette recherche.")
+                        else:
+                            machines_filtrees = sorted(machines)
+
+                        for machine in machines_filtrees:
                             sous_df = anomalies_df[anomalies_df["Machine"] == machine]
                             salle = sous_df["Salle"].iloc[0] if "Salle" in sous_df.columns and not sous_df.empty else ""
                             label = f"{machine} — {salle}" if salle else machine
