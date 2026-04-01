@@ -1143,6 +1143,71 @@ def render():
                                     styled_v = df_display.style.apply(_color_ventes_m, axis=1).format(fmt)
                                     st.dataframe(styled_v, use_container_width=True, hide_index=True)
 
+                                    # ── Résumé écrit des anomalies ───────────────
+                                    lignes_resume = []
+
+                                    # 1. Prix erronés (KO)
+                                    ko_rows = df_display[df_display.apply(
+                                        lambda r: _is_ligne_ko(r.get("CODE_PRODUIT", ""), r.get("PU")), axis=1
+                                    )]
+                                    if not ko_rows.empty:
+                                        lignes_resume.append("🔴 Erreurs de prix détectées :")
+                                        for _, kr in ko_rows.iterrows():
+                                            code    = kr.get("CODE_PRODUIT", "")
+                                            ldp     = kr.get("LDP")
+                                            pu      = kr.get("PU")
+                                            attendu = kr.get("Prix attendu (TTC)", "")
+                                            ldp_str = f"LDP {int(ldp)}" if ldp is not None and not (isinstance(ldp, float) and pd.isna(ldp)) else "LDP ?"
+                                            pu_str  = f"{pu:.2f} €" if pu is not None and not (isinstance(pu, float) and pd.isna(pu)) else "? €"
+                                            attendu_str = f" → attendu : {attendu}" if attendu else ""
+                                            lignes_resume.append(f"  - {code} ({ldp_str}) : prix constaté {pu_str}{attendu_str}")
+
+                                    # 2. Produits INDEFINI
+                                    indef_rows = df_display[
+                                        df_display["CODE_PRODUIT"].astype(str).str.upper() == "INDEFINI"
+                                    ] if "CODE_PRODUIT" in df_display.columns else pd.DataFrame()
+                                    if not indef_rows.empty:
+                                        lignes_resume.append("🔴 Produit(s) INDÉFINI :")
+                                        for _, ir in indef_rows.iterrows():
+                                            ldp = ir.get("LDP")
+                                            pu  = ir.get("PU")
+                                            ldp_str = f"LDP {int(ldp)}" if ldp is not None and not (isinstance(ldp, float) and pd.isna(ldp)) else "LDP ?"
+                                            pu_str  = f"{pu:.2f} €" if pu is not None and not (isinstance(pu, float) and pd.isna(pu)) else "? €"
+                                            lignes_resume.append(f"  - {ldp_str} : produit INDÉFINI vendu à {pu_str}")
+
+                                    # 3. LDP en doublon
+                                    if ldp_doublons:
+                                        lignes_resume.append("🟡 Doublon(s) de Ligne De Prix détecté(s) :")
+                                        for ldp_val in sorted(ldp_doublons):
+                                            dup_rows = df_display[df_display["LDP"] == ldp_val]
+                                            codes   = ", ".join(dup_rows["CODE_PRODUIT"].astype(str).tolist())
+                                            ldp_str = f"LDP {int(ldp_val)}" if not (isinstance(ldp_val, float) and pd.isna(ldp_val)) else "LDP ?"
+                                            lignes_resume.append(f"  - {ldp_str} apparaît {len(dup_rows)} fois ({codes})")
+
+                                    if lignes_resume:
+                                        html_lines = []
+                                        for l in lignes_resume:
+                                            if l.startswith("  -"):
+                                                html_lines.append(
+                                                    f"<div style='margin:3px 0 3px 16px;color:#dddddd;font-size:0.93em'>"
+                                                    f"{l[3:].strip()}</div>"
+                                                )
+                                            else:
+                                                html_lines.append(
+                                                    f"<div style='margin:10px 0 4px 0;color:#ffffff;font-size:1em'>"
+                                                    f"{l}</div>"
+                                                )
+
+                                        st.markdown(
+                                            "<div style='background:#1e1e2e;border-left:4px solid #e74c3c;"
+                                            "padding:14px 18px;border-radius:6px;margin:12px 0;'>"
+                                            + "".join(html_lines)
+                                            + "</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    else:
+                                        st.success("Aucune anomalie détectée sur ce fichier de ventes.")
+
                                     # ── Exports Excel + PNG ─────────────────────
                                     excel_m = _generer_export_machine(
                                         df_display, prix_ko_ttc, machine, salle
