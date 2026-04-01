@@ -482,6 +482,8 @@ def _generer_export_machine(
     HDR_FONT   = Font(bold=True, color="FFFFFF", size=11)
     KO_FILL    = PatternFill("solid", fgColor="F5C6CB")
     KO_FONT    = Font(color="7B1A1A")
+    YEL_FILL   = PatternFill("solid", fgColor="FFF3CD")
+    YEL_FONT   = Font(color="664D00")
     ALT_FILL   = PatternFill("solid", fgColor="F2F7FC")
     thin       = Side(style="thin", color="B8CCE4")
     border     = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -494,6 +496,12 @@ def _generer_export_machine(
 
     cols = list(df.columns)
     nb_cols = len(cols)
+
+    # ── LDP en doublon ───────────────────────────────────────────────────────
+    ldp_doublons = set()
+    if "LDP" in df.columns:
+        ldp_counts = df["LDP"].value_counts()
+        ldp_doublons = set(ldp_counts[ldp_counts > 1].index)
 
     # ── Ligne titre ──────────────────────────────────────────────────────────
     titre = f"Machine : {machine}   |   {salle}"
@@ -514,8 +522,6 @@ def _generer_export_machine(
     ws.row_dimensions[2].height = 22
 
     # ── Données ───────────────────────────────────────────────────────────────
-    _TVA_RATES = [0.055, 0.10, 0.20]
-
     def _is_ko(code_produit, pu_val):
         code = str(code_produit).upper()
         if code not in prix_ko_ttc or pu_val is None or pd.isna(pu_val):
@@ -523,14 +529,18 @@ def _generer_export_machine(
         return any(abs(float(pu_val) - p) < 0.06 for p in prix_ko_ttc[code])
 
     for row_idx, (_, row) in enumerate(df.iterrows(), start=3):
-        code_val = row.get("CODE_PRODUIT", "")
-        pu_val   = row.get("PU", None)
-        is_ko    = _is_ko(code_val, pu_val)
+        code_val  = row.get("CODE_PRODUIT", "")
+        pu_val    = row.get("PU", None)
+        ldp_val   = row.get("LDP")
+        is_red    = _is_ko(code_val, pu_val) or str(code_val).upper() == "INDEFINI"
+        is_yellow = (not is_red) and (ldp_val in ldp_doublons)
 
-        # Remplissage alterné pour les lignes OK
-        if is_ko:
+        if is_red:
             row_fill = KO_FILL
             row_font = KO_FONT
+        elif is_yellow:
+            row_fill = YEL_FILL
+            row_font = YEL_FONT
         else:
             row_fill = ALT_FILL if row_idx % 2 == 0 else None
             row_font = Font(size=10)
@@ -681,19 +691,32 @@ def _generer_png_machine(
             bold=True, fontsize=10,
         )
 
-    # ── Détection KO ──────────────────────────────────────────────────────
-    def _is_ko_row(row):
+    # ── LDP en doublon ────────────────────────────────────────────────────
+    ldp_doublons_png = set()
+    if "LDP" in df.columns:
+        ldp_counts = df["LDP"].value_counts()
+        ldp_doublons_png = set(ldp_counts[ldp_counts > 1].index)
+
+    # ── Couleur par ligne ─────────────────────────────────────────────────
+    def _row_color(row):
         code = str(row.get("CODE_PRODUIT", "")).upper()
-        pu = row.get("PU", None)
-        if code not in prix_ko_ttc or pu is None or (isinstance(pu, float) and pd.isna(pu)):
-            return False
-        return any(abs(float(pu) - p) < 0.06 for p in prix_ko_ttc[code])
+        pu   = row.get("PU", None)
+        ldp  = row.get("LDP")
+        if code == "INDEFINI":
+            return "red"
+        if code in prix_ko_ttc and pu is not None and not (isinstance(pu, float) and pd.isna(pu)):
+            if any(abs(float(pu) - p) < 0.06 for p in prix_ko_ttc[code]):
+                return "red"
+        if ldp in ldp_doublons_png:
+            return "yellow"
+        return "normal"
 
     # ── Lignes de données ──────────────────────────────────────────────────
     for r_idx, (_, row) in enumerate(df.iterrows()):
-        is_ko = _is_ko_row(row)
-        bg     = C_KO_BG if is_ko else (C_ALT if r_idx % 2 == 0 else C_WHITE)
-        txt_c  = C_KO_TXT if is_ko else "#1A1A1A"
+        color  = _row_color(row)
+        bg     = C_KO_BG if color == "red" else ("#FFF3CD" if color == "yellow" else (C_ALT if r_idx % 2 == 0 else C_WHITE))
+        txt_c  = C_KO_TXT if color == "red" else ("#664D00" if color == "yellow" else "#1A1A1A")
+        bold   = color == "red"
         y_bot  = _row_y(r_idx + 1)  # +1 pour passer l'header
 
         for i, col_name in enumerate(cols):
@@ -709,7 +732,7 @@ def _generer_png_machine(
                 x_positions[i], x_positions[i + 1],
                 y_bot, row_h,
                 bg, val, txt_c,
-                bold=is_ko, fontsize=9, halign=halign,
+                bold=bold, fontsize=9, halign=halign,
             )
 
     plt.tight_layout(pad=0)
@@ -1060,22 +1083,36 @@ def render():
                                             for p in prix_ko_ttc[code]
                                         )
 
-                                    def _color_ventes_m(row):
-                                        if _is_ligne_ko(row.get("CODE_PRODUIT", ""), row.get("PU")):
-                                            return ["background-color: #f5c6cb; color: #7b1a1a;"] * len(row)
-                                        return [""] * len(row)
-
                                     # Colonnes : CODE_PRODUIT | LDP | PU | Prix attendu (TTC)
                                     cols_base = [c for c in ("CODE_PRODUIT", "LDP", "PU") if c in df_ventes_m.columns]
+                                    df_display = df_ventes_m[cols_base].copy().reset_index(drop=True)
 
-                                    def _prix_attendu_ttc(code_produit, pu_val, machine_code):
+                                    # LDP en doublon (même numéro de ligne qui apparaît 2+ fois)
+                                    ldp_doublons = set()
+                                    if "LDP" in df_display.columns:
+                                        ldp_counts = df_display["LDP"].value_counts()
+                                        ldp_doublons = set(ldp_counts[ldp_counts > 1].index)
+
+                                    def _color_ventes_m(row):
+                                        code = str(row.get("CODE_PRODUIT", "")).upper()
+                                        ldp  = row.get("LDP")
+                                        if code == "INDEFINI" or _is_ligne_ko(code, row.get("PU")):
+                                            return ["background-color: #f5c6cb; color: #7b1a1a;"] * len(row)
+                                        if ldp in ldp_doublons:
+                                            return ["background-color: #fff3cd; color: #664d00;"] * len(row)
+                                        return [""] * len(row)
+
+                                    def _prix_attendu_ttc(code_produit, pu_val, machine_code, ldp_val=None):
                                         """
                                         Pour les lignes KO, retourne le prix TTC attendu
                                         depuis la bibliothèque produits, en tenant compte
                                         du type de machine (BF → prix bas, FP → prix haut).
+                                        Retourne None pour les doublons LDP et les INDEFINI.
                                         """
+                                        if ldp_val in ldp_doublons:
+                                            return None
                                         code = str(code_produit).upper()
-                                        if not _is_ligne_ko(code, pu_val):
+                                        if code == "INDEFINI" or not _is_ligne_ko(code, pu_val):
                                             return None
                                         ttc_list = lib_ttc.get(code, [])
                                         if not ttc_list:
@@ -1083,20 +1120,18 @@ def render():
                                         if len(ttc_list) == 1:
                                             return f"{ttc_list[0]:.2f} €"
                                         # Plusieurs prix valides → sélectionner selon le préfixe de la salle
-                                        # (ex: "BF LANGON" → BF, "FP TARBES" → FP)
                                         ttc_sorted = sorted(ttc_list)
                                         prefix = str(machine_code).upper().strip()
                                         if prefix.startswith("BF"):
-                                            return f"{ttc_sorted[0]:.2f} €"   # prix le plus bas
+                                            return f"{ttc_sorted[0]:.2f} €"
                                         if prefix.startswith("FP"):
-                                            return f"{ttc_sorted[-1]:.2f} €"  # prix le plus haut
-                                        # Préfixe inconnu : afficher tous les prix
+                                            return f"{ttc_sorted[-1]:.2f} €"
                                         return " / ".join(f"{v:.2f} €" for v in ttc_sorted)
 
-                                    df_display = df_ventes_m[cols_base].copy().reset_index(drop=True)
                                     df_display["Prix attendu (TTC)"] = df_display.apply(
                                         lambda row: _prix_attendu_ttc(
-                                            row.get("CODE_PRODUIT", ""), row.get("PU", None), salle
+                                            row.get("CODE_PRODUIT", ""), row.get("PU", None),
+                                            salle, row.get("LDP"),
                                         ),
                                         axis=1,
                                     )
