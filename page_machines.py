@@ -100,7 +100,7 @@ def _parse_csv(raw_bytes: bytes) -> pd.DataFrame:
             # Nettoyer les noms de colonnes (espaces parasites)
             df.columns = [c.strip().strip('"') for c in df.columns]
             # Nettoyer les valeurs
-            df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+            df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
             return df
         except UnicodeDecodeError:
             continue
