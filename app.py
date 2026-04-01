@@ -479,7 +479,7 @@ elif st.session_state.page == "suivi":
         if nf_rows:
             df_nf = pd.DataFrame(nf_rows)
             st.dataframe(
-                df_nf.style.applymap(lambda _: "background-color:#C0392B; color:#FFFFFF; font-weight:600"),
+                df_nf.style.map(lambda _: "background-color:#C0392B; color:#FFFFFF; font-weight:600"),
                 use_container_width=True, hide_index=True,
                 height=min(700, 38 + len(df_nf) * 35),
             )
