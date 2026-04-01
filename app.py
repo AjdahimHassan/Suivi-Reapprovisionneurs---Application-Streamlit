@@ -499,7 +499,7 @@ elif st.session_state.page == "suivi":
         if joker_rows:
             df_joker = pd.DataFrame(joker_rows)
             st.dataframe(
-                df_joker.style.applymap(lambda _: "background-color:#E67E22; color:#FFFFFF; font-weight:600"),
+                df_joker.style.map(lambda _: "background-color:#E67E22; color:#FFFFFF; font-weight:600"),
                 use_container_width=True, hide_index=True,
             )
         else:
@@ -526,7 +526,7 @@ elif st.session_state.page == "suivi":
             )
             df_decale = pd.DataFrame(decale_rows)
             st.dataframe(
-                df_decale.style.applymap(lambda _: "background-color:#6C3483; color:#FFFFFF; font-weight:600"),
+                df_decale.style.map(lambda _: "background-color:#6C3483; color:#FFFFFF; font-weight:600"),
                 use_container_width=True, hide_index=True,
             )
             st.markdown("#### Détail des salles décalées")
@@ -538,7 +538,7 @@ elif st.session_state.page == "suivi":
                     detail_dec = [{"Client / Salle": c, "Machine": m} for c, m in td["salles_decalees"]]
                     if detail_dec:
                         st.dataframe(
-                            pd.DataFrame(detail_dec).style.applymap(
+                            pd.DataFrame(detail_dec).style.map(
                                 lambda _: "background-color:#6C3483; color:#FFFFFF; font-weight:600"
                             ),
                             use_container_width=True, hide_index=True,
