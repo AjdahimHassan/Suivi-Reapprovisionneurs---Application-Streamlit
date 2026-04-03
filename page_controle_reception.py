@@ -16,7 +16,6 @@ import unicodedata
 
 from pymongo import MongoClient
 from rapidfuzz import fuzz
-import requests
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -414,80 +413,6 @@ def save_product_mappings_cache(fournisseur: str, mappings: dict, source: str = 
         pass
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# HELPER GEMINI — MATCHING SÉMANTIQUE EN BATCH
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _get_gemini_api_keys():
-    keys = []
-    try:
-        k = st.secrets['gemini']['api_key']
-        if k:
-            keys.append(k)
-    except (KeyError, FileNotFoundError):
-        pass
-    try:
-        k2 = st.secrets['gemini']['api_key_2']
-        if k2:
-            keys.append(k2)
-    except (KeyError, FileNotFoundError):
-        pass
-    env_key = os.environ.get('GEMINI_API_KEY', '')
-    if env_key and env_key not in keys:
-        keys.append(env_key)
-    return keys
-
-
-def _gemini_batch_match(noms_sans_match: list, fournisseur: str, noms_recu: list) -> dict:
-    """
-    Un seul appel Gemini pour associer tous les noms facture sans match.
-    Retourne {nom_facture: nom_recu_ou_None}.
-    """
-    api_keys = _get_gemini_api_keys()
-    if not api_keys or not noms_sans_match:
-        return {}
-
-    prompt = f"""Tu dois associer chaque nom de produit "facture" à son équivalent dans la liste "export".
-Les noms peuvent être en anglais sur la facture et en français dans l'export, ou avoir des formats très différents.
-Retourne UNIQUEMENT un JSON valide, sans backticks, sans texte avant ou après.
-Format : {{"nom_facture_1": "nom_export_correspondant_ou_null", ...}}
-Si aucun produit de l'export ne correspond raisonnablement, mets null.
-
-Fournisseur : {fournisseur}
-
-Produits facture à matcher :
-{json.dumps(noms_sans_match, ensure_ascii=False)}
-
-Liste produits export CSV :
-{json.dumps(noms_recu, ensure_ascii=False)}"""
-
-    payload = {'contents': [{'parts': [{'text': prompt}]}]}
-
-    last_error = None
-    resp = None
-    for api_key in api_keys:
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}'
-        resp = requests.post(url, json=payload, timeout=30)
-        if resp.status_code == 429:
-            last_error = resp
-            continue
-        resp.raise_for_status()
-        break
-    else:
-        if last_error:
-            last_error.raise_for_status()
-        return {}
-
-    try:
-        raw = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-        raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-        result = json.loads(raw)
-        # S'assurer que les valeurs null Python sont None
-        return {k: (v if v and v in noms_recu else None) for k, v in result.items()}
-    except Exception:
-        return {}
-
 
 def score_similarite(a, b):
     na, nb = normaliser(a), normaliser(b)
@@ -501,16 +426,14 @@ def score_similarite(a, b):
 
 def faire_correspondance(noms_facture, noms_recu, fournisseur='INCONNU'):
     """
-    Cascade de matching à 4 niveaux :
+    Cascade de matching à 3 niveaux :
     0. Cache MongoDB (associations déjà validées)
     1. TABLE_CORRESPONDANCE fixe (substring match)
     2. rapidfuzz token_set_ratio (seuil 72) — robuste aux mots supplémentaires
-    3. Gemini batch — matching sémantique pour les cas restants (ex: vanilla/vanille)
     """
     cache = load_product_mappings_cache(fournisseur)
 
     correspondances = {}
-    sans_match = []
 
     for nom_f in noms_facture:
         # Niveau 0 : cache MongoDB
@@ -535,20 +458,7 @@ def faire_correspondance(noms_facture, noms_recu, fournisseur='INCONNU'):
             correspondances[nom_f] = best_match
             continue
 
-        # Niveau 3 : Gemini (collecté en batch)
         correspondances[nom_f] = None
-        sans_match.append(nom_f)
-
-    # Appel Gemini batch pour tous les non-matchés
-    if sans_match:
-        gemini_result = _gemini_batch_match(sans_match, fournisseur, noms_recu)
-        new_mappings = {}
-        for nom_f, nom_r in gemini_result.items():
-            correspondances[nom_f] = nom_r
-            if nom_r:
-                new_mappings[nom_f] = nom_r
-        if new_mappings:
-            save_product_mappings_cache(fournisseur, new_mappings, source='gemini')
 
     return correspondances
 
