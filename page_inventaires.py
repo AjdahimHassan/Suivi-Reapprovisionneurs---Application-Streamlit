@@ -21,6 +21,11 @@ import io
 import datetime
 import pandas as pd
 import streamlit as st
+from planogrammes_storage import (
+    load_plannos_theoriques,
+    load_machine_planno_links,
+    save_machine_planno_link,
+)
 
 # ─────────────────────────────────────────
 # Constantes
@@ -270,6 +275,13 @@ def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) 
         .to_dict()
     )
 
+    # {(reappro, iso_year, iso_week, code): date_str} — quel jour chaque code a réellement été fait
+    code_date_by_week = (
+        df_inv.groupby(["Ressource", "_iso_year", "_iso_week", "Code client"])["Date"]
+        .first()
+        .to_dict()
+    )
+
     inv_done = (
         df_inv.groupby(["Ressource", "Date"])["Code client"]
         .apply(set)
@@ -310,7 +322,7 @@ def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) 
         _populate_result(
             results, reappro, date_str, jour_fr, dt,
             planning_index[reappro][jour_fr],
-            done_codes, codes_by_week,
+            done_codes, codes_by_week, code_date_by_week,
             joker_index.get(reappro, {}).get(date_str, []),
         )
 
@@ -333,7 +345,7 @@ def _croiser_plannings_inventaires(df_inv: pd.DataFrame, plannings_mongo: dict) 
                     results, reappro, date_str, jour_fr, dt,
                     planning[jour_fr],
                     set(),  # no own inventories
-                    codes_by_week,
+                    codes_by_week, code_date_by_week,
                     jokers_today,
                 )
 
@@ -349,6 +361,7 @@ def _populate_result(
     jour_plan: dict,
     done_codes: set,
     codes_by_week: dict,
+    code_date_by_week: dict,
     jokers_today: list,
 ) -> None:
     """Calcule et insère le résultat pour (reappro, date) dans results."""
@@ -363,6 +376,22 @@ def _populate_result(
     deja_fait_semaine = sorted(manquants_bruts & codes_faits_semaine)
     manquants_reels   = manquants_bruts - codes_faits_semaine
 
+    # Enrichir chaque double passage avec le jour où il a réellement été fait
+    deja_entries = []
+    for c in deja_fait_semaine:
+        entry = {"code": c, **jour_plan[c]}
+        actual_date = code_date_by_week.get((reappro, iso_cal[0], iso_cal[1], c))
+        if actual_date:
+            try:
+                actual_jour = WEEKDAY_TO_JOUR.get(
+                    datetime.datetime.strptime(actual_date, "%d/%m/%Y").weekday()
+                )
+                if actual_jour:
+                    entry["jour_fait"] = actual_jour
+            except ValueError:
+                pass
+        deja_entries.append(entry)
+
     if reappro not in results:
         results[reappro] = {}
 
@@ -373,7 +402,7 @@ def _populate_result(
         "planifie":           [{"code": c, **v} for c, v in jour_plan.items()],
         "fait":               sorted(fait_codes),
         "manquants":          [{"code": c, **jour_plan[c]} for c in sorted(manquants_reels)],
-        "deja_fait_semaine":  [{"code": c, **jour_plan[c]} for c in deja_fait_semaine],
+        "deja_fait_semaine":  deja_entries,
         "jokers":             jokers_today,
     }
 
@@ -427,6 +456,27 @@ def render():
     except Exception:
         pass
 
+    # ── Planno index : {machine_type: {code: {libelle, niv_haut}}} ──
+    def _build_planno_index():
+        links   = load_machine_planno_links()          # {machine_type: planno_id}
+        plannos = load_plannos_theoriques()            # liste de docs
+        by_id   = {p["_id"]: p for p in plannos}
+        index   = {}
+        for mtype, pid in links.items():
+            if pid and pid in by_id:
+                prods = by_id[pid].get("produits", [])
+                index[mtype] = {
+                    pr["code"]: {"libelle": pr.get("libelle", ""), "niv_haut": int(pr.get("niv_haut") or 0)}
+                    for pr in prods if pr.get("code")
+                }
+        return index
+
+    planno_index: dict = {}
+    try:
+        planno_index = _build_planno_index()
+    except Exception:
+        pass
+
     # ── Upload fichier ──────────────────────
     st.markdown("### 📂 Déposer le fichier export inventaires (CSV)")
     uploaded = st.file_uploader(
@@ -443,6 +493,7 @@ def render():
             "`Quantité`, `Montant HT`."
         )
         _show_thresholds()
+        _section_connexion()
         return
 
     # ── Parsing ─────────────────────────────
@@ -557,7 +608,7 @@ def render():
         col_exp, _ = st.columns([1, 4])
         with col_exp:
             if st.button("📥 Exporter en Excel", key="inv_export"):
-                excel_bytes = _export_excel(filtered, df_raw, croisement, plannings_mongo)
+                excel_bytes = _export_excel(filtered, df_raw, croisement, plannings_mongo, planno_index)
                 date_str_dl = datetime.date.today().strftime("%Y%m%d")
                 st.download_button(
                     "⬇️ Télécharger Excel", data=excel_bytes,
@@ -594,7 +645,7 @@ def render():
                 + f" · 💰 {total_r:,.2f} €"
             )
 
-            with st.expander(titre, expanded=(nb_bad_r > 0 or inv_manq_r > 0)):
+            with st.expander(titre, expanded=False):
 
                 # Section planning du réappro
                 if reappro in croisement:
@@ -631,7 +682,7 @@ def render():
                             )
 
                         if nb_deja:
-                            rows_deja = [{"Code": m["code"], "Salle": m["label"], "Machine": m["machine"]}
+                            rows_deja = [{"Code": m["code"], "Salle": m["label"], "Machine": m["machine"], "Fait le": m.get("jour_fait", "?")}
                                          for m in d["deja_fait_semaine"]]
                             st.markdown(f"🔄 *Double passage ({nb_deja})*")
                             st.dataframe(
@@ -659,7 +710,7 @@ def render():
 
                 # Cartes inventaires réalisés
                 for _, row in sub.iterrows():
-                    _machine_card(row, df_raw)
+                    _machine_card(row, df_raw, planno_index)
 
     # ════════════════════════════════════════
     # TAB — DÉTAIL MACHINE
@@ -676,13 +727,15 @@ def render():
                 )
                 _machine_detail_full(row, df_raw)
 
+    _section_connexion()
+
 
 
 # ══════════════════════════════════════════
 # COMPOSANTS UI
 # ══════════════════════════════════════════
 
-def _machine_card(row: pd.Series, df_raw: pd.DataFrame):
+def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None):
     color  = row["statut_color"]
     total  = row["total"]
     s_min  = row["seuil_min"]
@@ -692,15 +745,23 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame):
 
     ecart_str = f"{ecart:+.2f} €" if pd.notna(ecart) else "—"
 
-    # Noms des produits épuisés
-    missing_prods = _get_missing_products(df_raw, row["Num Piece"])
+    # Noms des produits épuisés (qty=0)
+    # Si un planno est associé, on ne compte comme "épuisés" que les produits du planno.
+    # Les produits à qty=0 hors-planno sont traités dans le tableau planno comme "Hors planno".
+    mtype  = row.get("machine_type", "")
+    planno = (planno_index or {}).get(mtype)  # {code: {libelle, niv_haut}} ou None
+
+    all_missing = _get_missing_products(df_raw, row["Num Piece"])
+    if planno:
+        missing_prods = [p for p in all_missing if p["code"] in planno]
+    else:
+        missing_prods = all_missing
+
     if missing_prods:
-        noms_html = " &nbsp;·&nbsp; ".join(
-            f"<b>{p['nom']}</b>" for p in missing_prods
-        )
+        noms_html = " &nbsp;·&nbsp; ".join(f"<b>{p['nom']}</b>" for p in missing_prods)
         vides_html = (
             f'<div style="margin-top:4px; font-size:0.8rem; color:{COLOR_BAD};">'
-            f"🔴 Épuisés ({vides}) : {noms_html}</div>"
+            f"🔴 Épuisés ({len(missing_prods)}) : {noms_html}</div>"
         )
     else:
         vides_html = (
@@ -710,7 +771,7 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame):
     bg = "#fff8f8" if color == COLOR_BAD else "#fff8f0" if color == COLOR_ORANGE else "#f8fff8"
     st.markdown(
         f"""<div style="border-left:5px solid {color}; background:{bg};
-            border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+            border-radius:6px; padding:10px 14px; margin-bottom:4px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <span style="font-weight:700; font-size:0.95rem;">{row['statut_emoji']} {row['Nom client']}</span>
                 <span style="font-size:0.8rem; color:#666;">{row['Stock Origine']} · {row['type_label']} · {row['Date']}</span>
@@ -724,6 +785,95 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame):
         </div>""",
         unsafe_allow_html=True,
     )
+
+    # ── Expander planno théorique ────────────────────────────
+    mtype   = row.get("machine_type", "")
+    planno  = (planno_index or {}).get(mtype)  # {code: {libelle, niv_haut}} ou None
+
+    if planno:
+        # Produits réels de cet inventaire : {code: qty}
+        inv_sub = df_raw[df_raw["Num Piece"] == row["Num Piece"]]
+        inv_qty = (
+            inv_sub.groupby("Code produit")["Quantité"].sum().to_dict()
+        )
+        inv_lib = inv_sub.drop_duplicates("Code produit").set_index("Code produit")["Libellé produit"].to_dict()
+
+        rows_table = []
+        # Produits du planno
+        for code, info in planno.items():
+            qty_inv  = inv_qty.get(code)
+            qty_plan = info["niv_haut"]
+            if qty_inv is None:
+                ecart_val = -qty_plan
+                statut    = "❌ Absent"
+            else:
+                ecart_val = int(qty_inv) - qty_plan
+                statut    = "✅ OK" if qty_inv > 0 else "🔴 Épuisé"
+            rows_table.append({
+                "Code":          code,
+                "Libellé":       info["libelle"],
+                "Qté planno":    qty_plan,
+                "Qté inventaire": int(qty_inv) if qty_inv is not None else "—",
+                "Écart":         ecart_val if qty_inv is not None else f"-{qty_plan}",
+                "Statut":        statut,
+                "_sort":         0 if qty_inv is None else (1 if qty_inv == 0 else 2),
+            })
+
+        # Produits hors-planno (dans inventaire mais pas dans le planno)
+        for code, qty in inv_qty.items():
+            if code not in planno:
+                rows_table.append({
+                    "Code":           code,
+                    "Libellé":        inv_lib.get(code, ""),
+                    "Qté planno":     "—",
+                    "Qté inventaire": int(qty),
+                    "Écart":          "Hors planno",
+                    "Statut":         "⚠️ Hors planno",
+                    "_sort":          3,
+                })
+
+        rows_table.sort(key=lambda x: x["_sort"])
+
+        nb_absents    = sum(1 for r in rows_table if r["Statut"] == "❌ Absent")
+        nb_epuises    = sum(1 for r in rows_table if r["Statut"] == "🔴 Épuisé")
+        nb_hors       = sum(1 for r in rows_table if r["Statut"] == "⚠️ Hors planno")
+        nb_ok         = sum(1 for r in rows_table if r["Statut"] == "✅ OK")
+
+        label_exp = (
+            f"📋 Planno — {nb_ok} OK"
+            + (f" · {nb_epuises} épuisés" if nb_epuises else "")
+            + (f" · {nb_absents} absents" if nb_absents else "")
+            + (f" · {nb_hors} hors planno" if nb_hors else "")
+        )
+
+        toggle_key = f"planno_show_{row['Num Piece']}"
+        if st.button(label_exp, key=f"planno_btn_{row['Num Piece']}", use_container_width=True):
+            st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
+            st.rerun()
+
+        if st.session_state.get(toggle_key, False):
+            with st.container(border=True):
+                df_table = pd.DataFrame(rows_table).drop(columns=["_sort"])
+
+                def _style_planno(r):
+                    s = r["Statut"]
+                    if s in ("❌ Absent", "🔴 Épuisé"):
+                        return [f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"] * len(r)
+                    if s == "⚠️ Hors planno":
+                        return [f"background-color:{COLOR_ORANGE}; color:{WHITE}; font-weight:600"] * len(r)
+                    return [""] * len(r)
+
+                st.dataframe(
+                    df_table.style.apply(_style_planno, axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(500, 38 + len(df_table) * 35),
+                )
+    else:
+        # Pas de planno associé à ce type — petit message discret
+        st.caption(f"⬜ Aucun planno théorique associé au type *{row.get('type_label', mtype)}*.")
+
+    st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
 
 def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame):
@@ -755,6 +905,75 @@ def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame):
     )
 
 
+def _section_connexion():
+    """Section 'Connexion' : associe chaque type de machine à un planno théorique."""
+    st.markdown("---")
+    st.markdown("### 🔗 Connexion — Planno théorique par type de machine")
+    st.caption(
+        "Associez un planno théorique à chaque type de machine. "
+        "Cette association sera utilisée pour détecter les produits hors-planno lors des inventaires."
+    )
+
+    plannos    = load_plannos_theoriques()
+    links      = load_machine_planno_links()
+
+    if not plannos:
+        st.warning("Aucun planno théorique enregistré. Ajoutez-en dans la page **Planogrammes** → section *Plannos théoriques*.")
+        return
+
+    # Options du selectbox : "Aucun" + liste des plannos
+    planno_options = ["— Aucun —"] + [p["nom"] for p in plannos]
+    planno_by_nom  = {p["nom"]: p for p in plannos}
+
+    for machine_type, seuil in SEUILS.items():
+        linked_id  = links.get(machine_type)
+        linked_nom = next((p["nom"] for p in plannos if p["_id"] == linked_id), None)
+
+        with st.container(border=True):
+            col_info, col_select, col_btn = st.columns([3, 4, 2])
+
+            with col_info:
+                st.markdown(f"**{seuil['label']}**")
+                st.caption(f"{seuil['min']:.0f} € — {seuil['max']:.2f} €")
+                if linked_nom:
+                    nb = len(planno_by_nom[linked_nom].get("produits", []))
+                    st.markdown(
+                        f"<span style='color:#2e7d32; font-size:0.82rem;'>✅ Lié à <b>{linked_nom}</b> ({nb} produits)</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<span style='color:#888; font-size:0.82rem;'>⬜ Aucun planno associé</span>",
+                        unsafe_allow_html=True,
+                    )
+
+            with col_select:
+                cur_idx = planno_options.index(linked_nom) if linked_nom in planno_options else 0
+                chosen = st.selectbox(
+                    "Planno théorique",
+                    planno_options,
+                    index=cur_idx,
+                    key=f"conn_select_{machine_type}",
+                    label_visibility="collapsed",
+                )
+
+            with col_btn:
+                is_dissocier = (chosen != "— Aucun —" and chosen == linked_nom)
+                btn_label    = "🔓 Dissocier" if is_dissocier else "🔗 Associer"
+                btn_type     = "secondary" if is_dissocier else "primary"
+                if st.button(btn_label, key=f"conn_btn_{machine_type}",
+                             use_container_width=True, type=btn_type):
+                    if chosen == "— Aucun —" or is_dissocier:
+                        save_machine_planno_link(machine_type, None)
+                        st.toast(f"🔓 Association supprimée pour {seuil['label']}.")
+                    else:
+                        new_id = planno_by_nom[chosen]["_id"]
+                        save_machine_planno_link(machine_type, new_id)
+                        nb = len(planno_by_nom[chosen].get("produits", []))
+                        st.toast(f"✅ {seuil['label']} → {chosen} ({nb} produits).")
+                    st.rerun()
+
+
 def _show_thresholds():
     st.markdown("---")
     st.markdown("#### 📏 Seuils de validation par type de machine")
@@ -779,6 +998,7 @@ def _build_export_rows(
     df_raw: pd.DataFrame,
     croisement: dict,
     plannings_mongo: dict,
+    planno_index: dict = None,
 ) -> list:
     """
     Construit la liste complète des lignes d'export :
@@ -812,13 +1032,30 @@ def _build_export_rows(
     for _, r in summary.iterrows():
         inv_idx[(r["Ressource"], r["Code client"], r["Date"])] = r
 
-    # Index produits manquants par Num Piece
+    # Index produits manquants par Num Piece (libellés, tous)
     missing_idx = (
         df_raw[df_raw["Quantité"] == 0]
         .groupby("Num Piece")["Libellé produit"]
         .apply(lambda x: list(x.drop_duplicates()))
         .to_dict()
     )
+
+    # Index qty par (Num Piece, Code produit) pour comparaison planno
+    inv_qty_by_piece: dict = {}
+    inv_lib_by_piece: dict = {}
+    for _, _r in df_raw.iterrows():
+        _np   = _r["Num Piece"]
+        _code = _r["Code produit"]
+        _lib  = _r["Libellé produit"]
+        inv_qty_by_piece.setdefault(_np, {})
+        inv_qty_by_piece[_np][_code] = inv_qty_by_piece[_np].get(_code, 0) + _r["Quantité"]
+        inv_lib_by_piece.setdefault(_np, {})
+        inv_lib_by_piece[_np][_code] = _lib
+
+    # Index codes à qty=0 par Num Piece
+    missing_code_idx: dict = {}
+    for _, _r in df_raw[df_raw["Quantité"] == 0].iterrows():
+        missing_code_idx.setdefault(_r["Num Piece"], set()).add(_r["Code produit"])
 
     # Dates présentes dans l'export
     all_dates = sorted(df_raw["Date"].unique())
@@ -857,13 +1094,48 @@ def _build_export_rows(
                         statut_inv = "Au-dessus max"
                     else:
                         statut_inv = "OK"
-                    prods = missing_idx.get(inv_row["Num Piece"], [])
                     fait_par = reappro
+
+                    # ── Planno-aware product analysis ──────────────────────
+                    piece       = inv_row["Num Piece"]
+                    mtype_key   = inv_row.get("machine_type", "")
+                    planno      = (planno_index or {}).get(mtype_key)
+                    inv_qtys    = inv_qty_by_piece.get(piece, {})
+                    inv_libs    = inv_lib_by_piece.get(piece, {})
+                    miss_codes  = missing_code_idx.get(piece, set())
+
+                    if planno:
+                        prods         = [inv_libs.get(c, c) for c in miss_codes if c in planno]
+                        hors_planno   = [inv_libs.get(c, c) for c in inv_qtys  if c not in planno]
+                        detail_rows   = []
+                        for _c, _info in sorted(planno.items()):
+                            _qi   = inv_qtys.get(_c)
+                            _qp   = _info["niv_haut"]
+                            _ecart = (int(_qi) - _qp) if _qi is not None else -_qp
+                            _stat  = "Absent" if _qi is None else ("Épuisé" if _qi == 0 else "OK")
+                            detail_rows.append({
+                                "code": _c, "libelle": _info["libelle"],
+                                "qty_plan": _qp,
+                                "qty_inv":  int(_qi) if _qi is not None else "Absent",
+                                "ecart":    _ecart, "statut": _stat,
+                            })
+                        for _c in sorted(inv_qtys):
+                            if _c not in planno:
+                                detail_rows.append({
+                                    "code": _c, "libelle": inv_libs.get(_c, ""),
+                                    "qty_plan": "—",
+                                    "qty_inv":  int(inv_qtys[_c]),
+                                    "ecart":    "Hors planno", "statut": "Hors planno",
+                                })
+                    else:
+                        prods       = missing_idx.get(piece, [])
+                        hors_planno = []
+                        detail_rows = []
                 elif code not in codes_fait_today and code in codes_fait_week:
                     total = smin = smax = ecart = machine_type = None
                     statut_plan = "Double passage"
                     statut_inv  = "-"
-                    prods       = []
+                    prods       = []; hors_planno = []; detail_rows = []
                     fait_par    = reappro
                 else:
                     # Check joker: was it inventoried by another reappro on the same date?
@@ -888,36 +1160,69 @@ def _build_export_rows(
                                 statut_inv = "Au-dessus max"
                             else:
                                 statut_inv = "OK"
-                            prods = missing_idx.get(joker_inv["Num Piece"], [])
+                            piece      = joker_inv["Num Piece"]
+                            mtype_key  = joker_inv.get("machine_type", "")
+                            planno     = (planno_index or {}).get(mtype_key)
+                            inv_qtys   = inv_qty_by_piece.get(piece, {})
+                            inv_libs   = inv_lib_by_piece.get(piece, {})
+                            miss_codes = missing_code_idx.get(piece, set())
+                            if planno:
+                                prods       = [inv_libs.get(c, c) for c in miss_codes if c in planno]
+                                hors_planno = [inv_libs.get(c, c) for c in inv_qtys if c not in planno]
+                                detail_rows = []
+                                for _c, _info in sorted(planno.items()):
+                                    _qi   = inv_qtys.get(_c)
+                                    _qp   = _info["niv_haut"]
+                                    _ecart = (int(_qi) - _qp) if _qi is not None else -_qp
+                                    _stat  = "Absent" if _qi is None else ("Épuisé" if _qi == 0 else "OK")
+                                    detail_rows.append({
+                                        "code": _c, "libelle": _info["libelle"],
+                                        "qty_plan": _qp,
+                                        "qty_inv":  int(_qi) if _qi is not None else "Absent",
+                                        "ecart": _ecart, "statut": _stat,
+                                    })
+                                for _c in sorted(inv_qtys):
+                                    if _c not in planno:
+                                        detail_rows.append({
+                                            "code": _c, "libelle": inv_libs.get(_c, ""),
+                                            "qty_plan": "—", "qty_inv": int(inv_qtys[_c]),
+                                            "ecart": "Hors planno", "statut": "Hors planno",
+                                        })
+                            else:
+                                prods       = missing_idx.get(piece, [])
+                                hors_planno = []
+                                detail_rows = []
                         else:
                             total = smin = smax = ecart = machine_type = None
                             statut_inv = "-"
-                            prods = []
+                            prods = []; hors_planno = []; detail_rows = []
                         statut_plan = f"Joker ({joker_reappro})"
                         fait_par    = joker_reappro
                     else:
                         total = smin = smax = ecart = machine_type = None
                         statut_plan = "Non fait"
                         statut_inv  = "Non fait"
-                        prods       = []
+                        prods       = []; hors_planno = []; detail_rows = []
                         fait_par    = ""
 
                 rows.append({
-                    "reappro":      reappro,
-                    "date":         date_str,
-                    "jour":         jour_fr,
-                    "code":         code,
-                    "salle":        info["label"],
-                    "machine":      info["machine"],
-                    "statut_plan":  statut_plan,
-                    "machine_type": machine_type or "",
-                    "total":        total,
-                    "seuil_min":    smin,
-                    "seuil_max":    smax,
-                    "ecart":        ecart,
-                    "statut_inv":   statut_inv,
-                    "produits":     prods,
-                    "fait_par":     fait_par if statut_plan.startswith("Joker") else "",
+                    "reappro":        reappro,
+                    "date":           date_str,
+                    "jour":           jour_fr,
+                    "code":           code,
+                    "salle":          info["label"],
+                    "machine":        info["machine"],
+                    "statut_plan":    statut_plan,
+                    "machine_type":   machine_type or "",
+                    "total":          total,
+                    "seuil_min":      smin,
+                    "seuil_max":      smax,
+                    "ecart":          ecart,
+                    "statut_inv":     statut_inv,
+                    "produits":       prods,
+                    "hors_planno":    hors_planno,
+                    "detail_rows":    detail_rows,
+                    "fait_par":       fait_par if statut_plan.startswith("Joker") else "",
                 })
 
     return rows
@@ -928,13 +1233,14 @@ def _export_excel(
     df_raw: pd.DataFrame,
     croisement: dict,
     plannings_mongo: dict = None,
+    planno_index: dict = None,
 ) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
     plannings_mongo = plannings_mongo or {}
-    rows = _build_export_rows(summary, df_raw, croisement, plannings_mongo)
+    rows = _build_export_rows(summary, df_raw, croisement, plannings_mongo, planno_index or {})
 
     # ── Style helpers ──────────────────────────────────────────────────────
     def _fill(hex_col):
@@ -979,9 +1285,11 @@ def _export_excel(
         ("Date",             11), ("Jour",          10), ("Salle",            36),
         ("Machine",           9), ("Type machine",  16), ("Statut planning",  22),
         ("Fait par",         12), ("Montant HT",    13), ("Statut inv.",      14),
-        ("Produits épuisés", 52),
+        ("Produits épuisés", 40), ("Hors planno",   40),
     ]
     N = len(DETAIL_COLS)
+    # Sub-header labels for product detail rows (cols 3-9 reused)
+    # Col 3=Code, 4=Libellé, 5=Qté planno, 6=Qté inv., 7=Écart, 9=Statut produit
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -994,7 +1302,7 @@ def _export_excel(
     ws_g.sheet_properties.tabColor = C_DARK
 
     # Row 1 : big title
-    ws_g.merge_cells("A1:J1")
+    ws_g.merge_cells("A1:K1")
     tc = ws_g.cell(1, 1, "Suivi des inventaires — Récapitulatif")
     tc.fill = _fill(C_DARK); tc.font = _font(True, C_WHITE, 13)
     tc.alignment = _align("center"); ws_g.row_dimensions[1].height = 26
@@ -1052,6 +1360,14 @@ def _export_excel(
             c.alignment = _align("center" if ci > 3 else "left")
             if ci == 9 and isinstance(v, (int, float)):
                 c.number_format = "#,##0.00 €"
+            # Hyperlink sur toute la ligne → feuille du réappro
+            sheet_target = reappro[:31]
+            c.hyperlink = f"#{sheet_target}!A1"
+            c.font = Font(
+                name="Arial", size=9, bold=(ci == 1),
+                color=("1F4E79" if ci == 1 else "000000"),
+                underline=("single" if ci == 1 else None),
+            )
         ri += 1
 
     # ══════════════════════════════════════════
@@ -1061,6 +1377,7 @@ def _export_excel(
     for reappro in reappros_ordered:
         ws = wb.create_sheet(reappro[:31])
         ws.freeze_panes = "A3"
+        ws.sheet_properties.outlinePr.summaryBelow = False  # + button above detail rows
 
         # Title row
         ws.merge_cells(f"A1:{get_column_letter(N)}1")
@@ -1084,9 +1401,7 @@ def _export_excel(
             # ── Date separator ─────────────────────────────────────────────
             if r["date"] != current_date:
                 current_date = r["date"]
-
-                # Count stats for this day
-                day_rows = [x for x in sub_rows if x["date"] == r["date"]]
+                day_rows   = [x for x in sub_rows if x["date"] == r["date"]]
                 nb_fait    = sum(1 for x in day_rows if x["statut_plan"] == "Fait")
                 nb_nf      = sum(1 for x in day_rows if x["statut_plan"] == "Non fait")
                 nb_dbl     = sum(1 for x in day_rows if x["statut_plan"] == "Double passage")
@@ -1101,87 +1416,101 @@ def _export_excel(
                 )
                 ws.merge_cells(f"A{ri}:{get_column_letter(N)}{ri}")
                 sep = ws.cell(ri, 1, sep_txt)
-                sep.fill = _fill(C_SUB)
-                sep.font = _font(True, C_DARK, 10)
+                sep.fill = _fill(C_SUB); sep.font = _font(True, C_DARK, 10)
                 sep.alignment = _align("left")
                 for ci in range(1, N + 1):
                     ws.cell(ri, ci).border = _brd_sep
                 ws.row_dimensions[ri].height = 20
                 ri += 1
 
-            # ── Data row ───────────────────────────────────────────────────
+            # ── Summary row (salle) ────────────────────────────────────────
             sp = r["statut_plan"]
             si = r["statut_inv"]
 
-            # Row background
-            if sp == "Non fait":
-                row_bg = C_BAD_BG
-            elif sp == "Double passage":
-                row_bg = C_DOUB_BG
-            elif sp.startswith("Joker"):
-                row_bg = "F3E5F5"  # violet très clair
-            elif si == "Mal fait":
-                row_bg = C_BAD_BG
-            elif si == "Au-dessus max":
-                row_bg = C_ORA_BG
-            elif si == "OK":
-                row_bg = C_OK_BG
-            else:
-                row_bg = C_GREY_BG
+            if sp == "Non fait":       row_bg = C_BAD_BG
+            elif sp == "Double passage": row_bg = C_DOUB_BG
+            elif sp.startswith("Joker"): row_bg = "F3E5F5"
+            elif si == "Mal fait":       row_bg = C_BAD_BG
+            elif si == "Au-dessus max":  row_bg = C_ORA_BG
+            elif si == "OK":             row_bg = C_OK_BG
+            else:                        row_bg = C_GREY_BG
 
-            prods_str = " / ".join(r["produits"]) if r["produits"] else ""
-            has_prods = bool(prods_str)
-            ws.row_dimensions[ri].height = 20 if has_prods else 16
+            prods_str   = " / ".join(r["produits"])     if r["produits"]     else ""
+            hors_str    = " / ".join(r["hors_planno"])  if r.get("hors_planno") else ""
+            has_prods   = bool(prods_str)
+            has_hors    = bool(hors_str)
+            has_detail  = bool(r.get("detail_rows"))
+            is_joker    = sp.startswith("Joker")
 
-            is_joker = sp.startswith("Joker")
+            ws.row_dimensions[ri].height = 20 if (has_prods or has_hors) else 16
+
             values = [
                 r["date"], r["jour"], r["salle"], r["machine"],
-                r["machine_type"] or "-",
-                sp,
+                r["machine_type"] or "-", sp,
                 r.get("fait_par", "") or "",
-                r["total"],
-                si, prods_str,
+                r["total"], si, prods_str, hors_str,
             ]
 
             for ci, v in enumerate(values, 1):
                 c = ws.cell(ri, ci, v)
-                c.fill = _fill(row_bg)
-                c.font = _font(size=9)
-                c.border = _brd
-                c.alignment = _align(
-                    "center" if ci in (1, 2, 4, 8) else "left",
-                    wrap=(ci == 10),
-                )
+                c.fill = _fill(row_bg); c.font = _font(size=9); c.border = _brd
+                c.alignment = _align("center" if ci in (1, 2, 4, 8) else "left",
+                                     wrap=(ci in (10, 11)))
                 if ci == 8 and isinstance(v, (int, float)):
                     c.number_format = "#,##0.00 €"
-
-                # Statut planning cell (col 6) — colored badge
                 if ci == 6:
-                    if is_joker:
-                        bg, fg, bold = "E8D5F5", "6C3483", True
-                    else:
-                        bg, fg, bold = STATUS_STYLE.get(sp, (C_GREY_BG, C_DARK, False))
-                    c.fill = _fill(bg); c.font = _font(bold, fg, 9)
-                    c.alignment = _align("center")
-
-                # Fait par cell (col 7) — violet if joker
+                    if is_joker: bg2, fg2, bold2 = "E8D5F5", "6C3483", True
+                    else:        bg2, fg2, bold2 = STATUS_STYLE.get(sp, (C_GREY_BG, C_DARK, False))
+                    c.fill = _fill(bg2); c.font = _font(bold2, fg2, 9); c.alignment = _align("center")
                 if ci == 7 and v:
-                    c.fill = _fill("E8D5F5")
-                    c.font = _font(True, "6C3483", 9)
-                    c.alignment = _align("center")
-
-                # Statut inventaire cell (col 9) — colored badge
+                    c.fill = _fill("E8D5F5"); c.font = _font(True, "6C3483", 9); c.alignment = _align("center")
                 if ci == 9:
-                    bg, fg, bold = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
-                    c.fill = _fill(bg); c.font = _font(bold, fg, 9)
-                    c.alignment = _align("center")
-
-                # Produits épuisés cell (col 10) — red if present
+                    bg2, fg2, bold2 = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
+                    c.fill = _fill(bg2); c.font = _font(bold2, fg2, 9); c.alignment = _align("center")
                 if ci == 10 and has_prods:
-                    c.fill = _fill("FFCCCC")
-                    c.font = _font(True, C_BAD_FG, 9)
+                    c.fill = _fill("FFCCCC"); c.font = _font(True, C_BAD_FG, 9)
+                if ci == 11 and has_hors:
+                    c.fill = _fill("FFF3CD"); c.font = _font(True, C_ORA_FG, 9)
 
             ri += 1
+
+            # ── Product detail rows (collapsed, outline_level=1) ───────────
+            PROD_STAT_COLORS = {
+                "OK":          ("D4EDDA", "1E7E34"),
+                "Épuisé":      ("FFCCCC", C_BAD_FG),
+                "Absent":      ("F8D7DA", C_BAD_FG),
+                "Hors planno": ("FFF3CD", C_ORA_FG),
+            }
+            for pd_row in r.get("detail_rows", []):
+                bg_d, fg_d = PROD_STAT_COLORS.get(pd_row["statut"], ("F5F5F5", "333333"))
+                ws.row_dimensions[ri].outline_level = 1
+                ws.row_dimensions[ri].hidden        = True
+                ws.row_dimensions[ri].height        = 15
+                # Col 3: indented code, col 4: libelle, col 5: qty planno,
+                # col 6: qty inv, col 7: écart, col 9: statut
+                detail_vals = {
+                    3: f"  └ {pd_row['code']}",
+                    4: pd_row["libelle"],
+                    5: pd_row["qty_plan"],
+                    6: pd_row["qty_inv"],
+                    7: pd_row["ecart"],
+                    9: pd_row["statut"],
+                }
+                for ci in range(1, N + 1):
+                    v  = detail_vals.get(ci, "")
+                    c  = ws.cell(ri, ci, v)
+                    c.border = _brd
+                    if ci in detail_vals:
+                        c.fill = _fill(bg_d)
+                        c.font = _font(bold=(ci == 3), color=fg_d, size=8,
+                                       italic=(ci not in (3, 9)))
+                        c.alignment = _align(
+                            "center" if ci in (5, 6, 7) else "left"
+                        )
+                    else:
+                        c.fill = _fill("FAFAFA")
+                        c.font = _font(size=8)
+                ri += 1
 
     output = io.BytesIO()
     wb.save(output)

@@ -177,3 +177,91 @@ def delete_produit(produit_id: str) -> bool:
     except Exception as e:
         st.error(f"Erreur suppression produit : {e}")
         return False
+
+
+# ════════════════════════════════════════════════════════
+# PLANNOS THÉORIQUES
+# ════════════════════════════════════════════════════════
+
+def _col_plannos_theoriques():
+    return _get_db()["plannos_theoriques"]
+
+
+def load_plannos_theoriques() -> list:
+    """Retourne tous les plannos théoriques triés par nom."""
+    try:
+        col = _col_plannos_theoriques()
+        docs = list(col.find({}).sort("nom", 1))
+        return [_to_str_id(d) for d in docs]
+    except Exception as e:
+        st.error(f"Erreur chargement plannos théoriques : {e}")
+        return []
+
+
+def save_planno_theorique(doc: dict) -> str:
+    """Crée ou met à jour un planno théorique. Retourne l'_id (string)."""
+    col = _col_plannos_theoriques()
+    doc["updated_at"] = _today()
+    if "_id" in doc and doc["_id"]:
+        oid = ObjectId(doc["_id"])
+        data = {k: v for k, v in doc.items() if k != "_id"}
+        col.update_one({"_id": oid}, {"$set": data}, upsert=True)
+        return str(oid)
+    else:
+        doc.pop("_id", None)
+        doc["created_at"] = _today()
+        result = col.insert_one(doc)
+        return str(result.inserted_id)
+
+
+def delete_planno_theorique(doc_id: str) -> bool:
+    """Supprime un planno théorique par son _id."""
+    try:
+        col = _col_plannos_theoriques()
+        result = col.delete_one({"_id": ObjectId(doc_id)})
+        return result.deleted_count > 0
+    except Exception as e:
+        st.error(f"Erreur suppression planno théorique : {e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════
+# ASSOCIATIONS TYPE MACHINE ↔ PLANNO THÉORIQUE
+# ════════════════════════════════════════════════════════
+
+def _col_machine_planno_links():
+    return _get_db()["machine_planno_links"]
+
+
+def load_machine_planno_links() -> dict:
+    """
+    Retourne le dict {machine_type: planno_id_str} des associations sauvegardées.
+    Exemple : {"BF Simple": "664abc...", "BF Double": None, ...}
+    """
+    try:
+        col = _col_machine_planno_links()
+        doc = col.find_one({"_config": "links"})
+        if not doc:
+            return {}
+        return {k: v for k, v in doc.items() if k not in ("_id", "_config")}
+    except Exception as e:
+        st.error(f"Erreur chargement associations : {e}")
+        return {}
+
+
+def save_machine_planno_link(machine_type: str, planno_id: str | None) -> bool:
+    """
+    Associe (ou dissocie si planno_id=None) un type de machine à un planno théorique.
+    Upsert sur le document singleton {_config: "links"}.
+    """
+    try:
+        col = _col_machine_planno_links()
+        col.update_one(
+            {"_config": "links"},
+            {"$set": {machine_type: planno_id}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        st.error(f"Erreur sauvegarde association : {e}")
+        return False

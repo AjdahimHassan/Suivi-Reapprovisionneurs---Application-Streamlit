@@ -19,6 +19,7 @@ except ImportError:
 from planogrammes_storage import (
     load_planogrammes, save_planogramme, delete_planogramme, duplicate_planogramme,
     load_produits, save_produit, delete_produit,
+    load_plannos_theoriques, save_planno_theorique, delete_planno_theorique,
 )
 
 # ── Palettes couleurs disponibles pour les slots ────────
@@ -320,6 +321,253 @@ def _view_list():
                             if st.button("Annuler", key=f"no_{p['_id']}"):
                                 st.session_state.pop(f"confirm_del_{p['_id']}", None)
                                 st.rerun()
+
+    _section_plannos_theoriques()
+
+
+# ════════════════════════════════════════════════════════
+# SECTION : PLANNOS THÉORIQUES
+# ════════════════════════════════════════════════════════
+
+def _parse_planno_theorique_csv(raw: bytes) -> list:
+    """
+    Parse le CSV exporté depuis la machine.
+    Format :
+      Ligne 1 : "Configuration";;;;"Tarif CB";;   ← ignorée
+      Ligne 2 : "Code";"Libellé";"Unité";"Niv.haut";"Prix u.b. TTC";"Ligne de prix";
+      Lignes 3+ : données
+    Retourne une liste de dicts {code, libelle, unite, niv_haut, prix_ttc}.
+    """
+    text = raw.decode("utf-8-sig")
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 3:
+        raise ValueError("Fichier trop court ou format inattendu.")
+
+    # Ligne 2 (index 1) = en-têtes
+    header_cells = [c.strip().strip('"') for c in lines[1].split(";")]
+
+    def _col(name_fragment):
+        for i, h in enumerate(header_cells):
+            if name_fragment.lower() in h.lower():
+                return i
+        return None
+
+    idx_code  = _col("Code")
+    idx_lib   = _col("Lib")
+    idx_unite = _col("Unit")
+    idx_niv   = _col("Niv")
+    idx_prix  = _col("Prix")
+
+    if idx_code is None or idx_lib is None:
+        raise ValueError("Colonnes 'Code' ou 'Libellé' introuvables dans le fichier.")
+
+    produits = []
+    seen = set()
+    for line in lines[2:]:
+        cells = [c.strip().strip('"') for c in line.split(";")]
+        if not cells or not cells[0]:
+            continue
+        code   = cells[idx_code].strip()   if idx_code  is not None and idx_code  < len(cells) else ""
+        libelle = cells[idx_lib].strip()   if idx_lib   is not None and idx_lib   < len(cells) else ""
+        unite  = cells[idx_unite].strip()  if idx_unite is not None and idx_unite < len(cells) else ""
+        try:
+            niv_haut = int(cells[idx_niv]) if idx_niv is not None and idx_niv < len(cells) and cells[idx_niv].strip() else 0
+        except ValueError:
+            niv_haut = 0
+        try:
+            prix_ttc = float(cells[idx_prix].replace(",", ".")) if idx_prix is not None and idx_prix < len(cells) and cells[idx_prix].strip() else 0.0
+        except ValueError:
+            prix_ttc = 0.0
+
+        if not code:
+            continue
+        # Dédoublonner par code (garder premier)
+        if code not in seen:
+            seen.add(code)
+            produits.append({
+                "code":     code,
+                "libelle":  libelle,
+                "unite":    unite,
+                "niv_haut": niv_haut,
+                "prix_ttc": prix_ttc,
+            })
+
+    return produits
+
+
+def _section_plannos_theoriques():
+    st.divider()
+    st.markdown("### 📐 Plannos théoriques")
+
+    plannos = load_plannos_theoriques()
+
+    # ── Upload + sauvegarde ──
+    with st.expander("➕ Ajouter un planno théorique", expanded=not plannos):
+        uploaded = st.file_uploader(
+            "Fichier CSV exporté depuis la machine",
+            type=["csv"],
+            key="planno_th_uploader",
+            label_visibility="collapsed",
+        )
+        nom_input = st.text_input(
+            "Nom personnalisé *",
+            placeholder="ex: BF Simple Oct 2025",
+            key="planno_th_nom",
+        )
+        if uploaded and nom_input.strip():
+            if st.button("💾 Enregistrer", type="primary", key="planno_th_save"):
+                try:
+                    produits = _parse_planno_theorique_csv(uploaded.read())
+                    doc = {"nom": nom_input.strip(), "produits": produits}
+                    save_planno_theorique(doc)
+                    st.toast(f"✅ '{nom_input.strip()}' enregistré ({len(produits)} produits).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur lors du parsing : {e}")
+        elif uploaded and not nom_input.strip():
+            st.caption("⬆️ Donnez un nom au planno avant d'enregistrer.")
+
+    # ── Liste des plannos existants ──
+    if not plannos:
+        st.caption("Aucun planno théorique enregistré.")
+        return
+
+    editing_id = st.session_state.get("edit_th_id")
+
+    for p in plannos:
+        pid = p["_id"]
+        nb  = len(p.get("produits", []))
+        upd = p.get("updated_at", p.get("created_at", "—"))
+        is_editing = (editing_id == pid)
+
+        with st.container(border=True):
+            # ── En-tête carte ──
+            h1, h2, h3 = st.columns([5, 1, 1])
+            with h1:
+                st.markdown(f"**{p['nom']}** &nbsp; `{nb} produits` &nbsp; <span style='color:#888;font-size:12px'>· {upd}</span>", unsafe_allow_html=True)
+            with h2:
+                btn_label = "✖ Fermer" if is_editing else "✏️ Éditer"
+                if st.button(btn_label, key=f"edit_th_{pid}", use_container_width=True):
+                    if is_editing:
+                        st.session_state.pop("edit_th_id", None)
+                    else:
+                        st.session_state["edit_th_id"] = pid
+                        # Initialiser le buffer d'édition
+                        st.session_state[f"th_produits_{pid}"] = [dict(pr) for pr in p.get("produits", [])]
+                        st.session_state[f"th_nom_{pid}"] = p["nom"]
+                    st.rerun()
+            with h3:
+                if st.button("🗑️", key=f"del_th_{pid}", use_container_width=True):
+                    st.session_state[f"confirm_del_th_{pid}"] = True
+                    st.rerun()
+
+            # Confirmation suppression
+            if st.session_state.get(f"confirm_del_th_{pid}"):
+                st.warning(f"Supprimer **{p['nom']}** ?")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("Oui, supprimer", key=f"yes_th_{pid}", type="primary"):
+                        delete_planno_theorique(pid)
+                        st.session_state.pop(f"confirm_del_th_{pid}", None)
+                        st.session_state.pop("edit_th_id", None)
+                        st.rerun()
+                with cc2:
+                    if st.button("Annuler", key=f"no_th_{pid}"):
+                        st.session_state.pop(f"confirm_del_th_{pid}", None)
+                        st.rerun()
+
+            # Aperçu rapide (mode lecture)
+            if not is_editing:
+                codes_preview = ", ".join(
+                    f"{pr['code']} ({pr.get('libelle','')})" for pr in p.get("produits", [])[:4]
+                )
+                if nb > 4:
+                    codes_preview += f" … +{nb - 4}"
+                st.caption(codes_preview)
+
+            # ── Mode édition ──
+            if is_editing:
+                st.divider()
+
+                # Renommer
+                new_nom = st.text_input(
+                    "Nom du planno",
+                    value=st.session_state.get(f"th_nom_{pid}", p["nom"]),
+                    key=f"th_nom_input_{pid}",
+                )
+                st.session_state[f"th_nom_{pid}"] = new_nom
+
+                st.markdown("**Produits** — modifiez directement dans le tableau :")
+                buf = st.session_state.get(f"th_produits_{pid}", [dict(pr) for pr in p.get("produits", [])])
+
+                # data_editor
+                df_edit = pd.DataFrame(buf, columns=["code", "libelle", "unite", "niv_haut", "prix_ttc"])
+                edited = st.data_editor(
+                    df_edit,
+                    column_config={
+                        "code":     st.column_config.TextColumn("Code", width="medium"),
+                        "libelle":  st.column_config.TextColumn("Libellé", width="large"),
+                        "unite":    st.column_config.TextColumn("Unité", width="small"),
+                        "niv_haut": st.column_config.NumberColumn("Qté", min_value=0, step=1, width="small"),
+                        "prix_ttc": st.column_config.NumberColumn("Prix TTC (€)", min_value=0.0, format="%.2f", width="small"),
+                    },
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=True,
+                    key=f"th_editor_{pid}",
+                )
+                # Mettre à jour le buffer live
+                st.session_state[f"th_produits_{pid}"] = edited.to_dict("records")
+
+                # ── Ajouter un produit manuellement ──
+                with st.expander("➕ Ajouter un produit"):
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        add_code    = st.text_input("Code *",    key=f"add_code_{pid}",    placeholder="EVIAN50CL")
+                        add_libelle = st.text_input("Libellé *", key=f"add_lib_{pid}",     placeholder="EVIAN 50CL")
+                    with ac2:
+                        add_unite   = st.text_input("Unité",     key=f"add_unite_{pid}",   placeholder="BOUTEILLE50CL")
+                        add_niv     = st.number_input("Qté",     key=f"add_niv_{pid}",     min_value=0, step=1, value=0)
+                        add_prix    = st.number_input("Prix TTC",key=f"add_prix_{pid}",    min_value=0.0, step=0.01, value=0.0, format="%.2f")
+                    if st.button("Ajouter", key=f"add_btn_{pid}", type="primary"):
+                        if add_code.strip() and add_libelle.strip():
+                            buf2 = st.session_state.get(f"th_produits_{pid}", [])
+                            buf2.append({
+                                "code":     add_code.strip().upper(),
+                                "libelle":  add_libelle.strip(),
+                                "unite":    add_unite.strip(),
+                                "niv_haut": int(add_niv),
+                                "prix_ttc": float(add_prix),
+                            })
+                            st.session_state[f"th_produits_{pid}"] = buf2
+                            st.rerun()
+                        else:
+                            st.error("Code et Libellé sont obligatoires.")
+
+                # ── Sauvegarder les modifications ──
+                if st.button("💾 Sauvegarder les modifications", type="primary", key=f"save_th_{pid}", use_container_width=True):
+                    final_produits = [
+                        {
+                            "code":     str(pr.get("code", "") or "").strip().upper(),
+                            "libelle":  str(pr.get("libelle", "") or "").strip(),
+                            "unite":    str(pr.get("unite", "") or "").strip(),
+                            "niv_haut": int(pr.get("niv_haut", 0) or 0),
+                            "prix_ttc": float(pr.get("prix_ttc", 0.0) or 0.0),
+                        }
+                        for pr in st.session_state.get(f"th_produits_{pid}", [])
+                        if str(pr.get("code", "")).strip()  # ignorer lignes vides
+                    ]
+                    updated_doc = {
+                        "_id":      pid,
+                        "nom":      st.session_state.get(f"th_nom_{pid}", p["nom"]).strip() or p["nom"],
+                        "produits": final_produits,
+                    }
+                    save_planno_theorique(updated_doc)
+                    st.session_state.pop("edit_th_id", None)
+                    st.session_state.pop(f"th_produits_{pid}", None)
+                    st.session_state.pop(f"th_nom_{pid}", None)
+                    st.toast(f"✅ Planno mis à jour ({len(final_produits)} produits).")
+                    st.rerun()
 
 
 # ════════════════════════════════════════════════════════
