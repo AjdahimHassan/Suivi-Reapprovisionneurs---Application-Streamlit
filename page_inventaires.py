@@ -46,8 +46,9 @@ IDF_RESSOURCES = {"RIDF1", "RIDF2", "RIDF3", "RIDF4", "RIDF5", "RIDF6", "RIDF7",
 WEEKDAY_TO_JOUR = {0: "Lundi", 1: "Mardi", 2: "Mercredi", 3: "Jeudi", 4: "Vendredi"}
 
 COLOR_OK     = "#1E7E34"
-COLOR_BAD    = "#C0392B"
-COLOR_ORANGE = "#E67E22"
+COLOR_BAD    = "#C0392B"   # rouge  — problèmes planno (absents / hors planno)
+COLOR_SEUIL  = "#1565C0"   # bleu   — hors seuils (sous min ou au-dessus max)
+COLOR_ORANGE = "#E67E22"   # orange — (conservé pour compat interne)
 COLOR_GREY   = "#6C757D"
 WHITE        = "#FFFFFF"
 
@@ -103,9 +104,9 @@ def _get_status(total: float, machine_type: str) -> dict:
         return {"emoji": "❓", "label": "Non classifié", "color": COLOR_GREY}
     if total < s["min"]:
         pct = round(total / s["min"] * 100, 1)
-        return {"emoji": "🔴", "label": f"Mal fait ({pct}% du min)", "color": COLOR_BAD}
+        return {"emoji": "🔵", "label": f"Sous seuil ({pct}% du min)", "color": COLOR_SEUIL}
     if total > s["max"]:
-        return {"emoji": "🟠", "label": "Au-dessus du max", "color": COLOR_ORANGE}
+        return {"emoji": "🔵", "label": "Au-dessus du max", "color": COLOR_SEUIL}
     return {"emoji": "🟢", "label": "OK", "color": COLOR_OK}
 
 
@@ -736,39 +737,63 @@ def render():
 # ══════════════════════════════════════════
 
 def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None):
-    color  = row["statut_color"]
     total  = row["total"]
     s_min  = row["seuil_min"]
     s_max  = row["seuil_max"]
     ecart  = row["ecart_min"]
-    vides  = int(row["nb_produits_vides"])
 
     ecart_str = f"{ecart:+.2f} €" if pd.notna(ecart) else "—"
 
-    # Noms des produits épuisés (qty=0)
-    # Si un planno est associé, on ne compte comme "épuisés" que les produits du planno.
-    # Les produits à qty=0 hors-planno sont traités dans le tableau planno comme "Hors planno".
-    mtype  = row.get("machine_type", "")
-    planno = (planno_index or {}).get(mtype)  # {code: {libelle, niv_haut}} ou None
+    # ── Données planno (calculées en premier pour déterminer la couleur finale) ──
+    mtype   = row.get("machine_type", "")
+    planno  = (planno_index or {}).get(mtype)
+    inv_sub = df_raw[df_raw["Num Piece"] == row["Num Piece"]]
+    inv_qty = inv_sub.groupby("Code produit")["Quantité"].sum().to_dict()
+    inv_lib = inv_sub.drop_duplicates("Code produit").set_index("Code produit")["Libellé produit"].to_dict()
 
     all_missing = _get_missing_products(df_raw, row["Num Piece"])
+
     if planno:
         missing_prods = [p for p in all_missing if p["code"] in planno]
+        absents       = [(c, planno[c]["libelle"] or c) for c in planno if c not in inv_qty]
+        hors_planno   = [inv_lib.get(c, c) for c in inv_qty if c not in planno]
     else:
         missing_prods = all_missing
+        absents       = []
+        hors_planno   = []
+
+    # ── Couleur finale : rouge si problèmes planno, bleu si hors seuils, vert sinon ──
+    has_planno_issues = bool(absents or hors_planno)
+    color = COLOR_BAD if has_planno_issues else row["statut_color"]
+
+    # ── HTML résumé produits ──
+    lines_html = ""
 
     if missing_prods:
-        noms_html = " &nbsp;·&nbsp; ".join(f"<b>{p['nom']}</b>" for p in missing_prods)
-        vides_html = (
-            f'<div style="margin-top:4px; font-size:0.8rem; color:{COLOR_BAD};">'
-            f"🔴 Épuisés ({len(missing_prods)}) : {noms_html}</div>"
+        noms = " &nbsp;·&nbsp; ".join(f"<b>{p['nom']}</b>" for p in missing_prods)
+        lines_html += (
+            f'<div style="margin-top:3px; font-size:0.8rem; color:{COLOR_SEUIL};">'
+            f"🔵 Épuisés ({len(missing_prods)}) : {noms}</div>"
         )
-    else:
-        vides_html = (
-            f'<div style="margin-top:4px; font-size:0.82rem; color:#2e7d32;">✅ Aucun produit épuisé</div>'
+    if absents:
+        noms = " &nbsp;·&nbsp; ".join(f"<b>{lib}</b>" for _, lib in absents)
+        lines_html += (
+            f'<div style="margin-top:3px; font-size:0.8rem; color:{COLOR_BAD};">'
+            f"❌ Absents du planno ({len(absents)}) : {noms}</div>"
         )
+    if hors_planno:
+        noms = " &nbsp;·&nbsp; ".join(f"<b>{n}</b>" for n in hors_planno)
+        lines_html += (
+            f'<div style="margin-top:3px; font-size:0.8rem; color:{COLOR_BAD};">'
+            f"⚠️ Hors planno ({len(hors_planno)}) : {noms}</div>"
+        )
+    if not lines_html:
+        ok_msg = "✅ Aucun produit épuisé" if not planno else "✅ Conforme au planno"
+        lines_html = f'<div style="margin-top:3px; font-size:0.82rem; color:#2e7d32;">{ok_msg}</div>'
 
-    bg = "#fff8f8" if color == COLOR_BAD else "#fff8f0" if color == COLOR_ORANGE else "#f8fff8"
+    vides_html = lines_html
+
+    bg = "#fff8f8" if color == COLOR_BAD else "#f0f4ff" if color == COLOR_SEUIL else "#f8fff8"
     st.markdown(
         f"""<div style="border-left:5px solid {color}; background:{bg};
             border-radius:6px; padding:10px 14px; margin-bottom:4px;">
@@ -786,18 +811,8 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = Non
         unsafe_allow_html=True,
     )
 
-    # ── Expander planno théorique ────────────────────────────
-    mtype   = row.get("machine_type", "")
-    planno  = (planno_index or {}).get(mtype)  # {code: {libelle, niv_haut}} ou None
-
+    # ── Toggle planno théorique ────────────────────────────
     if planno:
-        # Produits réels de cet inventaire : {code: qty}
-        inv_sub = df_raw[df_raw["Num Piece"] == row["Num Piece"]]
-        inv_qty = (
-            inv_sub.groupby("Code produit")["Quantité"].sum().to_dict()
-        )
-        inv_lib = inv_sub.drop_duplicates("Code produit").set_index("Code produit")["Libellé produit"].to_dict()
-
         rows_table = []
         # Produits du planno
         for code, info in planno.items():
@@ -1107,6 +1122,7 @@ def _build_export_rows(
                     if planno:
                         prods         = [inv_libs.get(c, c) for c in miss_codes if c in planno]
                         hors_planno   = [inv_libs.get(c, c) for c in inv_qtys  if c not in planno]
+                        absents       = [planno[c]["libelle"] or c for c in planno if c not in inv_qtys]
                         detail_rows   = []
                         for _c, _info in sorted(planno.items()):
                             _qi   = inv_qtys.get(_c)
@@ -1130,12 +1146,13 @@ def _build_export_rows(
                     else:
                         prods       = missing_idx.get(piece, [])
                         hors_planno = []
+                        absents     = []
                         detail_rows = []
                 elif code not in codes_fait_today and code in codes_fait_week:
                     total = smin = smax = ecart = machine_type = None
                     statut_plan = "Double passage"
                     statut_inv  = "-"
-                    prods       = []; hors_planno = []; detail_rows = []
+                    prods       = []; hors_planno = []; absents = []; detail_rows = []
                     fait_par    = reappro
                 else:
                     # Check joker: was it inventoried by another reappro on the same date?
@@ -1302,72 +1319,84 @@ def _export_excel(
     ws_g.sheet_properties.tabColor = C_DARK
 
     # Row 1 : big title
-    ws_g.merge_cells("A1:K1")
+    RECAP_HDRS = [
+        "Réappro", "Date", "Jour",
+        "📋 Planifiées", "✅ Faites", "🔴 Non faites",
+        "⚠️ Mal faits", "📈 Au-dessus max",
+        "💰 Total € fait", "% réalisation",
+    ]
+    NR = len(RECAP_HDRS)
+    ws_g.merge_cells(f"A1:{get_column_letter(NR)}1")
     tc = ws_g.cell(1, 1, "Suivi des inventaires — Récapitulatif")
     tc.fill = _fill(C_DARK); tc.font = _font(True, C_WHITE, 13)
     tc.alignment = _align("center"); ws_g.row_dimensions[1].height = 26
 
     # Row 2 : headers
-    RECAP_HDRS = [
-        "Réappro", "Date", "Jour",
-        "✅ Faits", "🔴 Non faits", "🔄 Double pass.",
-        "⚠️ Mal faits", "📈 Au-dessus max",
-        "💰 Total € fait", "% réalisation",
-    ]
+    RECAP_WIDTHS = [13, 11, 11, 13, 12, 13, 12, 15, 16, 14]
     ws_g.row_dimensions[2].height = 20
     for ci, h in enumerate(RECAP_HDRS, 1):
         c = ws_g.cell(2, ci, h)
         c.fill = _fill(C_MID); c.font = _font(True, C_WHITE, 9)
         c.alignment = _align("center"); c.border = _brd
-        ws_g.column_dimensions[get_column_letter(ci)].width = [
-            13, 11, 11, 10, 12, 13, 12, 15, 16, 14][ci - 1]
+        ws_g.column_dimensions[get_column_letter(ci)].width = RECAP_WIDTHS[ci - 1]
 
     # Aggregate
     recap: dict = {}
     for r in rows:
         k = (r["reappro"], r["date"], r["jour"])
         if k not in recap:
-            recap[k] = {"fait": 0, "non_fait": 0, "double": 0,
+            recap[k] = {"planif": 0, "fait": 0, "non_fait": 0,
                         "mal_fait": 0, "au_dessus": 0, "total_eur": 0.0}
         d = recap[k]
         sp = r["statut_plan"]
         si = r["statut_inv"]
-        if sp == "Fait":
+        # Toute salle dans le planning (quelle que soit son issue) = planifiée
+        d["planif"] += 1
+        if sp in ("Fait",) or sp.startswith("Joker"):
             d["fait"] += 1; d["total_eur"] += r["total"] or 0
-            if si == "Mal fait":       d["mal_fait"] += 1
+            if si == "Mal fait":        d["mal_fait"] += 1
             elif si == "Au-dessus max": d["au_dessus"] += 1
-        elif sp == "Non fait":     d["non_fait"] += 1
-        elif sp == "Double passage": d["double"] += 1
-        elif sp.startswith("Joker"):
-            # Joker = fait, compté comme tel
-            d["fait"] += 1; d["total_eur"] += r["total"] or 0
-            if si == "Mal fait":       d["mal_fait"] += 1
-            elif si == "Au-dessus max": d["au_dessus"] += 1
+        elif sp == "Non fait":
+            d["non_fait"] += 1
 
     ri = 3
     for (reappro, date_str, jour), d in sorted(recap.items()):
-        planif = d["fait"] + d["non_fait"] + d["double"]
-        pct    = round(d["fait"] / planif * 100, 1) if planif else 0
-        bg = C_OK_BG if (d["non_fait"] == 0 and d["mal_fait"] == 0) else \
-             C_BAD_BG if d["non_fait"] > 0 else C_ORA_BG
-        vals = [reappro, date_str, jour, d["fait"], d["non_fait"], d["double"],
-                d["mal_fait"], d["au_dessus"], round(d["total_eur"], 2), f"{pct}%"]
+        pct = round(d["fait"] / d["planif"] * 100, 1) if d["planif"] else 0
+        half_not_done = d["non_fait"] >= (d["planif"] / 2)
+        if half_not_done:
+            bg = C_GREY_BG                                        # >= moitié non faites → neutre
+        elif d["mal_fait"] > 0 or d["au_dessus"] > 0:
+            bg = C_BAD_BG                                         # mauvais inventaires → rouge
+        elif d["non_fait"] > 0:
+            bg = C_ORA_BG                                         # quelques manquants → orange
+        else:
+            bg = C_OK_BG                                          # tout bon → vert
+        vals = [
+            reappro, date_str, jour,
+            d["planif"], d["fait"], d["non_fait"],
+            d["mal_fait"], d["au_dessus"],
+            round(d["total_eur"], 2), f"{pct}%",
+        ]
         ws_g.row_dimensions[ri].height = 17
+        sheet_target = reappro[:31]
         for ci, v in enumerate(vals, 1):
             c = ws_g.cell(ri, ci, v)
             c.fill = _fill(bg); c.border = _brd
-            c.font = _font(size=9)
             c.alignment = _align("center" if ci > 3 else "left")
             if ci == 9 and isinstance(v, (int, float)):
                 c.number_format = "#,##0.00 €"
             # Hyperlink sur toute la ligne → feuille du réappro
-            sheet_target = reappro[:31]
             c.hyperlink = f"#{sheet_target}!A1"
             c.font = Font(
                 name="Arial", size=9, bold=(ci == 1),
                 color=("1F4E79" if ci == 1 else "000000"),
                 underline=("single" if ci == 1 else None),
             )
+            # Couleurs spéciales colonnes Faites / Non faites
+            if ci == 5 and d["fait"] == d["planif"]:
+                c.font = Font(name="Arial", size=9, bold=True, color=C_OK_FG)
+            if ci == 6 and d["non_fait"] > 0:
+                c.font = Font(name="Arial", size=9, bold=True, color=C_BAD_FG)
         ri += 1
 
     # ══════════════════════════════════════════
@@ -1468,9 +1497,9 @@ def _export_excel(
                     bg2, fg2, bold2 = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
                     c.fill = _fill(bg2); c.font = _font(bold2, fg2, 9); c.alignment = _align("center")
                 if ci == 10 and has_prods:
-                    c.fill = _fill("FFCCCC"); c.font = _font(True, C_BAD_FG, 9)
-                if ci == 11 and has_hors:
                     c.fill = _fill("FFF3CD"); c.font = _font(True, C_ORA_FG, 9)
+                if ci == 11 and has_hors:
+                    c.fill = _fill("FFCCCC"); c.font = _font(True, C_BAD_FG, 9)
 
             ri += 1
 
