@@ -623,7 +623,7 @@ def render():
                             rows_m = [{"Code": m["code"], "Salle": m["label"], "Machine": m["machine"]}
                                       for m in d["manquants"]]
                             st.dataframe(
-                                pd.DataFrame(rows_m).style.applymap(
+                                pd.DataFrame(rows_m).style.map(
                                     lambda _: f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"
                                 ),
                                 hide_index=True, use_container_width=True,
@@ -635,7 +635,7 @@ def render():
                                          for m in d["deja_fait_semaine"]]
                             st.markdown(f"🔄 *Double passage ({nb_deja})*")
                             st.dataframe(
-                                pd.DataFrame(rows_deja).style.applymap(
+                                pd.DataFrame(rows_deja).style.map(
                                     lambda _: f"background-color:{COLOR_ORANGE}; color:{WHITE}; font-weight:600"
                                 ),
                                 hide_index=True, use_container_width=True,
@@ -648,7 +648,7 @@ def render():
                                       for j in d["jokers"]]
                             st.markdown(f"🔀 *Jokers ({nb_jok})*")
                             st.dataframe(
-                                pd.DataFrame(rows_j).style.applymap(
+                                pd.DataFrame(rows_j).style.map(
                                     lambda _: f"background-color:#6C3483; color:{WHITE}; font-weight:600"
                                 ),
                                 hide_index=True, use_container_width=True,
