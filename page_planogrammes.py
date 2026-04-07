@@ -361,15 +361,15 @@ def _parse_planno_theorique_csv(raw: bytes) -> list:
     if idx_code is None or idx_lib is None:
         raise ValueError("Colonnes 'Code' ou 'Libellé' introuvables dans le fichier.")
 
-    produits = []
-    seen = set()
+    # Accumulation par code : niv_haut = somme de tous les emplacements
+    accum = {}  # {code: {libelle, unite, niv_haut, prix_ttc}}
     for line in lines[2:]:
         cells = [c.strip().strip('"') for c in line.split(";")]
         if not cells or not cells[0]:
             continue
-        code   = cells[idx_code].strip()   if idx_code  is not None and idx_code  < len(cells) else ""
+        code    = cells[idx_code].strip()  if idx_code  is not None and idx_code  < len(cells) else ""
         libelle = cells[idx_lib].strip()   if idx_lib   is not None and idx_lib   < len(cells) else ""
-        unite  = cells[idx_unite].strip()  if idx_unite is not None and idx_unite < len(cells) else ""
+        unite   = cells[idx_unite].strip() if idx_unite is not None and idx_unite < len(cells) else ""
         try:
             niv_haut = int(cells[idx_niv]) if idx_niv is not None and idx_niv < len(cells) and cells[idx_niv].strip() else 0
         except ValueError:
@@ -381,18 +381,21 @@ def _parse_planno_theorique_csv(raw: bytes) -> list:
 
         if not code:
             continue
-        # Dédoublonner par code (garder premier)
-        if code not in seen:
-            seen.add(code)
-            produits.append({
-                "code":     code,
+
+        if code not in accum:
+            accum[code] = {
                 "libelle":  libelle,
                 "unite":    unite,
-                "niv_haut": niv_haut,
+                "niv_haut": 0,
                 "prix_ttc": prix_ttc,
-            })
+            }
+        # Cumul des quantités sur tous les emplacements du même produit
+        accum[code]["niv_haut"] += niv_haut
 
-    return produits
+    return [
+        {"code": code, **info}
+        for code, info in accum.items()
+    ]
 
 
 def _section_plannos_theoriques():
