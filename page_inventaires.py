@@ -439,6 +439,54 @@ def _get_all_missing_products(df_raw: pd.DataFrame, summary: pd.DataFrame) -> pd
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _analyze_planno(
+    piece: str,
+    mtype_key: str,
+    planno_index: dict,
+    inv_qty_by_piece: dict,
+    inv_lib_by_piece: dict,
+    missing_code_idx: dict,
+    missing_idx: dict,
+) -> tuple:
+    """
+    Shared planno-vs-inventory analysis.
+    Returns (prods, hors_planno, absents, detail_rows).
+    """
+    planno     = (planno_index or {}).get(mtype_key)
+    inv_qtys   = inv_qty_by_piece.get(piece, {})
+    inv_libs   = inv_lib_by_piece.get(piece, {})
+    miss_codes = missing_code_idx.get(piece, set())
+
+    if not planno:
+        return missing_idx.get(piece, []), [], [], []
+
+    prods       = [inv_libs.get(c, c) for c in miss_codes if c in planno]
+    hors_planno = [inv_libs.get(c, c) for c in inv_qtys   if c not in planno]
+    absents     = [planno[c]["libelle"] or c for c in planno if c not in inv_qtys]
+
+    detail_rows = []
+    for _c, _info in sorted(planno.items()):
+        _qi    = inv_qtys.get(_c)
+        _qp    = _info["niv_haut"]
+        _ecart = (int(_qi) - _qp) if _qi is not None else -_qp
+        _stat  = "Absent" if _qi is None else ("Épuisé" if _qi == 0 else "OK")
+        detail_rows.append({
+            "code": _c, "libelle": _info["libelle"],
+            "qty_plan": _qp,
+            "qty_inv":  int(_qi) if _qi is not None else "Absent",
+            "ecart":    _ecart, "statut": _stat,
+        })
+    for _c in sorted(inv_qtys):
+        if _c not in planno:
+            detail_rows.append({
+                "code": _c, "libelle": inv_libs.get(_c, ""),
+                "qty_plan": "—", "qty_inv": int(inv_qtys[_c]),
+                "ecart": "Hors planno", "statut": "Hors planno",
+            })
+
+    return prods, hors_planno, absents, detail_rows
+
+
 # ══════════════════════════════════════════
 # PAGE PRINCIPALE
 # ══════════════════════════════════════════
@@ -726,7 +774,7 @@ def render():
                 st.markdown(
                     f"#### 🏋️ {row['Nom client']} — {row['Stock Origine']} ({row['type_label']})"
                 )
-                _machine_detail_full(row, df_raw)
+                _machine_detail_full(row, df_raw, planno_index)
 
     _section_connexion()
 
@@ -872,10 +920,10 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = Non
 
                 def _style_planno(r):
                     s = r["Statut"]
-                    if s in ("❌ Absent", "🔴 Épuisé"):
+                    if s in ("❌ Absent", "⚠️ Hors planno"):
                         return [f"background-color:{COLOR_BAD}; color:{WHITE}; font-weight:600"] * len(r)
-                    if s == "⚠️ Hors planno":
-                        return [f"background-color:{COLOR_ORANGE}; color:{WHITE}; font-weight:600"] * len(r)
+                    if s == "🔴 Épuisé":
+                        return [f"background-color:{COLOR_SEUIL}; color:{WHITE}; font-weight:600"] * len(r)
                     return [""] * len(r)
 
                 st.dataframe(
@@ -891,7 +939,7 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = Non
     st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
 
-def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame):
+def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("💰 Montant HT", f"{row['total']:.2f} €")
     c2.metric("📉 Seuil min",  f"{row['seuil_min']:.0f} €" if pd.notna(row["seuil_min"]) else "—")
@@ -918,6 +966,166 @@ def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame):
         use_container_width=True, hide_index=True,
         height=min(500, 38 + len(sub) * 35),
     )
+
+    col_btn, _ = st.columns([1, 3])
+    with col_btn:
+        if st.button("📸 Générer fiche PNG", key=f"png_btn_{row['Num Piece']}",
+                     use_container_width=True):
+            png_bytes = _generate_machine_png(row, df_raw, planno_index)
+            fname = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
+            st.download_button(
+                "⬇️ Télécharger PNG", data=png_bytes, file_name=fname,
+                mime="image/png", key=f"png_dl_{row['Num Piece']}",
+            )
+
+
+def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None) -> bytes:
+    """Génère une fiche PNG stylée (style planogramme) pour la machine."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    piece  = row["Num Piece"]
+    mtype  = row.get("machine_type", "")
+    planno = (planno_index or {}).get(mtype, {})
+
+    # Build per-product data (aggregate lines for same code)
+    agg = (
+        df_raw[df_raw["Num Piece"] == piece]
+        .groupby("Code produit")
+        .agg(libelle=("Libellé produit", "first"),
+             qty=("Quantité", "sum"),
+             ht=("Montant HT", "sum"))
+        .reset_index()
+    )
+    inv_codes = set(agg["Code produit"])
+
+    # Determine status
+    def _statut(code, qty):
+        if planno:
+            if code not in planno: return "hors"
+            return "epuise" if qty == 0 else "ok"
+        return "epuise" if qty == 0 else "ok"
+
+    table_data = []
+    for _, r in agg.iterrows():
+        code = r["Code produit"]
+        qty  = int(r["qty"])
+        ht   = float(r["ht"])
+        pu   = ht / qty if qty > 0 else None
+        qty_plan = planno[code]["niv_haut"] if planno and code in planno else "—"
+        table_data.append({
+            "code":     code,
+            "libelle":  str(r["libelle"])[:35],
+            "qty_plan": str(qty_plan),
+            "qty":      str(qty),
+            "pu":       f"{pu:.2f} €" if pu else "—",
+            "ht":       f"{ht:.2f} €",
+            "statut":   _statut(code, qty),
+        })
+
+    # Absents from planno (not in inventory at all)
+    for code, info in sorted(planno.items()):
+        if code not in inv_codes:
+            table_data.append({
+                "code":     code,
+                "libelle":  str(info.get("libelle", ""))[:35],
+                "qty_plan": str(info.get("niv_haut", "—")),
+                "qty":      "—",
+                "pu":       "—",
+                "ht":       "—",
+                "statut":   "absent",
+            })
+
+    _order = {"absent": 0, "epuise": 1, "hors": 2, "ok": 3}
+    table_data.sort(key=lambda x: (_order.get(x["statut"], 9), x["code"]))
+
+    # ── Layout constants ──────────────────────────────────────────────────────
+    COLS       = ["CODE PRODUIT", "LIBELLÉ", "QTÉ PLANNO", "QTÉ INV.", "PU", "MONTANT HT"]
+    COL_FRACS  = [0.20, 0.32, 0.10, 0.10, 0.14, 0.14]   # relative widths (sum=1)
+    COL_ALIGN  = ["left", "left", "center", "center", "center", "center"]
+
+    ROW_H      = 0.36    # inches
+    HEADER_H   = 0.50
+    TITLE_H    = 0.60
+    MARGIN     = 0.25
+    FIG_W      = 11.0
+
+    n       = len(table_data)
+    FIG_H   = MARGIN + TITLE_H + HEADER_H + n * ROW_H + MARGIN
+
+    # ── Colors ────────────────────────────────────────────────────────────────
+    C_DARK   = (0x1F/255, 0x4E/255, 0x79/255)
+    C_MID    = (0x2E/255, 0x75/255, 0xB6/255)
+    C_ALT1   = (1.00, 1.00, 1.00)
+    C_ALT2   = (0.93, 0.95, 0.98)
+    C_ABSENT = (0.97, 0.84, 0.85)
+    C_EPUISE = (0.73, 0.87, 0.98)
+    C_HORS   = (1.00, 0.80, 0.80)
+
+    BG = {"ok": None, "epuise": C_EPUISE, "hors": C_HORS, "absent": C_ABSENT}
+
+    fig = plt.figure(figsize=(FIG_W, FIG_H), facecolor="white")
+    ax  = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, FIG_W)
+    ax.set_ylim(0, FIG_H)
+    ax.axis("off")
+
+    usable_w  = FIG_W - 2 * MARGIN
+    col_widths = [f * usable_w for f in COL_FRACS]
+    col_xs     = []
+    cx = MARGIN
+    for w in col_widths:
+        col_xs.append(cx); cx += w
+
+    def rect(x, y, w, h, fc, ec=(0.82, 0.82, 0.82)):
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x, y), w, h, boxstyle="square,pad=0",
+            facecolor=fc, edgecolor=ec, linewidth=0.4,
+        ))
+
+    def txt(x, y, s, color="black", size=9, bold=False, ha="left"):
+        ax.text(x, y, s, color=color, fontsize=size,
+                fontweight="bold" if bold else "normal",
+                ha=ha, va="center", clip_on=True,
+                fontfamily="DejaVu Sans")
+
+    y = FIG_H - MARGIN
+
+    # Title bar
+    rect(MARGIN, y - TITLE_H, usable_w, TITLE_H, C_DARK, ec=C_DARK)
+    title = f"Machine : {row['Stock Origine']}    |    {row['Nom client']}"
+    txt(FIG_W / 2, y - TITLE_H / 2, title, color="white", size=13, bold=True, ha="center")
+    y -= TITLE_H
+
+    # Header row
+    rect(MARGIN, y - HEADER_H, usable_w, HEADER_H, C_MID, ec=C_MID)
+    for hdr, cx2, cw, ha in zip(COLS, col_xs, col_widths, COL_ALIGN):
+        tx = cx2 + 0.12 if ha == "left" else cx2 + cw / 2
+        txt(tx, y - HEADER_H / 2, hdr, color="white", size=10, bold=True, ha=ha)
+    y -= HEADER_H
+
+    # Data rows
+    for i, rd in enumerate(table_data):
+        st_key = rd["statut"]
+        bg = BG.get(st_key) or (C_ALT1 if i % 2 == 0 else C_ALT2)
+        rect(MARGIN, y - ROW_H, usable_w, ROW_H, bg)
+
+        vals = [rd["code"], rd["libelle"], rd["qty_plan"], rd["qty"], rd["pu"], rd["ht"]]
+        for val, cx2, cw, ha in zip(vals, col_xs, col_widths, COL_ALIGN):
+            tx    = cx2 + 0.12 if ha == "left" else cx2 + cw / 2
+            bold  = st_key in ("absent", "hors") and val == rd["code"]
+            fgcol = (0.12, 0.12, 0.12)
+            txt(tx, y - ROW_H / 2, str(val), color=fgcol, size=9, bold=bold, ha=ha)
+
+        y -= ROW_H
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches=None, facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 def _section_connexion():
@@ -1112,42 +1320,13 @@ def _build_export_rows(
                     fait_par = reappro
 
                     # ── Planno-aware product analysis ──────────────────────
-                    piece       = inv_row["Num Piece"]
-                    mtype_key   = inv_row.get("machine_type", "")
-                    planno      = (planno_index or {}).get(mtype_key)
-                    inv_qtys    = inv_qty_by_piece.get(piece, {})
-                    inv_libs    = inv_lib_by_piece.get(piece, {})
-                    miss_codes  = missing_code_idx.get(piece, set())
-
-                    if planno:
-                        prods         = [inv_libs.get(c, c) for c in miss_codes if c in planno]
-                        hors_planno   = [inv_libs.get(c, c) for c in inv_qtys  if c not in planno]
-                        absents       = [planno[c]["libelle"] or c for c in planno if c not in inv_qtys]
-                        detail_rows   = []
-                        for _c, _info in sorted(planno.items()):
-                            _qi   = inv_qtys.get(_c)
-                            _qp   = _info["niv_haut"]
-                            _ecart = (int(_qi) - _qp) if _qi is not None else -_qp
-                            _stat  = "Absent" if _qi is None else ("Épuisé" if _qi == 0 else "OK")
-                            detail_rows.append({
-                                "code": _c, "libelle": _info["libelle"],
-                                "qty_plan": _qp,
-                                "qty_inv":  int(_qi) if _qi is not None else "Absent",
-                                "ecart":    _ecart, "statut": _stat,
-                            })
-                        for _c in sorted(inv_qtys):
-                            if _c not in planno:
-                                detail_rows.append({
-                                    "code": _c, "libelle": inv_libs.get(_c, ""),
-                                    "qty_plan": "—",
-                                    "qty_inv":  int(inv_qtys[_c]),
-                                    "ecart":    "Hors planno", "statut": "Hors planno",
-                                })
-                    else:
-                        prods       = missing_idx.get(piece, [])
-                        hors_planno = []
-                        absents     = []
-                        detail_rows = []
+                    piece     = inv_row["Num Piece"]
+                    mtype_key = inv_row.get("machine_type", "")
+                    prods, hors_planno, absents, detail_rows = _analyze_planno(
+                        piece, mtype_key, planno_index,
+                        inv_qty_by_piece, inv_lib_by_piece,
+                        missing_code_idx, missing_idx,
+                    )
                 elif code not in codes_fait_today and code in codes_fait_week:
                     total = smin = smax = ecart = machine_type = None
                     statut_plan = "Double passage"
@@ -1177,49 +1356,24 @@ def _build_export_rows(
                                 statut_inv = "Au-dessus max"
                             else:
                                 statut_inv = "OK"
-                            piece      = joker_inv["Num Piece"]
-                            mtype_key  = joker_inv.get("machine_type", "")
-                            planno     = (planno_index or {}).get(mtype_key)
-                            inv_qtys   = inv_qty_by_piece.get(piece, {})
-                            inv_libs   = inv_lib_by_piece.get(piece, {})
-                            miss_codes = missing_code_idx.get(piece, set())
-                            if planno:
-                                prods       = [inv_libs.get(c, c) for c in miss_codes if c in planno]
-                                hors_planno = [inv_libs.get(c, c) for c in inv_qtys if c not in planno]
-                                detail_rows = []
-                                for _c, _info in sorted(planno.items()):
-                                    _qi   = inv_qtys.get(_c)
-                                    _qp   = _info["niv_haut"]
-                                    _ecart = (int(_qi) - _qp) if _qi is not None else -_qp
-                                    _stat  = "Absent" if _qi is None else ("Épuisé" if _qi == 0 else "OK")
-                                    detail_rows.append({
-                                        "code": _c, "libelle": _info["libelle"],
-                                        "qty_plan": _qp,
-                                        "qty_inv":  int(_qi) if _qi is not None else "Absent",
-                                        "ecart": _ecart, "statut": _stat,
-                                    })
-                                for _c in sorted(inv_qtys):
-                                    if _c not in planno:
-                                        detail_rows.append({
-                                            "code": _c, "libelle": inv_libs.get(_c, ""),
-                                            "qty_plan": "—", "qty_inv": int(inv_qtys[_c]),
-                                            "ecart": "Hors planno", "statut": "Hors planno",
-                                        })
-                            else:
-                                prods       = missing_idx.get(piece, [])
-                                hors_planno = []
-                                detail_rows = []
+                            piece     = joker_inv["Num Piece"]
+                            mtype_key = joker_inv.get("machine_type", "")
+                            prods, hors_planno, absents, detail_rows = _analyze_planno(
+                                piece, mtype_key, planno_index,
+                                inv_qty_by_piece, inv_lib_by_piece,
+                                missing_code_idx, missing_idx,
+                            )
                         else:
                             total = smin = smax = ecart = machine_type = None
                             statut_inv = "-"
-                            prods = []; hors_planno = []; detail_rows = []
+                            prods = []; hors_planno = []; absents = []; detail_rows = []
                         statut_plan = f"Joker ({joker_reappro})"
                         fait_par    = joker_reappro
                     else:
                         total = smin = smax = ecart = machine_type = None
                         statut_plan = "Non fait"
                         statut_inv  = "Non fait"
-                        prods       = []; hors_planno = []; detail_rows = []
+                        prods       = []; hors_planno = []; absents = []; detail_rows = []
                         fait_par    = ""
 
                 rows.append({
@@ -1238,6 +1392,7 @@ def _build_export_rows(
                     "statut_inv":     statut_inv,
                     "produits":       prods,
                     "hors_planno":    hors_planno,
+                    "absents":        absents,
                     "detail_rows":    detail_rows,
                     "fait_par":       fait_par if statut_plan.startswith("Joker") else "",
                 })
@@ -1280,20 +1435,20 @@ def _export_excel(
     # Color palette
     C_DARK      = "1F4E79"; C_MID  = "2E75B6"; C_SUB = "BDD7EE"
     C_OK_BG     = "D4EDDA"; C_BAD_BG = "F8D7DA"; C_ORA_BG = "FFF3CD"
-    C_DOUB_BG   = "EDE7F6"; C_GREY_BG = "F5F5F5"
+    C_DOUB_BG   = "EDE7F6"; C_GREY_BG = "F5F5F5"; C_BLUE_BG = "BBDEFB"
     C_OK_FG     = "1E7E34"; C_BAD_FG  = "C0392B"
-    C_ORA_FG    = "E67E22"; C_DOUB_FG = "6C3483"
+    C_ORA_FG    = "E67E22"; C_DOUB_FG = "6C3483"; C_BLUE_FG = "1565C0"
     C_WHITE     = "FFFFFF"
 
     STATUS_STYLE = {
-        "Fait":                  (C_OK_BG,   C_MID,    False),
-        "Non fait":              (C_BAD_BG,  C_BAD_FG, True),
-        "Double passage":        (C_DOUB_BG, C_DOUB_FG,True),
-        "OK":                    (C_OK_BG,   C_OK_FG,  True),
-        "Mal fait":              (C_BAD_BG,  C_BAD_FG, True),
-        "Au-dessus max":         (C_ORA_BG,  C_ORA_FG, True),
-        "-":                     (C_GREY_BG, C_DARK,   False),
-        "Non fait (inv)":        (C_BAD_BG,  C_BAD_FG, True),
+        "Fait":          (C_OK_BG,   C_MID,     False),
+        "Non fait":      (C_BAD_BG,  C_BAD_FG,  True),
+        "Double passage":(C_DOUB_BG, C_DOUB_FG, True),
+        "OK":            (C_OK_BG,   C_OK_FG,   True),
+        "Mal fait":      (C_BLUE_BG, C_BLUE_FG, True),
+        "Au-dessus max": (C_BLUE_BG, C_BLUE_FG, True),
+        "-":             (C_GREY_BG, C_DARK,    False),
+        "Non fait (inv)":(C_BAD_BG,  C_BAD_FG,  True),
     }
     # Joker entries added dynamically below since the reappro name is in the key
 
@@ -1302,7 +1457,7 @@ def _export_excel(
         ("Date",             11), ("Jour",          10), ("Salle",            36),
         ("Machine",           9), ("Type machine",  16), ("Statut planning",  22),
         ("Fait par",         12), ("Montant HT",    13), ("Statut inv.",      14),
-        ("Produits épuisés", 40), ("Hors planno",   40),
+        ("Produits épuisés", 40), ("Hors planno",   40), ("Absents planno",   40),
     ]
     N = len(DETAIL_COLS)
     # Sub-header labels for product detail rows (cols 3-9 reused)
@@ -1346,16 +1501,18 @@ def _export_excel(
         k = (r["reappro"], r["date"], r["jour"])
         if k not in recap:
             recap[k] = {"planif": 0, "fait": 0, "non_fait": 0,
-                        "mal_fait": 0, "au_dessus": 0, "total_eur": 0.0}
+                        "mal_fait": 0, "au_dessus": 0, "total_eur": 0.0,
+                        "has_planno": False}
         d = recap[k]
         sp = r["statut_plan"]
         si = r["statut_inv"]
-        # Toute salle dans le planning (quelle que soit son issue) = planifiée
         d["planif"] += 1
         if sp in ("Fait",) or sp.startswith("Joker"):
             d["fait"] += 1; d["total_eur"] += r["total"] or 0
             if si == "Mal fait":        d["mal_fait"] += 1
             elif si == "Au-dessus max": d["au_dessus"] += 1
+            if r.get("absents") or r.get("hors_planno"):
+                d["has_planno"] = True
         elif sp == "Non fait":
             d["non_fait"] += 1
 
@@ -1365,8 +1522,10 @@ def _export_excel(
         half_not_done = d["non_fait"] >= (d["planif"] / 2)
         if half_not_done:
             bg = C_GREY_BG                                        # >= moitié non faites → neutre
+        elif d["has_planno"]:
+            bg = C_BAD_BG                                         # produits absents/hors planno → rouge
         elif d["mal_fait"] > 0 or d["au_dessus"] > 0:
-            bg = C_BAD_BG                                         # mauvais inventaires → rouge
+            bg = C_BLUE_BG                                        # hors seuils → bleu
         elif d["non_fait"] > 0:
             bg = C_ORA_BG                                         # quelques manquants → orange
         else:
@@ -1455,36 +1614,39 @@ def _export_excel(
             # ── Summary row (salle) ────────────────────────────────────────
             sp = r["statut_plan"]
             si = r["statut_inv"]
+            has_planno_issues = bool(r.get("absents") or r.get("hors_planno"))
 
-            if sp == "Non fait":       row_bg = C_BAD_BG
-            elif sp == "Double passage": row_bg = C_DOUB_BG
-            elif sp.startswith("Joker"): row_bg = "F3E5F5"
-            elif si == "Mal fait":       row_bg = C_BAD_BG
-            elif si == "Au-dessus max":  row_bg = C_ORA_BG
-            elif si == "OK":             row_bg = C_OK_BG
-            else:                        row_bg = C_GREY_BG
+            if sp == "Non fait":           row_bg = C_BAD_BG
+            elif sp == "Double passage":   row_bg = C_DOUB_BG
+            elif sp.startswith("Joker"):   row_bg = "F3E5F5"
+            elif has_planno_issues:        row_bg = C_BAD_BG
+            elif si in ("Mal fait", "Au-dessus max"): row_bg = C_BLUE_BG
+            elif si == "OK":               row_bg = C_OK_BG
+            else:                          row_bg = C_GREY_BG
 
-            prods_str   = " / ".join(r["produits"])     if r["produits"]     else ""
-            hors_str    = " / ".join(r["hors_planno"])  if r.get("hors_planno") else ""
+            prods_str   = " / ".join(r["produits"])           if r.get("produits")     else ""
+            hors_str    = " / ".join(r["hors_planno"])        if r.get("hors_planno")  else ""
+            absents_str = " / ".join(r["absents"])            if r.get("absents")      else ""
             has_prods   = bool(prods_str)
             has_hors    = bool(hors_str)
+            has_absents = bool(absents_str)
             has_detail  = bool(r.get("detail_rows"))
             is_joker    = sp.startswith("Joker")
 
-            ws.row_dimensions[ri].height = 20 if (has_prods or has_hors) else 16
+            ws.row_dimensions[ri].height = 20 if (has_prods or has_hors or has_absents) else 16
 
             values = [
                 r["date"], r["jour"], r["salle"], r["machine"],
                 r["machine_type"] or "-", sp,
                 r.get("fait_par", "") or "",
-                r["total"], si, prods_str, hors_str,
+                r["total"], si, prods_str, hors_str, absents_str,
             ]
 
             for ci, v in enumerate(values, 1):
                 c = ws.cell(ri, ci, v)
                 c.fill = _fill(row_bg); c.font = _font(size=9); c.border = _brd
                 c.alignment = _align("center" if ci in (1, 2, 4, 8) else "left",
-                                     wrap=(ci in (10, 11)))
+                                     wrap=(ci in (10, 11, 12)))
                 if ci == 8 and isinstance(v, (int, float)):
                     c.number_format = "#,##0.00 €"
                 if ci == 6:
@@ -1497,8 +1659,10 @@ def _export_excel(
                     bg2, fg2, bold2 = STATUS_STYLE.get(si, (C_GREY_BG, C_DARK, False))
                     c.fill = _fill(bg2); c.font = _font(bold2, fg2, 9); c.alignment = _align("center")
                 if ci == 10 and has_prods:
-                    c.fill = _fill("FFF3CD"); c.font = _font(True, C_ORA_FG, 9)
+                    c.fill = _fill(C_BLUE_BG); c.font = _font(True, C_BLUE_FG, 9)
                 if ci == 11 and has_hors:
+                    c.fill = _fill("FFCCCC"); c.font = _font(True, C_BAD_FG, 9)
+                if ci == 12 and has_absents:
                     c.fill = _fill("FFCCCC"); c.font = _font(True, C_BAD_FG, 9)
 
             ri += 1
@@ -1506,9 +1670,9 @@ def _export_excel(
             # ── Product detail rows (collapsed, outline_level=1) ───────────
             PROD_STAT_COLORS = {
                 "OK":          ("D4EDDA", "1E7E34"),
-                "Épuisé":      ("FFCCCC", C_BAD_FG),
-                "Absent":      ("F8D7DA", C_BAD_FG),
-                "Hors planno": ("FFF3CD", C_ORA_FG),
+                "Épuisé":      (C_BLUE_BG, C_BLUE_FG),
+                "Absent":      ("FFCCCC",  C_BAD_FG),
+                "Hors planno": ("FFCCCC",  C_BAD_FG),
             }
             for pd_row in r.get("detail_rows", []):
                 bg_d, fg_d = PROD_STAT_COLORS.get(pd_row["statut"], ("F5F5F5", "333333"))
