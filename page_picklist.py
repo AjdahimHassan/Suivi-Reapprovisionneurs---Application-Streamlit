@@ -38,9 +38,13 @@ def parse_picklist(content: bytes) -> pd.DataFrame:
         .fillna(0)
         .astype(int)
     )
-    for col in ["Code Machine", "Nom client", "Libellé produit"]:
-        df[col] = df[col].str.strip().str.strip('"')
-    return df[["Code Machine", "Nom client", "Libellé produit", "A Charger"]]
+    for col in ["Code Machine", "Nom client", "Libellé produit", "Approvisionneur"]:
+        if col in df.columns:
+            df[col] = df[col].str.strip().str.strip('"')
+    cols = ["Code Machine", "Nom client", "Libellé produit", "A Charger"]
+    if "Approvisionneur" in df.columns:
+        cols.append("Approvisionneur")
+    return df[cols]
 
 
 def parse_chargement(content: bytes) -> pd.DataFrame:
@@ -462,17 +466,125 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
 
     # ── Détail par machine ─────────────────────────────────
     with st.expander(f"🔍 Détail par machine", expanded=False):
-        for m in machines:
+
+        # Filtres
+        f1, f2 = st.columns(2)
+        with f1:
+            reapros_dispo = sorted(result["Approvisionneur"].dropna().unique()) if "Approvisionneur" in result.columns else []
+            filtre_reapro = st.multiselect(
+                "Filtrer par réappro",
+                options=reapros_dispo,
+                key="filtre_reapro_detail",
+                placeholder="Tous les réapprovisionneurs",
+            )
+        with f2:
+            salles_dispo = sorted(result["Nom client"].dropna().unique())
+            filtre_salle = st.multiselect(
+                "Filtrer par salle",
+                options=salles_dispo,
+                key="filtre_salle_detail",
+                placeholder="Toutes les salles",
+            )
+
+        # Appliquer les filtres sur la liste des machines
+        machines_detail = machines[:]
+        if filtre_reapro or filtre_salle:
+            mask = pd.Series(True, index=result.index)
+            if filtre_reapro and "Approvisionneur" in result.columns:
+                mask &= result["Approvisionneur"].isin(filtre_reapro)
+            if filtre_salle:
+                mask &= result["Nom client"].isin(filtre_salle)
+            codes_filtres = set(result[mask]["Code Machine"].unique())
+            machines_detail = [m for m in machines_detail if m in codes_filtres]
+
+        # Bouton PNG des problèmes
+        _STATUTS_PROBLEMES = {"Non chargé", "Insuffisant", "Surplus", "Quantité négative"}
+        df_prob = result[
+            result["Code Machine"].isin(machines_detail) &
+            result["Statut"].isin(_STATUTS_PROBLEMES)
+        ]
+        if st.button("🖼️ Générer PNG des problèmes", key="btn_png_problemes"):
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            date_str = datetime.date.today().strftime("%d/%m/%Y")
+
+            if df_prob.empty:
+                fig, ax = plt.subplots(figsize=(7, 2))
+                ax.text(0.5, 0.5, "✅ Aucun problème détecté", ha="center", va="center",
+                        fontsize=14, color="#28a745")
+                ax.axis("off")
+            else:
+                display_cols  = ["Nom client", "Libellé produit", "Picklist", "Réel", "Écart", "Statut"]
+                col_labels    = ["Salle", "Produit", "PL", "Réel", "Écart", "Statut"]
+                col_widths    = [0.20, 0.35, 0.07, 0.07, 0.07, 0.14]
+
+                df_disp = df_prob[display_cols].copy()
+                df_disp["Écart"] = df_disp["Écart"].apply(lambda v: f"+{v}" if v > 0 else str(v))
+
+                n = len(df_disp)
+                fig_h = max(2.5, 0.38 * n + 1.8)
+                fig, ax = plt.subplots(figsize=(14, fig_h))
+                ax.axis("off")
+                fig.patch.set_facecolor("#F7F9FC")
+
+                row_colors = []
+                for _, row in df_disp.iterrows():
+                    hex_c = _COULEURS.get(row["Statut"], "#FFFFFF")
+                    r2 = int(hex_c[1:3], 16) / 255
+                    g2 = int(hex_c[3:5], 16) / 255
+                    b2 = int(hex_c[5:7], 16) / 255
+                    row_colors.append([(r2, g2, b2)] * len(col_labels))
+
+                tbl = ax.table(
+                    cellText=df_disp.values.tolist(),
+                    colLabels=col_labels,
+                    cellColours=row_colors,
+                    colColours=[("#1B3D6F",)] * len(col_labels),
+                    loc="center",
+                    cellLoc="left",
+                )
+                tbl.auto_set_font_size(False)
+                tbl.set_fontsize(8.5)
+                for (r, c), cell in tbl.get_celld().items():
+                    cell.set_edgecolor("#CCCCCC")
+                    if r == 0:
+                        cell.set_text_props(color="white", fontweight="bold")
+                    cell.set_linewidth(0.5)
+                    # manual col width
+                    cell.set_width(col_widths[c])
+
+                ax.set_title(
+                    f"Problèmes détectés — Picklist vs Chargement ({date_str})",
+                    fontsize=12, fontweight="bold", pad=10, color="#1B3D6F",
+                )
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+            plt.close(fig)
+            st.download_button(
+                label="⬇️ Télécharger le PNG",
+                data=buf.getvalue(),
+                file_name=f"problemes_picklist_{datetime.date.today().strftime('%Y%m%d')}.png",
+                mime="image/png",
+                key="dl_png_problemes",
+            )
+
+        st.divider()
+
+        for m in machines_detail:
             df_m = result[result["Code Machine"] == m].copy()
             nom  = df_m["Nom client"].iloc[0] if not df_m.empty else ""
             s    = _stats_machine(df_m)
 
-            # En-tête machine avec badge conformité
-            badge_color = "#d4edda" if s["pct"] >= 75 else ("#f8d7da" if s["pct"] >= 50 else "#c0392b")
+            badge_color = _couleur_conformite(s["pct"])
+            text_color  = "white" if s["pct"] < 35 or s["pct"] > 80 else "#1a1a1a"
             st.markdown(
                 f'<div style="margin:1rem 0 0.3rem 0;">'
                 f'<b style="font-size:1rem;">{m}</b> — {nom} &nbsp;'
-                f'<span style="background:{badge_color};padding:2px 10px;border-radius:10px;font-size:0.85rem;">'
+                f'<span style="background:{badge_color};color:{text_color};padding:2px 10px;'
+                f'border-radius:10px;font-size:0.85rem;">'
                 f'{s["pct"]} % conforme</span></div>',
                 unsafe_allow_html=True,
             )
