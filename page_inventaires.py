@@ -941,6 +941,17 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = Non
                     hide_index=True,
                     height=min(500, 38 + len(df_table) * 35),
                 )
+
+                col_png, _ = st.columns([1, 3])
+                with col_png:
+                    if st.button("📸 Générer fiche PNG", key=f"png_card_{row['Num Piece']}",
+                                 use_container_width=True):
+                        png_bytes = _generate_machine_png(row, df_raw, planno_index)
+                        fname = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
+                        st.download_button(
+                            "⬇️ Télécharger PNG", data=png_bytes, file_name=fname,
+                            mime="image/png", key=f"png_card_dl_{row['Num Piece']}",
+                        )
     else:
         # Pas de planno associé à ce type — petit message discret
         st.caption(f"⬜ Aucun planno théorique associé au type *{row.get('type_label', mtype)}*.")
