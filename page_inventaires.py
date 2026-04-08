@@ -669,9 +669,16 @@ def render():
         st.divider()
 
         # Accordéon par réappro
+        # Include reappros with zero inventories but who had salles planned
+        _reappros_with_inv = set(filtered["Ressource"].unique())
+        _reappros_absent   = {
+            r for r, data in croisement.items()
+            if r not in _reappros_with_inv
+            and any(len(d["manquants"]) > 0 for d in data.values())
+        }
         reappros_liste = (
             [filtre_reappro] if filtre_reappro != "Tous"
-            else sorted(filtered["Ressource"].unique())
+            else sorted(_reappros_with_inv | _reappros_absent)
         )
 
         for reappro in reappros_liste:
