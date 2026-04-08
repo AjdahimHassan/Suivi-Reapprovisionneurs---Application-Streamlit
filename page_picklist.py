@@ -12,6 +12,7 @@ Fichiers :
                Quantité, ...
 """
 
+import colorsys
 import datetime
 import io
 
@@ -35,7 +36,6 @@ def parse_picklist(content: bytes) -> pd.DataFrame:
     df["A Charger"] = (
         pd.to_numeric(df["A Charger"].str.strip(), errors="coerce")
         .fillna(0)
-        .clip(lower=0)
         .astype(int)
     )
     for col in ["Code Machine", "Nom client", "Libellé produit"]:
@@ -84,25 +84,29 @@ def parse_chargement(content: bytes) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _COULEURS = {
-    "Conforme":       "#d4edda",
-    "Insuffisant":    "#f8d7da",
-    "Non chargé":     "#c0392b",
-    "Surplus":        "#ffeeba",
-    "Non prévu":      "#d1ecf1",
-    "Rien à charger": "#f4f4f4",
+    "Conforme":          "#d4edda",
+    "Insuffisant":       "#f8d7da",
+    "Non chargé":        "#c0392b",
+    "Surplus":           "#ffeeba",
+    "Non prévu":         "#d1ecf1",
+    "Rien à charger":    "#f4f4f4",
+    "Quantité négative": "#00B0F0",
 }
 
 _ORDRE_STATUT = {
-    "Non chargé":     0,
-    "Insuffisant":    1,
-    "Surplus":        2,
-    "Non prévu":      3,
-    "Conforme":       4,
-    "Rien à charger": 5,
+    "Non chargé":        0,
+    "Insuffisant":       1,
+    "Surplus":           2,
+    "Non prévu":         3,
+    "Conforme":          4,
+    "Rien à charger":    5,
+    "Quantité négative": 6,
 }
 
 
 def _statut(picklist: int, reel: int) -> str:
+    if picklist < 0:
+        return "Quantité négative"
     if picklist == 0 and reel == 0:
         return "Rien à charger"
     if picklist == 0 and reel > 0:
@@ -114,6 +118,21 @@ def _statut(picklist: int, reel: int) -> str:
     if reel > picklist:
         return "Surplus"
     return "Insuffisant"
+
+
+_COMMENTAIRES = {
+    "Conforme":          "Chargement conforme à la picklist",
+    "Insuffisant":       "Moins chargé que prévu",
+    "Non chargé":        "Produit prévu mais absent du chargement",
+    "Surplus":           "Plus chargé que prévu",
+    "Non prévu":         "Chargé mais non prévu dans la picklist",
+    "Rien à charger":    "Rien à charger, rien de chargé",
+    "Quantité négative": "Quantité négative dans la picklist",
+}
+
+
+def _commentaire(statut: str) -> str:
+    return _COMMENTAIRES.get(statut, "")
 
 
 def analyser(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame) -> pd.DataFrame:
@@ -129,23 +148,23 @@ def analyser(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame) -> pd.DataF
         pick,
         charg[["Code Machine", "Libellé produit", "Réel", "Nom client charg"]],
         on=["Code Machine", "Libellé produit"],
-        how="outer",
+        how="left",
     ).fillna({"Picklist": 0, "Réel": 0, "Nom client pick": "", "Nom client charg": ""})
 
     merged["Picklist"] = merged["Picklist"].astype(int)
     merged["Réel"]     = merged["Réel"].astype(int)
     merged["Écart"]    = merged["Réel"] - merged["Picklist"]
-    merged["Statut"]   = merged.apply(lambda r: _statut(r["Picklist"], r["Réel"]), axis=1)
+    merged["Statut"]      = merged.apply(lambda r: _statut(r["Picklist"], r["Réel"]), axis=1)
+    merged["Commentaire"] = merged["Statut"].map(_commentaire)
     # Coalesce nom client
     merged["Nom client"] = merged["Nom client pick"].where(
         merged["Nom client pick"] != "", merged["Nom client charg"]
     )
 
-    merged["_ordre"] = merged["Statut"].map(_ORDRE_STATUT)
     merged = (
         merged
-        .sort_values(["Code Machine", "_ordre", "Libellé produit"])
-        .drop(columns=["_ordre", "Nom client pick", "Nom client charg"])
+        .sort_values(["Nom client", "Libellé produit"])
+        .drop(columns=["Nom client pick", "Nom client charg"])
         .reset_index(drop=True)
     )
     return merged
@@ -182,7 +201,7 @@ def _styler(df: pd.DataFrame):
     def ligne(row):
         statut = row["Statut"]
         bg     = _COULEURS.get(statut, "")
-        color  = "color: white;" if statut == "Non chargé" else ""
+        color  = "color: white;" if statut in ("Non chargé", "Quantité négative") else ""
         style  = f"background-color: {bg}; {color}" if bg else ""
         return [style] * len(row)
 
@@ -198,6 +217,22 @@ def _styler(df: pd.DataFrame):
     return styled
 
 
+def _couleur_conformite(pct: int) -> str:
+    """Dégradé continu rouge→orange→vert selon le % de conformité (0-100)."""
+    pct = max(0, min(100, pct))
+    if pct <= 50:
+        t = pct / 50
+        r = int(220 + (255 - 220) * t)
+        g = int(53  + (176 - 53)  * t)
+        b = int(69  + (0   - 69)  * t)
+    else:
+        t = (pct - 50) / 50
+        r = int(255 + (40  - 255) * t)
+        g = int(176 + (167 - 176) * t)
+        b = int(0   + (69  - 0)   * t)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
 _LEGENDE = """
 <div style="display:flex;gap:0.8rem;flex-wrap:wrap;margin:0.4rem 0 1rem 0;font-size:0.80rem;">
   <span style="background:#d4edda;padding:2px 8px;border-radius:4px;">✅ Conforme</span>
@@ -206,6 +241,7 @@ _LEGENDE = """
   <span style="background:#ffeeba;padding:2px 8px;border-radius:4px;">⚠️ Surplus</span>
   <span style="background:#d1ecf1;padding:2px 8px;border-radius:4px;">📋 Non prévu</span>
   <span style="background:#f4f4f4;padding:2px 8px;border-radius:4px;">— Rien à charger</span>
+  <span style="background:#00B0F0;color:white;padding:2px 8px;border-radius:4px;">🔵 Quantité négative</span>
 </div>
 """
 
@@ -218,7 +254,11 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
       - Sheet par machine: détail produits pour chaque machine
     """
     output  = io.BytesIO()
-    machines = sorted(result_df["Code Machine"].unique())
+    machines = (
+        result_df.drop_duplicates("Code Machine")
+        .sort_values("Nom client")["Code Machine"]
+        .tolist()
+    )
 
     with xlsxwriter.Workbook(output, {"in_memory": True}) as wb:
         # ── Formats ──────────────────────────────────────────
@@ -230,12 +270,13 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
             })
 
         fmts = {
-            "Conforme":       fmt("#d4edda"),
-            "Insuffisant":    fmt("#f8d7da"),
-            "Non chargé":     fmt("#c0392b", font="#FFFFFF"),
-            "Surplus":        fmt("#ffeeba"),
-            "Non prévu":      fmt("#d1ecf1"),
-            "Rien à charger": fmt("#f4f4f4"),
+            "Conforme":          fmt("#d4edda"),
+            "Insuffisant":       fmt("#f8d7da"),
+            "Non chargé":        fmt("#c0392b", font="#FFFFFF"),
+            "Surplus":           fmt("#ffeeba"),
+            "Non prévu":         fmt("#d1ecf1"),
+            "Rien à charger":    fmt("#f4f4f4"),
+            "Quantité négative": fmt("#00B0F0", font="#FFFFFF"),
         }
         header_fmt = fmt("#1B3D6F", font="#FFFFFF", bold=True)
         default_fmt = fmt("#FFFFFF")
@@ -280,29 +321,37 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
         for c, h in enumerate(headers_recap):
             ws_recap.write(0, c, h, header_fmt)
         for r, (row, statut) in enumerate(zip(rows_recap, recap_statuts), start=1):
-            row_fmt = fmts.get(statut, default_fmt)
+            try:
+                pct = int(str(row[-1]).replace("%", "").strip())
+            except Exception:
+                pct = 0
+            row_fmt = wb.add_format({
+                "bg_color": _couleur_conformite(pct),
+                "border": 1, "border_color": "#CCCCCC", "valign": "vcenter",
+            })
             for c, val in enumerate(row):
                 ws_recap.write(r, c, val, row_fmt)
         for c, w in enumerate([14, 38, 14, 13, 14, 10, 11, 13]):
             ws_recap.set_column(c, c, w)
 
         # ── Sheet Détail (toutes machines) ────────────────────
-        headers_det = ["Machine", "Client", "Produit", "Picklist", "Réel", "Écart", "Statut"]
-        widths_det  = [14, 38, 38, 10, 8, 8, 15]
+        headers_det = ["Machine", "Client", "Produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
+        widths_det  = [14, 38, 38, 10, 8, 8, 18, 42]
         rows_det = []
-        for _, row in result_df.sort_values(["Code Machine", "Libellé produit"]).iterrows():
+        for _, row in result_df.sort_values(["Nom client", "Libellé produit"]).iterrows():
             ecart = row["Écart"]
             rows_det.append([
                 row["Code Machine"], row["Nom client"], row["Libellé produit"],
                 row["Picklist"], row["Réel"],
                 f"+{ecart}" if ecart > 0 else str(ecart),
                 row["Statut"],
+                row.get("Commentaire", ""),
             ])
         _ecrire_feuille(wb.add_worksheet("Détail"), headers_det, rows_det, widths_det, statut_col_idx=6)
 
         # ── Une sheet par machine ─────────────────────────────
-        headers_m = ["Produit", "Picklist", "Réel", "Écart", "Statut"]
-        widths_m  = [40, 10, 8, 8, 15]
+        headers_m = ["Produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
+        widths_m  = [40, 10, 8, 8, 18, 42]
         for m in machines:
             df_m = result_df[result_df["Code Machine"] == m].sort_values("Libellé produit")
             ws_m = wb.add_worksheet(m[:31])
@@ -319,6 +368,7 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
                     row["Libellé produit"], row["Picklist"], row["Réel"],
                     f"+{ecart}" if ecart > 0 else str(ecart),
                     statut,
+                    row.get("Commentaire", ""),
                 ]
                 for c, val in enumerate(vals):
                     ws_m.write(r, c, val, row_fmt)
@@ -330,7 +380,23 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
 
 def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
     result = analyser(picklist_df, chargement_df)
-    machines = sorted(result["Code Machine"].unique())
+
+    # ── Filtre ruptures ────────────────────────────────────
+    tous_produits = sorted(result["Libellé produit"].unique())
+    ruptures = st.multiselect(
+        "🚫 Produits en rupture (exclure de l'analyse et de l'export)",
+        options=tous_produits,
+        key="ruptures_picklist",
+        placeholder="Sélectionner les produits à exclure...",
+    )
+    if ruptures:
+        result = result[~result["Libellé produit"].isin(ruptures)].reset_index(drop=True)
+
+    machines = (
+        result.drop_duplicates("Code Machine")
+        .sort_values("Nom client")["Code Machine"]
+        .tolist()
+    )
 
     # ── KPIs globaux ───────────────────────────────────────
     a_charger_global = result[result["Picklist"] > 0]
@@ -379,10 +445,12 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
         df_recap = pd.DataFrame(rows)
 
         def _style_recap(row):
-            icone = row[""]
-            if icone == "🚫":  bg = "#c0392b"; color = "color:white;"
-            elif icone == "❌": bg = "#f8d7da"; color = ""
-            else:               bg = "#d4edda"; color = ""
+            try:
+                pct = int(str(row["Conformité"]).replace("%", "").strip())
+            except Exception:
+                pct = 0
+            bg = _couleur_conformite(pct)
+            color = "color:white;" if pct < 35 or pct > 80 else "color:#1a1a1a;"
             return [f"background-color:{bg};{color}"] * len(row)
 
         st.dataframe(
@@ -409,7 +477,7 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                 unsafe_allow_html=True,
             )
 
-            cols = ["Libellé produit", "Picklist", "Réel", "Écart", "Statut"]
+            cols = ["Libellé produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
             st.dataframe(
                 _styler(df_m[cols].rename(columns={"Libellé produit": "Produit"})),
                 use_container_width=True,
