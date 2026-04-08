@@ -497,81 +497,18 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
             codes_filtres = set(result[mask]["Code Machine"].unique())
             machines_detail = [m for m in machines_detail if m in codes_filtres]
 
-        # Bouton PNG des problèmes
-        _STATUTS_PROBLEMES = {"Non chargé", "Insuffisant", "Surplus", "Quantité négative"}
-        df_prob = result[
-            result["Code Machine"].isin(machines_detail) &
-            result["Statut"].isin(_STATUTS_PROBLEMES)
-        ]
-        if st.button("🖼️ Générer PNG des problèmes", key="btn_png_problemes"):
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-
-            date_str = datetime.date.today().strftime("%d/%m/%Y")
-
-            if df_prob.empty:
-                fig, ax = plt.subplots(figsize=(7, 2))
-                ax.text(0.5, 0.5, "✅ Aucun problème détecté", ha="center", va="center",
-                        fontsize=14, color="#28a745")
-                ax.axis("off")
-            else:
-                display_cols  = ["Nom client", "Libellé produit", "Picklist", "Réel", "Écart", "Statut"]
-                col_labels    = ["Salle", "Produit", "PL", "Réel", "Écart", "Statut"]
-                col_widths    = [0.20, 0.35, 0.07, 0.07, 0.07, 0.14]
-
-                df_disp = df_prob[display_cols].copy()
-                df_disp["Écart"] = df_disp["Écart"].apply(lambda v: f"+{v}" if v > 0 else str(v))
-
-                n = len(df_disp)
-                fig_h = max(2.5, 0.38 * n + 1.8)
-                fig, ax = plt.subplots(figsize=(14, fig_h))
-                ax.axis("off")
-                fig.patch.set_facecolor("#F7F9FC")
-
-                row_colors = []
-                for _, row in df_disp.iterrows():
-                    hex_c = _COULEURS.get(row["Statut"], "#FFFFFF")
-                    r2 = int(hex_c[1:3], 16) / 255
-                    g2 = int(hex_c[3:5], 16) / 255
-                    b2 = int(hex_c[5:7], 16) / 255
-                    row_colors.append([(r2, g2, b2)] * len(col_labels))
-
-                tbl = ax.table(
-                    cellText=df_disp.values.tolist(),
-                    colLabels=col_labels,
-                    cellColours=row_colors,
-                    colColours=[("#1B3D6F",)] * len(col_labels),
-                    loc="center",
-                    cellLoc="left",
-                )
-                tbl.auto_set_font_size(False)
-                tbl.set_fontsize(8.5)
-                for (r, c), cell in tbl.get_celld().items():
-                    cell.set_edgecolor("#CCCCCC")
-                    if r == 0:
-                        cell.set_text_props(color="white", fontweight="bold")
-                    cell.set_linewidth(0.5)
-                    # manual col width
-                    cell.set_width(col_widths[c])
-
-                ax.set_title(
-                    f"Problèmes détectés — Picklist vs Chargement ({date_str})",
-                    fontsize=12, fontweight="bold", pad=10, color="#1B3D6F",
-                )
-
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
-            plt.close(fig)
-            st.download_button(
-                label="⬇️ Télécharger le PNG",
-                data=buf.getvalue(),
-                file_name=f"problemes_picklist_{datetime.date.today().strftime('%Y%m%d')}.png",
-                mime="image/png",
-                key="dl_png_problemes",
-            )
-
         st.divider()
+
+        _STATUTS_PROBLEMES = {"Non chargé", "Insuffisant", "Surplus", "Quantité négative"}
+
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        def _hex_to_rgb(hex_c: str):
+            return (int(hex_c[1:3], 16) / 255,
+                    int(hex_c[3:5], 16) / 255,
+                    int(hex_c[5:7], 16) / 255)
 
         for m in machines_detail:
             df_m = result[result["Code Machine"] == m].copy()
@@ -596,6 +533,67 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                 height=min(40 + 35 * len(df_m), 400),
                 hide_index=True,
             )
+
+            # ── PNG des problèmes pour cette salle ────────────
+            df_prob = df_m[df_m["Statut"].isin(_STATUTS_PROBLEMES)]
+            if st.button(f"🖼️ PNG problèmes — {nom or m}", key=f"btn_png_{m}"):
+                date_str = datetime.date.today().strftime("%d/%m/%Y")
+                display_cols = ["Libellé produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
+                col_labels   = ["Produit", "PL", "Réel", "Écart", "Statut", "Commentaire"]
+                col_widths   = [0.32, 0.07, 0.07, 0.07, 0.16, 0.31]
+
+                if df_prob.empty:
+                    fig, ax = plt.subplots(figsize=(6, 1.8))
+                    ax.text(0.5, 0.5, "✅ Aucun problème pour cette salle",
+                            ha="center", va="center", fontsize=13, color="#28a745")
+                    ax.axis("off")
+                else:
+                    df_disp = df_prob[display_cols].copy()
+                    df_disp["Écart"] = df_disp["Écart"].apply(
+                        lambda v: f"+{v}" if v > 0 else str(v)
+                    )
+                    n = len(df_disp)
+                    fig, ax = plt.subplots(figsize=(13, max(2.0, 0.40 * n + 1.6)))
+                    ax.axis("off")
+                    fig.patch.set_facecolor("#F7F9FC")
+
+                    row_colors = [
+                        [_hex_to_rgb(_COULEURS.get(row["Statut"], "#FFFFFF"))] * len(col_labels)
+                        for _, row in df_disp.iterrows()
+                    ]
+
+                    tbl = ax.table(
+                        cellText=df_disp.values.tolist(),
+                        colLabels=col_labels,
+                        cellColours=row_colors,
+                        colColours=["#1B3D6F"] * len(col_labels),
+                        loc="center",
+                        cellLoc="left",
+                    )
+                    tbl.auto_set_font_size(False)
+                    tbl.set_fontsize(8.5)
+                    for (r, c), cell in tbl.get_celld().items():
+                        cell.set_edgecolor("#CCCCCC")
+                        cell.set_linewidth(0.5)
+                        cell.set_width(col_widths[c])
+                        if r == 0:
+                            cell.set_text_props(color="white", fontweight="bold")
+
+                    ax.set_title(
+                        f"Problèmes — {nom or m}  ({date_str})",
+                        fontsize=11, fontweight="bold", pad=10, color="#1B3D6F",
+                    )
+
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                plt.close(fig)
+                st.download_button(
+                    label="⬇️ Télécharger",
+                    data=buf.getvalue(),
+                    file_name=f"problemes_{m}_{datetime.date.today().strftime('%Y%m%d')}.png",
+                    mime="image/png",
+                    key=f"dl_png_{m}",
+                )
 
     # ── Export Excel ───────────────────────────────────────
     st.divider()
