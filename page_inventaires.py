@@ -572,28 +572,35 @@ def render():
 
     # ── KPIs globaux ────────────────────────
     st.divider()
-    nb_total = len(summary)
     nb_ok    = (summary["statut_emoji"] == "🟢").sum()
-    nb_bad   = (summary["statut_emoji"] == "🔴").sum()
     nb_over  = (summary["statut_emoji"] == "🟠").sum()
-    taux_ok  = round(nb_ok / nb_total * 100, 1) if nb_total else 0
 
     total_inv_manquants = sum(
         len(d["manquants"])
         for r_data in croisement.values()
         for d in r_data.values()
     )
+    nb_planifie = sum(
+        d["nb_planifie"]
+        for r_data in croisement.values()
+        for d in r_data.values()
+    )
+    nb_fait = sum(
+        d["nb_fait"]
+        for r_data in croisement.values()
+        for d in r_data.values()
+    )
+    taux_fait = round(nb_fait / nb_planifie * 100, 1) if nb_planifie else 0
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("📋 Inventaires réalisés",  nb_total)
-    k2.metric("✅ OK",                    nb_ok,   delta=f"{taux_ok}%")
-    k3.metric("🔴 Mal faits",             nb_bad,
-              delta=f"-{round(nb_bad/nb_total*100,1)}%" if nb_total else None,
-              delta_color="inverse")
-    k4.metric("🟠 Au-dessus max",         nb_over)
-    k5.metric("📭 Non faits (planning)",  total_inv_manquants,
+    k1.metric("📋 Planifiées / Faites", f"{nb_fait} / {nb_planifie}",
+              delta=f"{taux_fait}%")
+    k2.metric("✅ OK",                  nb_ok)
+    k3.metric("🔵 Hors seuils",         nb_over)
+    k4.metric("📭 Non faites",          total_inv_manquants,
               delta=f"-{total_inv_manquants}" if total_inv_manquants else None,
               delta_color="inverse")
+    k5.metric("📊 Inventaires chargés", len(summary))
 
     st.divider()
 
