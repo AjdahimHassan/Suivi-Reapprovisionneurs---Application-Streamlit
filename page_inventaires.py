@@ -1056,14 +1056,18 @@ def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: di
         qty  = int(r["qty"])
         ht   = float(r["ht"])
         pu   = ht / qty if qty > 0 else None
-        qty_plan = planno[code]["niv_haut"] if planno and code in planno else "—"
+        qty_plan = planno[code]["niv_haut"] if planno and code in planno else None
+        if qty_plan is not None:
+            ecart = qty - qty_plan
+            ecart_str = f"{ecart:+d}" if ecart != 0 else "✓"
+        else:
+            ecart_str = "—"
         table_data.append({
             "code":     code,
             "libelle":  str(r["libelle"])[:35],
-            "qty_plan": str(qty_plan),
+            "qty_plan": str(qty_plan) if qty_plan is not None else "—",
             "qty":      str(qty),
-            "pu":       f"{pu:.2f} €" if pu else "—",
-            "ht":       f"{ht:.2f} €",
+            "ecart":    ecart_str,
             "statut":   _statut(code, qty),
         })
 
@@ -1075,8 +1079,7 @@ def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: di
                 "libelle":  str(info.get("libelle", ""))[:35],
                 "qty_plan": str(info.get("niv_haut", "—")),
                 "qty":      "—",
-                "pu":       "—",
-                "ht":       "—",
+                "ecart":    "—",
                 "statut":   "absent",
             })
 
@@ -1087,9 +1090,9 @@ def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: di
     table_data.sort(key=lambda x: (_order.get(x["statut"], 9), x["code"]))
 
     # ── Layout constants ──────────────────────────────────────────────────────
-    COLS       = ["CODE PRODUIT", "LIBELLÉ", "QTÉ PLANNO", "QTÉ INV.", "PU", "MONTANT HT"]
-    COL_FRACS  = [0.20, 0.32, 0.10, 0.10, 0.14, 0.14]   # relative widths (sum=1)
-    COL_ALIGN  = ["left", "left", "center", "center", "center", "center"]
+    COLS       = ["CODE PRODUIT", "LIBELLÉ", "QTÉ PLANNO", "QTÉ INV.", "ÉCART"]
+    COL_FRACS  = [0.22, 0.38, 0.13, 0.13, 0.14]
+    COL_ALIGN  = ["left", "left", "center", "center", "center"]
 
     ROW_H      = 0.36    # inches
     HEADER_H   = 0.50
@@ -1157,7 +1160,7 @@ def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: di
         bg = BG.get(st_key) or (C_ALT1 if i % 2 == 0 else C_ALT2)
         rect(MARGIN, y - ROW_H, usable_w, ROW_H, bg)
 
-        vals = [rd["code"], rd["libelle"], rd["qty_plan"], rd["qty"], rd["pu"], rd["ht"]]
+        vals = [rd["code"], rd["libelle"], rd["qty_plan"], rd["qty"], rd["ecart"]]
         for val, cx2, cw, ha in zip(vals, col_xs, col_widths, COL_ALIGN):
             tx    = cx2 + 0.12 if ha == "left" else cx2 + cw / 2
             bold  = st_key in ("absent", "hors") and val == rd["code"]
