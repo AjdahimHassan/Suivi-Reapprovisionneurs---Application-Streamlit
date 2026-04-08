@@ -534,21 +534,20 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                 hide_index=True,
             )
 
-            # ── PNG des problèmes pour cette salle ────────────
-            df_prob = df_m[df_m["Statut"].isin(_STATUTS_PROBLEMES)]
-            if st.button(f"🖼️ PNG problèmes — {nom or m}", key=f"btn_png_{m}"):
+            # ── PNG complet pour cette salle ──────────────────
+            if st.button(f"🖼️ PNG — {nom or m}", key=f"btn_png_{m}"):
                 date_str = datetime.date.today().strftime("%d/%m/%Y")
                 display_cols = ["Libellé produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
                 col_labels   = ["Produit", "PL", "Réel", "Écart", "Statut", "Commentaire"]
                 col_widths   = [0.32, 0.07, 0.07, 0.07, 0.16, 0.31]
 
-                if df_prob.empty:
+                if df_m.empty:
                     fig, ax = plt.subplots(figsize=(6, 1.8))
-                    ax.text(0.5, 0.5, "✅ Aucun problème pour cette salle",
-                            ha="center", va="center", fontsize=13, color="#28a745")
+                    ax.text(0.5, 0.5, "Aucune donnée pour cette salle",
+                            ha="center", va="center", fontsize=13)
                     ax.axis("off")
                 else:
-                    df_disp = df_prob[display_cols].copy()
+                    df_disp = df_m[display_cols].copy()
                     df_disp["Écart"] = df_disp["Écart"].apply(
                         lambda v: f"+{v}" if v > 0 else str(v)
                     )
