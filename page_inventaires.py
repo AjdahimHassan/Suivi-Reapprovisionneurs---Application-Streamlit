@@ -677,8 +677,17 @@ def render():
         for reappro in reappros_liste:
             sub = filtered[filtered["Ressource"] == reappro]
             nb_ok_r   = (sub["statut_emoji"] == "🟢").sum()
-            nb_bad_r  = (sub["statut_emoji"] == "🔴").sum()
             nb_over_r = (sub["statut_emoji"] == "🟠").sum()
+            nb_bad_r  = 0
+            for _, _r in sub.iterrows():
+                _planno = (planno_index or {}).get(_r.get("machine_type", ""))
+                if _planno:
+                    _inv_qty = df_raw[df_raw["Num Piece"] == _r["Num Piece"]].groupby("Code produit")["Quantité"].sum().to_dict()
+                    _has_issues = any(c not in _inv_qty for c in _planno) or any(c not in _planno for c in _inv_qty)
+                else:
+                    _has_issues = False
+                if _has_issues or _r["statut_emoji"] == "🔴":
+                    nb_bad_r += 1
             total_r   = sub["total"].sum()
             inv_manq_r = sum(len(d["manquants"]) for d in croisement.get(reappro, {}).values())
             jokers_r   = sum(len(d.get("jokers", [])) for d in croisement.get(reappro, {}).values())
