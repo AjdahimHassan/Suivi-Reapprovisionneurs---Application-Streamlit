@@ -956,16 +956,20 @@ def _machine_card(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = Non
                     height=min(500, 38 + len(df_table) * 35),
                 )
 
-                col_png, _ = st.columns([1, 3])
-                with col_png:
-                    if st.button("📸 Générer fiche PNG", key=f"png_card_{row['Num Piece']}",
-                                 use_container_width=True):
-                        png_bytes = _generate_machine_png(row, df_raw, planno_index)
-                        fname = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
-                        st.download_button(
-                            "⬇️ Télécharger PNG", data=png_bytes, file_name=fname,
-                            mime="image/png", key=f"png_card_dl_{row['Num Piece']}",
-                        )
+                col_chk, col_dl, _ = st.columns([2, 2, 2])
+                with col_chk:
+                    show_hors_c = st.checkbox(
+                        "Inclure hors planno", value=True,
+                        key=f"png_hors_card_{row['Num Piece']}",
+                    )
+                with col_dl:
+                    _png_c = _generate_machine_png(row, df_raw, planno_index, show_hors_c)
+                    _fname_c = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
+                    st.download_button(
+                        "📥 Télécharger fiche PNG", data=_png_c, file_name=_fname_c,
+                        mime="image/png", key=f"png_dl_card_{row['Num Piece']}",
+                        use_container_width=True,
+                    )
     else:
         # Pas de planno associé à ce type — petit message discret
         st.caption(f"⬜ Aucun planno théorique associé au type *{row.get('type_label', mtype)}*.")
@@ -1001,19 +1005,23 @@ def _machine_detail_full(row: pd.Series, df_raw: pd.DataFrame, planno_index: dic
         height=min(500, 38 + len(sub) * 35),
     )
 
-    col_btn, _ = st.columns([1, 3])
-    with col_btn:
-        if st.button("📸 Générer fiche PNG", key=f"png_btn_{row['Num Piece']}",
-                     use_container_width=True):
-            png_bytes = _generate_machine_png(row, df_raw, planno_index)
-            fname = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
-            st.download_button(
-                "⬇️ Télécharger PNG", data=png_bytes, file_name=fname,
-                mime="image/png", key=f"png_dl_{row['Num Piece']}",
-            )
+    col_chk, col_dl, _ = st.columns([2, 2, 2])
+    with col_chk:
+        show_hors_d = st.checkbox(
+            "Inclure hors planno", value=True,
+            key=f"png_hors_det_{row['Num Piece']}",
+        )
+    with col_dl:
+        _png_d = _generate_machine_png(row, df_raw, planno_index, show_hors_d)
+        _fname_d = f"{row['Stock Origine']}_{row['Nom client'].replace(' ', '_')}.png"
+        st.download_button(
+            "📥 Télécharger fiche PNG", data=_png_d, file_name=_fname_d,
+            mime="image/png", key=f"png_dl_det_{row['Num Piece']}",
+            use_container_width=True,
+        )
 
 
-def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None) -> bytes:
+def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: dict = None, show_hors_planno: bool = True) -> bytes:
     """Génère une fiche PNG stylée (style planogramme) pour la machine."""
     import matplotlib
     matplotlib.use("Agg")
@@ -1071,6 +1079,9 @@ def _generate_machine_png(row: pd.Series, df_raw: pd.DataFrame, planno_index: di
                 "ht":       "—",
                 "statut":   "absent",
             })
+
+    if not show_hors_planno:
+        table_data = [r for r in table_data if r["statut"] != "hors"]
 
     _order = {"absent": 0, "epuise": 1, "hors": 2, "ok": 3}
     table_data.sort(key=lambda x: (_order.get(x["statut"], 9), x["code"]))
