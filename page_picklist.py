@@ -216,7 +216,7 @@ def _styler(df: pd.DataFrame):
         if val < 0:  return "color: #721c24;"
         return "color: #155724;"
 
-    styled = styled.applymap(ecart_color, subset=["Écart"])
+    styled = styled.map(ecart_color, subset=["Écart"])
     styled = styled.format({"Écart": _formater_ecart})
     return styled
 
