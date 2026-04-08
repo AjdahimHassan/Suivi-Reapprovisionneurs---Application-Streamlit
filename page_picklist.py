@@ -553,7 +553,14 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                         lambda v: f"+{v}" if v > 0 else str(v)
                     )
                     n = len(df_disp)
-                    fig, ax = plt.subplots(figsize=(13, max(2.0, 0.40 * n + 1.6)))
+                    row_h    = 0.55          # hauteur par ligne (pouces)
+                    header_h = 0.65
+                    title_h  = 0.50
+                    fig_h    = row_h * n + header_h + title_h + 0.3
+                    fig_w    = 13
+
+                    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                    ax.set_position([0, 0, 1, 1])   # axes plein cadre
                     ax.axis("off")
                     fig.patch.set_facecolor("#F7F9FC")
 
@@ -562,30 +569,43 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                         for _, row in df_disp.iterrows()
                     ]
 
+                    # espace réservé au titre en fraction de hauteur figure
+                    title_frac  = title_h  / fig_h
+                    table_y_top = 1.0 - title_frac - 0.02   # départ haut du tableau
+
                     tbl = ax.table(
                         cellText=df_disp.values.tolist(),
                         colLabels=col_labels,
                         cellColours=row_colors,
                         colColours=["#1B3D6F"] * len(col_labels),
-                        loc="center",
+                        loc="upper center",
                         cellLoc="left",
+                        bbox=[0.0, 0.0, 1.0, table_y_top],
                     )
                     tbl.auto_set_font_size(False)
-                    tbl.set_fontsize(8.5)
+                    tbl.set_fontsize(10)
+
+                    # hauteur uniforme des cellules
+                    cell_h = 1.0 / (n + 1)
                     for (r, c), cell in tbl.get_celld().items():
                         cell.set_edgecolor("#CCCCCC")
-                        cell.set_linewidth(0.5)
+                        cell.set_linewidth(0.6)
                         cell.set_width(col_widths[c])
+                        cell.set_height(cell_h)
+                        cell.PAD = 0.06
                         if r == 0:
                             cell.set_text_props(color="white", fontweight="bold")
 
                     ax.set_title(
                         f"Problèmes — {nom or m}  ({date_str})",
-                        fontsize=11, fontweight="bold", pad=10, color="#1B3D6F",
+                        fontsize=12, fontweight="bold", pad=8,
+                        color="#1B3D6F", loc="left", x=0.01,
+                        y=table_y_top + 0.01,
                     )
 
                 buf = io.BytesIO()
-                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150,
+                            facecolor=fig.get_facecolor())
                 plt.close(fig)
                 st.download_button(
                     label="⬇️ Télécharger",
