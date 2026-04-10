@@ -497,6 +497,9 @@ def render():
                                     include_vendredi=include_vend,
                                 )
                             st.session_state[f"cr_inv_text_{zone}"] = generated
+                            # Also pre-fill the text_area widget state so the
+                            # value= parameter isn't ignored on the next rerun
+                            st.session_state[f"cr_txt_{titre}_{zone}"] = generated
                             st.rerun()
 
                 inv_default = st.session_state.get(f"cr_inv_text_{zone}",
