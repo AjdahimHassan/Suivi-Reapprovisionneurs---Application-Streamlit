@@ -216,14 +216,15 @@ def _import_reappros(raw_bytes: bytes) -> tuple[int, list[str]]:
 # ────────────────────────────────────────────────────────
 
 def _build_inventaire_cr_text(
-    csv_bytes: bytes,
+    done_records: list,
     plannings_mongo: dict,
     reappros_df: pd.DataFrame,
     zone: str,
     include_vendredi: bool = False,
 ) -> str:
     """
-    Génère le texte de la section Inventaire du CR depuis un export ERP CSV.
+    Génère le texte de la section Inventaire du CR depuis les enregistrements BDD.
+    done_records : [{"reappro": ..., "date": "dd/mm/yyyy", "code": ...}, ...]
     Cas gérés :
       - Tout fait                    → non mentionné
       - 0 fait toute la semaine      → "aucune salle faite de la semaine"
@@ -233,16 +234,10 @@ def _build_inventaire_cr_text(
       - 1 fait ce jour               → "aucune salle n'a été faite sauf X"
       - Joker                        → "fait par [prénom]"
     """
-    try:
-        df = pd.read_csv(io.BytesIO(csv_bytes), sep=";", encoding="utf-8-sig", dtype=str)
-        if "Type tâche" in df.columns:
-            df = df[df["Type tâche"].str.strip().str.lower() == "inventaire"]
-        for col in ["Ressource", "Date", "Code client"]:
-            df[col] = df[col].str.strip()
-    except Exception as e:
-        return f"Erreur lecture fichier : {e}"
+    if not done_records:
+        return "Aucune donnée d'inventaire disponible."
 
-    done_set = set(zip(df["Ressource"], df["Date"], df["Code client"]))
+    done_set = {(r["reappro"], r["date"], r["code"]) for r in done_records}
 
     if not reappros_df.empty and zone:
         zone_codes = set(reappros_df[reappros_df["zone"] == zone]["code"].str.strip())
@@ -254,16 +249,19 @@ def _build_inventaire_cr_text(
         if not reappros_df.empty else {}
     )
 
-    # ISO weeks dans le CSV
-    df["_dt"] = pd.to_datetime(df["Date"], format="%d/%m/%Y", errors="coerce")
-    iso_pairs = (
-        df.assign(
-            _y=df["_dt"].dt.isocalendar().year.astype("Int64"),
-            _w=df["_dt"].dt.isocalendar().week.astype("Int64"),
-        )[["_y", "_w"]].dropna().drop_duplicates().astype(int).values.tolist()
-    )
+    # ISO weeks depuis les dates des enregistrements
+    dates = {r["date"] for r in done_records}
+    iso_pairs_set = set()
+    for d in dates:
+        try:
+            dt = datetime.datetime.strptime(d, "%d/%m/%Y")
+            iso = dt.isocalendar()
+            iso_pairs_set.add((int(iso[0]), int(iso[1])))
+        except ValueError:
+            pass
+    iso_pairs = sorted(iso_pairs_set)
     if not iso_pairs:
-        return "Aucune date trouvée dans le fichier."
+        return "Aucune date trouvée dans les enregistrements."
 
     week_days = []
     for iso_year, iso_week in iso_pairs:
@@ -468,19 +466,33 @@ def render():
 
         if checked:
             if titre == "Inventaire":
-                # ── Section Inventaire avec génération automatique ──────────
-                st.caption("📂 Déposez l'export ERP pour générer automatiquement le texte.")
-                inv_file = st.file_uploader(
-                    "Export ERP inventaires (CSV)",
-                    type=["csv"],
-                    key=f"cr_inv_csv_{zone}",
-                    label_visibility="collapsed",
-                )
-                if inv_file is not None:
-                    st.session_state[f"cr_inv_bytes_{zone}"] = inv_file.read()
+                # ── Section Inventaire — données depuis la BDD ──────────────
+                try:
+                    from mongo_storage import list_inventaires_semaines, load_inventaires_semaine
+                    semaines_dispo = list_inventaires_semaines()
+                except Exception:
+                    semaines_dispo = []
 
-                if f"cr_inv_bytes_{zone}" in st.session_state:
-                    col_vend, col_gen_inv, _ = st.columns([2, 2, 3])
+                if not semaines_dispo:
+                    st.caption(
+                        "⚠️ Aucune semaine sauvegardée. "
+                        "Uploadez un CSV dans la page Inventaires et cliquez sur "
+                        "**💾 Sauvegarder en BDD**."
+                    )
+                else:
+                    sem_labels = [
+                        f"S{d['iso_week']} {d['iso_year']}"
+                        + (f"  (sauvé le {d['saved_at'][:10]})" if d.get("saved_at") else "")
+                        for d in semaines_dispo
+                    ]
+                    col_sel, col_vend, col_gen_inv = st.columns([3, 2, 2])
+                    with col_sel:
+                        sel_idx = st.selectbox(
+                            "Semaine", range(len(sem_labels)),
+                            format_func=lambda i: sem_labels[i],
+                            key=f"cr_inv_sem_{zone}",
+                            label_visibility="collapsed",
+                        )
                     with col_vend:
                         include_vend = st.checkbox(
                             "Inclure vendredi",
@@ -490,15 +502,18 @@ def render():
                     with col_gen_inv:
                         if st.button("🔄 Générer le texte", key=f"cr_inv_gen_{zone}",
                                      use_container_width=True):
-                            with st.spinner("Analyse…"):
+                            with st.spinner("Chargement…"):
+                                sel_doc = semaines_dispo[sel_idx]
+                                inv_doc = load_inventaires_semaine(
+                                    sel_doc["iso_year"], sel_doc["iso_week"]
+                                )
+                                done_records = inv_doc.get("done", [])
                                 generated = _build_inventaire_cr_text(
-                                    st.session_state[f"cr_inv_bytes_{zone}"],
+                                    done_records,
                                     plannings_mongo, reappros_df, zone,
                                     include_vendredi=include_vend,
                                 )
                             st.session_state[f"cr_inv_text_{zone}"] = generated
-                            # Also pre-fill the text_area widget state so the
-                            # value= parameter isn't ignored on the next rerun
                             st.session_state[f"cr_txt_{titre}_{zone}"] = generated
                             st.rerun()
 

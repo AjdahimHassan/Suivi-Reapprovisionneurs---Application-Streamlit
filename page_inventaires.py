@@ -580,6 +580,33 @@ def render():
         st.error(f"❌ Erreur : {e}")
         return
 
+    # ── Sauvegarde BDD ──────────────────────
+    try:
+        from mongo_storage import save_inventaires_semaine
+        _dt_col = pd.to_datetime(df_raw["Date"], format="%d/%m/%Y", errors="coerce")
+        _iso    = _dt_col.dt.isocalendar()
+        _iso_years  = _iso.year.dropna().astype(int).unique().tolist()
+        _iso_weeks  = _iso.week.dropna().astype(int).unique().tolist()
+        _iso_year   = int(_iso_years[0])  if len(_iso_years)  == 1 else None
+        _iso_week   = int(_iso_weeks[0])  if len(_iso_weeks)  == 1 else None
+        _week_label = f"S{_iso_week} {_iso_year}" if _iso_year and _iso_week else "multi-semaine"
+
+        col_save, col_info = st.columns([2, 5])
+        with col_save:
+            if st.button(f"💾 Sauvegarder en BDD ({_week_label})", use_container_width=True):
+                _records = [
+                    {"reappro": row["Ressource"], "date": row["Date"], "code": row["Code client"]}
+                    for _, row in df_raw[["Ressource", "Date", "Code client"]]
+                    .drop_duplicates().iterrows()
+                ]
+                if _iso_year and _iso_week:
+                    save_inventaires_semaine(_records, _iso_year, _iso_week)
+                    st.success(f"✅ {len(_records)} enregistrements sauvegardés (S{_iso_week} {_iso_year})")
+                else:
+                    st.warning("Fichier multi-semaine : sélectionnez une semaine unique.")
+    except Exception as _e:
+        st.caption(f"⚠️ Sauvegarde BDD indisponible : {_e}")
+
     # ── Croisement planning ──────────────────
     croisement: dict = {}
     if plannings_mongo:
@@ -853,6 +880,8 @@ def _build_bilan_rows(df_raw: pd.DataFrame, plannings_mongo: dict) -> list:
         .sum().to_dict()
     )
     done_set = set(done_ht.keys())
+    # (date, code) fait par n'importe quel réappro — pour les jokers exclusifs
+    done_any = {(date, code) for (_, date, code) in done_set}
 
     # ISO weeks dans le CSV
     df2 = df_raw.copy()
@@ -880,8 +909,13 @@ def _build_bilan_rows(df_raw: pd.DataFrame, plannings_mongo: dict) -> list:
                     continue
                 for code, info in sorted(planning[jour_fr].items(),
                                          key=lambda x: x[1]["label"]):
-                    key  = (reappro, date_str, code)
-                    fait = key in done_set
+                    key      = (reappro, date_str, code)
+                    # Fait par le réappro lui-même OU par un joker exclusif
+                    fait     = key in done_set or (date_str, code) in done_any
+                    valeur   = done_ht.get(key) or next(
+                        (done_ht[k] for k in done_set if k[1] == date_str and k[2] == code),
+                        None,
+                    )
                     rows.append({
                         "reappro":   reappro,
                         "iso_year":  iso_year,
@@ -892,7 +926,7 @@ def _build_bilan_rows(df_raw: pd.DataFrame, plannings_mongo: dict) -> list:
                         "salle":     info["label"],
                         "machine":   info["machine"],
                         "fait":      fait,
-                        "valeur_ht": done_ht.get(key),
+                        "valeur_ht": valeur,
                     })
     return rows
 
@@ -1007,17 +1041,14 @@ def _section_bilan_semaine(plannings_mongo: dict):
         st.warning("Aucune correspondance entre le fichier et les plannings.")
         return
 
-    # ── Avertissement si des ressources CSV ne sont pas dans les plannings ──
+    # ── Info sur les ressources sans planning (jokers exclusifs) ──
     csv_ressources = set(df_bilan["Ressource"].dropna().unique())
     mongo_employes = set(plannings_mongo.keys())
     unmatched = csv_ressources - mongo_employes
     if unmatched:
-        st.warning(
-            f"⚠️ Ces ressources du CSV n'ont **pas de planning** dans la base : "
-            f"**{', '.join(sorted(unmatched))}**. "
-            "Leurs inventaires ne seront pas comptabilisés dans le bilan. "
-            "Vérifiez que le nom de la ressource dans le CSV correspond exactement "
-            "au nom de l'employé dans les plannings MongoDB."
+        st.caption(
+            f"ℹ️ Ressources sans planning propre (jokers exclusifs) : "
+            f"{', '.join(sorted(unmatched))} — leurs inventaires comptent pour le réappro propriétaire."
         )
 
     # ── KPIs globaux ─────────────────────────────────────────────────────────

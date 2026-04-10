@@ -294,6 +294,69 @@ def clear_routes_cache() -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# INVENTAIRES SEMAINE — suivi hebdomadaire des inventaires
+#
+# Un document par semaine ISO :
+# {
+#   "iso_year":  2026,
+#   "iso_week":  15,
+#   "saved_at":  "2026-04-10T14:32:00",
+#   "done": [{"reappro": "AP", "date": "06/04/2026", "code": "BFBRES12"}, ...]
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_inv_semaine_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["inventaires_semaine"]
+
+
+def save_inventaires_semaine(done_records: list, iso_year: int, iso_week: int) -> None:
+    """Sauvegarde (upsert) les inventaires faits pour une semaine ISO."""
+    col = _get_inv_semaine_col()
+    col.update_one(
+        {"iso_year": iso_year, "iso_week": iso_week},
+        {"$set": {
+            "iso_year": iso_year,
+            "iso_week": iso_week,
+            "saved_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            "done":     done_records,
+        }},
+        upsert=True,
+    )
+
+
+def load_inventaires_semaine(iso_year: int = None, iso_week: int = None) -> dict:
+    """
+    Charge les inventaires d'une semaine ISO.
+    Si iso_year/iso_week non fournis, charge la semaine la plus récente.
+    Retourne le document ou {} si absent.
+    """
+    try:
+        col = _get_inv_semaine_col()
+        if iso_year is not None and iso_week is not None:
+            doc = col.find_one({"iso_year": iso_year, "iso_week": iso_week}, {"_id": 0})
+        else:
+            doc = col.find_one({}, {"_id": 0}, sort=[("iso_year", -1), ("iso_week", -1)])
+        return doc or {}
+    except Exception:
+        return {}
+
+
+def list_inventaires_semaines() -> list:
+    """Liste toutes les semaines disponibles (triées décroissantes). Retourne [] si erreur."""
+    try:
+        col  = _get_inv_semaine_col()
+        docs = list(col.find(
+            {},
+            {"_id": 0, "iso_year": 1, "iso_week": 1, "saved_at": 1},
+        ).sort([("iso_year", -1), ("iso_week", -1)]))
+        return docs
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SALLES TRAITÉES — contrôle des prix
 # ─────────────────────────────────────────────────────────────────────────────
 
