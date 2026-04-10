@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from mongo_storage import _get_client
+from page_inventaires import _parse_planning_for_reappro, WEEKDAY_TO_JOUR
 
 # ────────────────────────────────────────────────────────
 # CONSTANTES
@@ -211,12 +212,193 @@ def _import_reappros(raw_bytes: bytes) -> tuple[int, list[str]]:
 
 
 # ────────────────────────────────────────────────────────
+# INVENTAIRE AUTO-GENERATION
+# ────────────────────────────────────────────────────────
+
+def _build_inventaire_cr_text(
+    csv_bytes: bytes,
+    plannings_mongo: dict,
+    reappros_df: pd.DataFrame,
+    zone: str,
+    include_vendredi: bool = False,
+) -> str:
+    """
+    Génère le texte de la section Inventaire du CR depuis un export ERP CSV.
+    Cas gérés :
+      - Tout fait                    → non mentionné
+      - 0 fait toute la semaine      → "aucune salle faite de la semaine"
+      - ≤ 2 salles faites la semaine → "aucune salle faite cette semaine sauf X, Y"
+      - Quelques manquants par jour  → "X, Y n'ont pas été faites"
+      - 0 fait ce jour               → "aucune salle n'a été faite"
+      - 1 fait ce jour               → "aucune salle n'a été faite sauf X"
+      - Joker                        → "fait par [prénom]"
+    """
+    try:
+        df = pd.read_csv(io.BytesIO(csv_bytes), sep=";", encoding="utf-8-sig", dtype=str)
+        if "Type tâche" in df.columns:
+            df = df[df["Type tâche"].str.strip().str.lower() == "inventaire"]
+        for col in ["Ressource", "Date", "Code client"]:
+            df[col] = df[col].str.strip()
+    except Exception as e:
+        return f"Erreur lecture fichier : {e}"
+
+    done_set = set(zip(df["Ressource"], df["Date"], df["Code client"]))
+
+    if not reappros_df.empty and zone:
+        zone_codes = set(reappros_df[reappros_df["zone"] == zone]["code"].str.strip())
+    else:
+        zone_codes = set(plannings_mongo.keys())
+
+    code_to_prenom = (
+        dict(zip(reappros_df["code"].str.strip(), reappros_df["prenom"].str.strip()))
+        if not reappros_df.empty else {}
+    )
+
+    # ISO weeks dans le CSV
+    df["_dt"] = pd.to_datetime(df["Date"], format="%d/%m/%Y", errors="coerce")
+    iso_pairs = (
+        df.assign(
+            _y=df["_dt"].dt.isocalendar().year.astype("Int64"),
+            _w=df["_dt"].dt.isocalendar().week.astype("Int64"),
+        )[["_y", "_w"]].dropna().drop_duplicates().astype(int).values.tolist()
+    )
+    if not iso_pairs:
+        return "Aucune date trouvée dans le fichier."
+
+    week_days = []
+    for iso_year, iso_week in iso_pairs:
+        monday = datetime.datetime.fromisocalendar(iso_year, iso_week, 1)
+        for offset in range(5):
+            day_dt  = monday + datetime.timedelta(days=offset)
+            jour_fr = WEEKDAY_TO_JOUR.get(day_dt.weekday())
+            if jour_fr and (include_vendredi or jour_fr != "Vendredi"):
+                week_days.append((day_dt.strftime("%d/%m/%Y"), jour_fr))
+
+    zone_plannings = {r: p for r, p in plannings_mongo.items() if r in zone_codes}
+    if not zone_plannings:
+        return "Aucun réappro trouvé pour cette zone dans les plannings."
+
+    def _accord(n):
+        return "n'ont pas été faites" if n > 1 else "n'a pas été faite"
+
+    result_blocks = []
+
+    for reappro in sorted(zone_plannings.keys()):
+        planning = _parse_planning_for_reappro(zone_plannings[reappro])
+        prenom   = code_to_prenom.get(reappro, reappro)
+
+        # ── Collecter les données de toute la semaine ─────────────────────
+        week_own    = []   # toutes salles faites par lui cette semaine
+        week_joker  = []   # [(salle, prenom_joker)] cette semaine
+        week_missing= 0
+        day_data    = []   # [(jour_fr, done_own, done_joker, missing)]
+
+        for date_str, jour_fr in week_days:
+            if jour_fr not in planning or not planning[jour_fr]:
+                continue
+            jour_plan  = planning[jour_fr]
+            done_own   = []
+            done_joker = []
+            missing    = []
+
+            for code, info in sorted(jour_plan.items(), key=lambda x: x[1]["label"]):
+                salle = info["label"]
+                if (reappro, date_str, code) in done_set:
+                    done_own.append(salle)
+                else:
+                    joker_r = next(
+                        (r for r in plannings_mongo
+                         if r != reappro and (r, date_str, code) in done_set),
+                        None,
+                    )
+                    if joker_r:
+                        done_joker.append((salle, code_to_prenom.get(joker_r, joker_r)))
+                    else:
+                        missing.append(salle)
+
+            week_own.extend(done_own)
+            week_joker.extend(done_joker)
+            week_missing += len(missing)
+            day_data.append((jour_fr, done_own, done_joker, missing))
+
+        if not day_data:
+            continue
+
+        week_done = len(week_own) + len(week_joker)
+
+        # ── Résumé hebdomadaire si presque rien fait ──────────────────────
+        if week_done == 0 and week_missing > 0:
+            result_blocks.append(f"{prenom} ({reappro}) :\n- aucune salle faite de la semaine")
+            continue
+
+        if week_done <= 2 and week_missing > 0:
+            sauf_parts = week_own + [f"{s} (fait par {p})" for s, p in week_joker]
+            result_blocks.append(
+                f"{prenom} ({reappro}) :\n"
+                f"- aucune salle faite cette semaine sauf {', '.join(sauf_parts)}"
+            )
+            continue
+
+        # ── Détail jour par jour ──────────────────────────────────────────
+        day_lines = []
+        for jour_fr, done_own, done_joker, missing in day_data:
+            done_count = len(done_own) + len(done_joker)
+
+            if not missing and not done_joker:
+                continue  # jour parfait
+
+            if not missing:
+                jk = ", ".join(f"{s} (fait par {p})" for s, p in done_joker)
+                day_lines.append(f"- {jour_fr} : {jk}")
+                continue
+
+            joker_suffix = (
+                " — " + ", ".join(f"{s} fait par {p}" for s, p in done_joker)
+                if done_joker else ""
+            )
+
+            if done_count == 0:
+                line = f"- {jour_fr} : aucune salle n'a été faite"
+            elif len(done_own) == 1 and not done_joker:
+                line = f"- {jour_fr} : aucune salle n'a été faite sauf {done_own[0]}"
+            elif done_count == 1 and done_joker:
+                s, p = done_joker[0]
+                line = f"- {jour_fr} : aucune salle n'a été faite sauf {s} (fait par {p})"
+            else:
+                miss_str = ", ".join(missing)
+                line = f"- {jour_fr} : {miss_str} {_accord(len(missing))}{joker_suffix}"
+
+            day_lines.append(line)
+
+        if day_lines:
+            result_blocks.append(f"{prenom} ({reappro}) :\n" + "\n".join(day_lines))
+
+    if not result_blocks:
+        return "Tous les inventaires ont été réalisés conformément au planning."
+
+    return "\n\n".join(result_blocks)
+
+
+# ────────────────────────────────────────────────────────
 # RENDER
 # ────────────────────────────────────────────────────────
 
 def render():
     reappros_df = _load_reappros_from_mongo()
     no_reappros = reappros_df.empty
+
+    # Plannings (pour la génération auto inventaire)
+    plannings_mongo: dict = {}
+    try:
+        from mongo_storage import load_plannings_from_mongo
+
+        @st.cache_data(show_spinner=False, ttl=300)
+        def _get_plannings_cr():
+            return load_plannings_from_mongo()
+
+        plannings_mongo, _ = _get_plannings_cr()
+    except Exception:
+        pass
 
     if no_reappros:
         st.warning("⚠️ Aucune répartition des zones en base. Importez le fichier ci-dessous.")
@@ -283,15 +465,58 @@ def render():
         col_chk, _ = st.columns([3, 7])
         with col_chk:
             checked = st.checkbox(titre, value=default_checked, key=f"cr_chk_{titre}")
+
         if checked:
-            default_txt = SECTION_DEFAULTS.get(titre, "")
-            section_contents[titre] = st.text_area(
-                titre,
-                value=default_txt,
-                height=120,
-                key=f"cr_txt_{titre}",
-                label_visibility="collapsed",
-            )
+            if titre == "Inventaire":
+                # ── Section Inventaire avec génération automatique ──────────
+                st.caption("📂 Déposez l'export ERP pour générer automatiquement le texte.")
+                inv_file = st.file_uploader(
+                    "Export ERP inventaires (CSV)",
+                    type=["csv"],
+                    key=f"cr_inv_csv_{zone}",
+                    label_visibility="collapsed",
+                )
+                if inv_file is not None:
+                    st.session_state[f"cr_inv_bytes_{zone}"] = inv_file.read()
+
+                if f"cr_inv_bytes_{zone}" in st.session_state:
+                    col_vend, col_gen_inv, _ = st.columns([2, 2, 3])
+                    with col_vend:
+                        include_vend = st.checkbox(
+                            "Inclure vendredi",
+                            value=False,
+                            key=f"cr_inv_vend_{zone}",
+                        )
+                    with col_gen_inv:
+                        if st.button("🔄 Générer le texte", key=f"cr_inv_gen_{zone}",
+                                     use_container_width=True):
+                            with st.spinner("Analyse…"):
+                                generated = _build_inventaire_cr_text(
+                                    st.session_state[f"cr_inv_bytes_{zone}"],
+                                    plannings_mongo, reappros_df, zone,
+                                    include_vendredi=include_vend,
+                                )
+                            st.session_state[f"cr_inv_text_{zone}"] = generated
+                            st.rerun()
+
+                inv_default = st.session_state.get(f"cr_inv_text_{zone}",
+                                                    SECTION_DEFAULTS.get("Inventaire", ""))
+                section_contents[titre] = st.text_area(
+                    titre,
+                    value=inv_default,
+                    height=220,
+                    key=f"cr_txt_{titre}_{zone}",
+                    label_visibility="collapsed",
+                )
+            else:
+                default_txt = SECTION_DEFAULTS.get(titre, "")
+                section_contents[titre] = st.text_area(
+                    titre,
+                    value=default_txt,
+                    height=120,
+                    key=f"cr_txt_{titre}",
+                    label_visibility="collapsed",
+                )
         st.markdown("---")
 
     # --- Section "Autre" optionnelle ---
