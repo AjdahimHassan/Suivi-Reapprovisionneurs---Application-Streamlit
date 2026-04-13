@@ -95,20 +95,24 @@ def parser_lidis(texte):
 
 def parser_heroic(texte):
     lignes = []
-    pattern = re.compile(
-        r'(HEROIC\s+SPORT\s+\d+ML\s+[\w\s\-\/]+?)\s+([\d,]+)\s+€/unit\s+[\d\s]+?([\d]+[,]\d{2})\s+€\s*$',
-        re.MULTILINE
-    )
-    for m in pattern.finditer(texte):
-        desig = re.sub(r'\s+', ' ', m.group(1)).strip()
-        try:
-            pu = float(m.group(2).replace(',', '.'))
-            total = float(m.group(3).replace(',', '.'))
-            qte = round(total / pu)
-            if qte > 0:
-                lignes.append({'designation': desig, 'quantite_unites': qte})
-        except Exception:
-            pass
+    for line in texte.split('\n'):
+        if 'HEROIC SPORT' not in line or '€/unit' not in line:
+            continue
+        idx = line.find('€/unit')
+        if idx == -1:
+            continue
+        after = line[idx + len('€/unit'):].strip()
+        # Supprimer uniquement le premier espace entre deux chiffres (artifact PDF : "6 54" → "654")
+        after_clean = re.sub(r'(\d) (\d)', r'\1\2', after, count=1)
+        m_qte = re.match(r'(\d+)', after_clean)
+        if not m_qte:
+            continue
+        qte = int(m_qte.group(1))
+        # Désignation = tout ce qui précède le prix (ex: "0,90") avant €/unit
+        before = re.sub(r'\s+[\d,]+\s*$', '', line[:idx].strip())
+        desig = re.sub(r'\s+', ' ', before).strip()
+        if qte > 0 and desig:
+            lignes.append({'designation': desig, 'quantite_unites': qte})
     return lignes
 
 
