@@ -81,7 +81,7 @@ def extraire_depot(texte):
 def parser_lidis(texte):
     lignes = []
     pattern = re.compile(
-        r'(\d{7})\s+(.+?)\s+(\d+)\s+(\d+)\s+[\d,]+\s+[\d,]+\s+[\d,]+\s+\d'
+        r'(\d{7})\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d,]+)\s+[\d,]+\s+[\d,]+\s+\d'
     )
     for m in pattern.finditer(texte):
         desig = m.group(2).strip()
@@ -89,7 +89,8 @@ def parser_lidis(texte):
             continue
         cond = int(m.group(3))
         qte_packs = int(m.group(4))
-        lignes.append({'designation': desig, 'quantite_unites': cond * qte_packs})
+        pu = float(m.group(5).replace(',', '.'))
+        lignes.append({'designation': desig, 'quantite_unites': cond * qte_packs, 'pu_facture': pu})
     return lignes
 
 
@@ -111,8 +112,11 @@ def parser_heroic(texte):
         # Désignation = tout ce qui précède le prix (ex: "0,90") avant €/unit
         before = re.sub(r'\s+[\d,]+\s*$', '', line[:idx].strip())
         desig = re.sub(r'\s+', ' ', before).strip()
+        # PU facturé = le nombre juste avant €/unit
+        pu_match = re.search(r'([\d,]+)\s*$', line[:idx].strip())
+        pu = float(pu_match.group(1).replace(',', '.')) if pu_match else 0
         if qte > 0 and desig:
-            lignes.append({'designation': desig, 'quantite_unites': qte})
+            lignes.append({'designation': desig, 'quantite_unites': qte, 'pu_facture': pu})
     return lignes
 
 
@@ -173,15 +177,16 @@ NUTRAMINO_QTE_PAR_COLIS = [
 
 def parser_nutramino(texte):
     lignes = []
-    # Format facture Glanbia : CODE_7CHIFFRES DESCRIPTION QUANTITE (CAS|BOX) ...
+    # Format facture Glanbia : CODE DESC QTE (CAS|BOX) POIDS KG PU_COLIS TOTAL ...
     pattern = re.compile(
-        r'^\d{7}\s+(.+?)\s+(\d+)\s+(?:CAS|BOX)\s',
+        r'^\d{7}\s+(.+?)\s+(\d+)\s+(?:CAS|BOX)\s+[\d.]+\s+KG\s+([\d.]+)',
         re.MULTILINE | re.IGNORECASE
     )
-    totaux = {}
+    totaux = {}   # desig -> {'qte': total, 'pu': pu_unitaire}
     for m in pattern.finditer(texte):
         desig = re.sub(r'\s+', ' ', m.group(1)).strip()
         qte_colis = int(m.group(2))
+        prix_colis = float(m.group(3))
         desc_upper = desig.upper()
         qte_par_colis = 1
         for keyword, qpc in NUTRAMINO_QTE_PAR_COLIS:
@@ -189,10 +194,13 @@ def parser_nutramino(texte):
                 qte_par_colis = qpc
                 break
         qte = qte_colis * qte_par_colis
+        pu = round(prix_colis / qte_par_colis, 3) if qte_par_colis > 0 else 0
         if qte > 0:
-            totaux[desig] = totaux.get(desig, 0) + qte
-    for desig, qte in totaux.items():
-        lignes.append({'designation': desig, 'quantite_unites': qte})
+            if desig not in totaux:
+                totaux[desig] = {'qte': 0, 'pu': pu}
+            totaux[desig]['qte'] += qte
+    for desig, data in totaux.items():
+        lignes.append({'designation': desig, 'quantite_unites': data['qte'], 'pu_facture': data['pu']})
     return lignes
 
 
@@ -498,36 +506,78 @@ def faire_correspondance(noms_facture, noms_recu, fournisseur='INCONNU'):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# BIBLIOTHÈQUE PRIX
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _fmt_prix(v):
+    """Formate un prix en supprimant les zéros superflus : 0.900 → 0.9, 0.650 → 0.65"""
+    if v is None or v == '—':
+        return '—'
+    try:
+        return f'{float(v):g}'
+    except (ValueError, TypeError):
+        return '—'
+
+def charger_prix_bibliotheque():
+    """Retourne {nom_produit: prix_achat} depuis produits_lib MongoDB."""
+    try:
+        from planogrammes_storage import load_produits
+        return {p['nom']: float(p.get('prix_achat') or 0) for p in load_produits()}
+    except Exception:
+        return {}
+
+
+def trouver_prix_bibliotheque(nom_export, biblio):
+    """Cherche le prix_achat dans la bibliothèque par nom export (exact puis fuzzy)."""
+    if not biblio:
+        return None
+    if nom_export in biblio:
+        return biblio[nom_export]
+    norm_export = _normalize(nom_export)
+    best_score, best_val = 0, None
+    for nom_lib, pa in biblio.items():
+        s = fuzz.token_set_ratio(norm_export, _normalize(nom_lib))
+        if s > best_score:
+            best_score, best_val = s, pa
+    return best_val if best_score >= 75 else None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # COMPARAISON STANDARD (quantités)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def comparer(produits_facture, recu_dict, correspondances):
     rows = []
     noms_recu_couverts = set()
+    biblio = charger_prix_bibliotheque()
 
     # Agréger les quantités facturées par produit export :
     # plusieurs lignes facture → même produit export = une seule ligne
-    agregats = {}   # nom_r -> {'noms_f': [...], 'qte_f': total}
+    agregats = {}   # nom_r -> {'noms_f': [...], 'qte_f': total, 'pu': premier pu}
     sans_correspondance = []
 
     for p in produits_facture:
         nom_f = p['designation']
         qte_f = p['quantite_unites']
+        pu_f  = p.get('pu_facture', 0)
         nom_r = correspondances.get(nom_f)
         if nom_r is None:
             sans_correspondance.append(p)
         else:
             if nom_r not in agregats:
-                agregats[nom_r] = {'noms_f': [], 'qte_f': 0}
+                agregats[nom_r] = {'noms_f': [], 'qte_f': 0, 'pu': pu_f}
             agregats[nom_r]['noms_f'].append(nom_f)
             agregats[nom_r]['qte_f'] += qte_f
 
     for nom_r, data in agregats.items():
         noms_recu_couverts.add(nom_r)
-        qte_f = data['qte_f']
+        qte_f  = data['qte_f']
+        pu_f   = data['pu']
         label_f = ' + '.join(data['noms_f'])
-        qte_r = recu_dict.get(nom_r, 0)
-        ecart = qte_r - qte_f
+        qte_r  = recu_dict.get(nom_r, 0)
+        ecart  = qte_r - qte_f
+        pa_bib = trouver_prix_bibliotheque(nom_r, biblio)
+        ecart_prix = round(pu_f - pa_bib, 3) if pa_bib is not None else None
         if ecart == 0 and qte_f > 0:
             statut = '✅ OK'
         elif ecart > 0:
@@ -540,6 +590,9 @@ def comparer(produits_facture, recu_dict, correspondances):
             'Facturé': qte_f,
             'Reçu': qte_r,
             'Écart': ecart,
+            'PU facture (€)': _fmt_prix(pu_f),
+            'PA bibliothèque (€)': _fmt_prix(pa_bib),
+            'Écart prix (€)': _fmt_prix(ecart_prix),
             'Statut': statut,
         })
 
@@ -550,6 +603,9 @@ def comparer(produits_facture, recu_dict, correspondances):
             'Facturé': p['quantite_unites'],
             'Reçu': 0,
             'Écart': -p['quantite_unites'],
+            'PU facture (€)': _fmt_prix(p.get('pu_facture')),
+            'PA bibliothèque (€)': '—',
+            'Écart prix (€)': '—',
             'Statut': '❓ Non trouvé dans export',
         })
 
@@ -561,6 +617,9 @@ def comparer(produits_facture, recu_dict, correspondances):
                 'Facturé': 0,
                 'Reçu': qte,
                 'Écart': qte,
+                'PU facture (€)': '—',
+                'PA bibliothèque (€)': '—',
+                'Écart prix (€)': '—',
                 'Statut': '⚠️ Reçu non facturé',
             })
 
@@ -577,8 +636,8 @@ def comparer_nxt_prix(lignes_prix, recu_dict, prix_recu, correspondances=None):
     Utilise le dict correspondances pré-calculé (cascade 4 niveaux).
     """
     rows = []
-    noms_recu = list(recu_dict.keys())
     noms_recu_couverts = set()
+    biblio = charger_prix_bibliotheque()
 
     for ligne in lignes_prix:
         nom_f = ligne['designation']
@@ -592,6 +651,9 @@ def comparer_nxt_prix(lignes_prix, recu_dict, prix_recu, correspondances=None):
         ecart = qte_r - qte_f
         if match:
             noms_recu_couverts.add(match)
+
+        pa_bib = trouver_prix_bibliotheque(match, biblio) if match else None
+        ecart_prix = round(pu_f - pa_bib, 3) if pa_bib is not None else None
 
         if ecart == 0 and qte_f > 0:
             statut = '✅ OK'
@@ -610,6 +672,8 @@ def comparer_nxt_prix(lignes_prix, recu_dict, prix_recu, correspondances=None):
             'Écart QTE': ecart,
             'PU HT (€)': pu_f,
             'Total HT facturé (€)': total_f,
+            'PA bibliothèque (€)': _fmt_prix(pa_bib),
+            'Écart prix (€)': _fmt_prix(ecart_prix),
             'Statut': statut,
         })
 
@@ -623,6 +687,8 @@ def comparer_nxt_prix(lignes_prix, recu_dict, prix_recu, correspondances=None):
                 'Écart QTE': qte,
                 'PU HT (€)': 0,
                 'Total HT facturé (€)': 0,
+                'PA bibliothèque (€)': '—',
+                'Écart prix (€)': '—',
                 'Statut': '⚠️ Reçu non facturé',
             })
 
@@ -632,13 +698,28 @@ def comparer_nxt_prix(lignes_prix, recu_dict, prix_recu, correspondances=None):
 def colorier_ligne(row):
     s = str(row.iloc[-1])
     if '✅' in s:
-        return ['background-color:#1E7E34; color:#FFFFFF; font-weight:600'] * len(row)
+        base = 'background-color:#1E7E34; color:#FFFFFF; font-weight:600'
     elif '❌' in s:
-        return ['background-color:#C0392B; color:#FFFFFF; font-weight:600'] * len(row)
+        base = 'background-color:#C0392B; color:#FFFFFF; font-weight:600'
     elif '⚠️' in s:
-        return ['background-color:#E67E22; color:#FFFFFF; font-weight:600'] * len(row)
+        base = 'background-color:#E67E22; color:#FFFFFF; font-weight:600'
     else:
-        return ['background-color:#6C3483; color:#FFFFFF; font-weight:600'] * len(row)
+        base = 'background-color:#6C3483; color:#FFFFFF; font-weight:600'
+
+    styles = [base] * len(row)
+
+    # Coloration spécifique pour la colonne Écart prix
+    if 'Écart prix (€)' in row.index:
+        val = row['Écart prix (€)']
+        pos = row.index.get_loc('Écart prix (€)')
+        try:
+            styles[pos] = ('background-color:#1E7E34; color:#FFFFFF; font-weight:600'
+                           if float(val) == 0
+                           else 'background-color:#E67E22; color:#FFFFFF; font-weight:600')
+        except (ValueError, TypeError):
+            styles[pos] = base  # '—'
+
+    return styles
 
 
 # ──────────────────────────────────────────────────────────────────────────────
