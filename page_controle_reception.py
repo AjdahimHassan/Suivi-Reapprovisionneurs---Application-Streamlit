@@ -156,17 +156,43 @@ def parser_hipro(texte):
     return lignes
 
 
+# Quantité d'unités par colis pour les produits Glanbia/Nutramino (hardcodé)
+NUTRAMINO_QTE_PAR_COLIS = [
+    ('AMINO NRG',      24),   # ON Essential AmiN.O. Energy DRINK 250ML
+    ('HFSS',           10),   # ON HFSS Protein Bar 60g / 68g
+    ('XL SHAKE',       12),   # NMO XL Shake 475ML
+    ('NGO SHAKE',      12),   # NMO Nutra-GO Shake 330ML
+    ('CHOC SHAKE',     12),   # ON Choc Shake 330ML
+    ('VAN SHAKE',      12),   # ON Van Shake 330ML
+    ('+PRO PWO',       12),   # NMO Pre Workout Shot
+    ('PWO SHOT',       12),   # variante nom PWO Shot
+    ('PROTEIN BAR',    12),   # NMO Protein Bar 55G
+    ('PROTEIN WAFER',  12),   # NMO Protein Wafer 39G
+]
+
+
 def parser_nutramino(texte):
     lignes = []
+    # Format facture Glanbia : CODE_7CHIFFRES DESCRIPTION QUANTITE (CAS|BOX) ...
     pattern = re.compile(
-        r'(Protein\s+[\w\s]+?|Nutra[\w\s]+?|Pre\s+Workout[\w\s]+?)\s+(\d+)\s+[\d,]+',
-        re.IGNORECASE
+        r'^\d{7}\s+(.+?)\s+(\d+)\s+(?:CAS|BOX)\s',
+        re.MULTILINE | re.IGNORECASE
     )
+    totaux = {}
     for m in pattern.finditer(texte):
-        desig = m.group(1).strip()
-        qte = int(m.group(2))
+        desig = re.sub(r'\s+', ' ', m.group(1)).strip()
+        qte_colis = int(m.group(2))
+        desc_upper = desig.upper()
+        qte_par_colis = 1
+        for keyword, qpc in NUTRAMINO_QTE_PAR_COLIS:
+            if keyword in desc_upper:
+                qte_par_colis = qpc
+                break
+        qte = qte_colis * qte_par_colis
         if qte > 0:
-            lignes.append({'designation': desig, 'quantite_unites': qte})
+            totaux[desig] = totaux.get(desig, 0) + qte
+    for desig, qte in totaux.items():
+        lignes.append({'designation': desig, 'quantite_unites': qte})
     return lignes
 
 
@@ -347,6 +373,10 @@ TABLE_CORRESPONDANCE = [
     ('BF Towel Vending',                    'Towel'),
     ('Peanut Boost',                        'PEANUT BOOST'),
     ('Crispy Protein Raspberry Toffee',     'RASPBERRY TOFFEE'),
+    # NUTRAMINO
+    ('ON CHOC SHAKE 330ML',                 'NMO NGO SHKE CHOCOLATE'),
+    ('ON VAN SHAKE 330ML',                  'NMO NGO SHKE VANILLA'),
+    ('NMO NGO SHAKE VAN 330ML',             'NMO NGO SHKE VANILLA'),
 ]
 
 
@@ -475,31 +505,52 @@ def comparer(produits_facture, recu_dict, correspondances):
     rows = []
     noms_recu_couverts = set()
 
+    # Agréger les quantités facturées par produit export :
+    # plusieurs lignes facture → même produit export = une seule ligne
+    agregats = {}   # nom_r -> {'noms_f': [...], 'qte_f': total}
+    sans_correspondance = []
+
     for p in produits_facture:
         nom_f = p['designation']
         qte_f = p['quantite_unites']
         nom_r = correspondances.get(nom_f)
-        qte_r = recu_dict.get(nom_r, 0) if nom_r else 0
-        ecart = qte_r - qte_f
-        if nom_r:
-            noms_recu_couverts.add(nom_r)
+        if nom_r is None:
+            sans_correspondance.append(p)
+        else:
+            if nom_r not in agregats:
+                agregats[nom_r] = {'noms_f': [], 'qte_f': 0}
+            agregats[nom_r]['noms_f'].append(nom_f)
+            agregats[nom_r]['qte_f'] += qte_f
 
+    for nom_r, data in agregats.items():
+        noms_recu_couverts.add(nom_r)
+        qte_f = data['qte_f']
+        label_f = ' + '.join(data['noms_f'])
+        qte_r = recu_dict.get(nom_r, 0)
+        ecart = qte_r - qte_f
         if ecart == 0 and qte_f > 0:
             statut = '✅ OK'
-        elif nom_r is None:
-            statut = '❓ Non trouvé dans export'
         elif ecart > 0:
             statut = f'⚠️ Surplus (+{ecart})'
         else:
             statut = f'❌ Manquant ({ecart})'
-
         rows.append({
-            'Produit (facture)': nom_f,
-            'Produit (export)': nom_r or '—',
+            'Produit (facture)': label_f,
+            'Produit (export)': nom_r,
             'Facturé': qte_f,
             'Reçu': qte_r,
             'Écart': ecart,
             'Statut': statut,
+        })
+
+    for p in sans_correspondance:
+        rows.append({
+            'Produit (facture)': p['designation'],
+            'Produit (export)': '—',
+            'Facturé': p['quantite_unites'],
+            'Reçu': 0,
+            'Écart': -p['quantite_unites'],
+            'Statut': '❓ Non trouvé dans export',
         })
 
     for nom, qte in recu_dict.items():
