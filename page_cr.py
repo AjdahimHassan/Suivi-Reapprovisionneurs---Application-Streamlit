@@ -507,13 +507,19 @@ def _build_bilan_cr(df: pd.DataFrame, plannings_mongo: dict) -> list:
 
     rows = []
     for reappro, planning_raw in sorted(plannings_mongo.items()):
-        planning = _planning_by_machine(planning_raw)
+        planning  = _planning_by_machine(planning_raw)
+        seen_mach = set()  # évite de compter deux fois la même machine
+
         for jour_fr in _JOURS_ORDER:
             if jour_fr not in planning:
                 continue
             ref_date = ref_dates[jour_fr]
             for machine, info in sorted(planning[jour_fr].items(),
                                         key=lambda x: x[1]["label"]):
+                if machine in seen_mach:
+                    continue
+                seen_mach.add(machine)
+
                 own_key = (reappro, machine)
 
                 if own_key in done_by_emp:
@@ -669,11 +675,61 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
         if not reappros_df.empty else {}
     )
 
+    # ── Filtres ───────────────────────────────────────────────────────────────
+    # Construire les listes de choix depuis reappros_df (zone = responsable)
+    all_reappros_in_bilan = sorted({r["reappro"] for r in bilan_rows})
+
+    # Responsables disponibles pour les réappros présents dans le bilan
+    if not reappros_df.empty:
+        resp_map = (
+            reappros_df
+            .dropna(subset=["code", "responsable"])
+            .assign(code=lambda d: d["code"].str.strip(),
+                    responsable=lambda d: d["responsable"].str.strip())
+            .set_index("code")["responsable"]
+            .to_dict()
+        )
+        all_responsables = sorted({
+            resp_map[r] for r in all_reappros_in_bilan if r in resp_map
+        })
+    else:
+        resp_map = {}
+        all_responsables = []
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        sel_resp = st.multiselect(
+            "Filtrer par responsable",
+            options=all_responsables,
+            default=[],
+            key="cr_bilan_f_resp",
+            placeholder="Tous les responsables",
+        )
+    with fc2:
+        reappro_options = all_reappros_in_bilan
+        if sel_resp:
+            reappro_options = [r for r in all_reappros_in_bilan
+                               if resp_map.get(r) in sel_resp]
+        sel_reappros = st.multiselect(
+            "Filtrer par réappro",
+            options=reappro_options,
+            default=[],
+            key="cr_bilan_f_reappro",
+            placeholder="Tous les réappros",
+        )
+
+    # Appliquer les filtres
+    filtered_rows = bilan_rows
+    active_reappros = sel_reappros if sel_reappros else (
+        reappro_options if sel_resp else all_reappros_in_bilan
+    )
+    filtered_rows = [r for r in bilan_rows if r["reappro"] in active_reappros]
+
     # ── KPIs ─────────────────────────────────────────────────────────────────
-    nb_plan  = len(bilan_rows)
-    nb_fait  = sum(1 for r in bilan_rows if r["statut"].startswith("Fait"))
-    nb_joker = sum(1 for r in bilan_rows if r["statut"].startswith("Fait par"))
-    nb_nf    = sum(1 for r in bilan_rows if r["statut"] == "Non fait")
+    nb_plan  = len(filtered_rows)
+    nb_fait  = sum(1 for r in filtered_rows if r["statut"].startswith("Fait"))
+    nb_joker = sum(1 for r in filtered_rows if r["statut"].startswith("Fait par"))
+    nb_nf    = sum(1 for r in filtered_rows if r["statut"] == "Non fait")
     pct      = round((nb_fait + nb_joker) / nb_plan * 100, 1) if nb_plan else 0
 
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -682,14 +738,14 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
     k3.metric("👥 Fait par autre", nb_joker)
     k4.metric("🔵 Non faites",  nb_nf,
               delta=f"-{nb_nf}" if nb_nf else None, delta_color="inverse")
-    k5.metric("👥 Réappros",    len({r["reappro"] for r in bilan_rows}))
+    k5.metric("👥 Réappros",    len({r["reappro"] for r in filtered_rows}))
 
     # ── Export ────────────────────────────────────────────────────────────────
     col_exp, _ = st.columns([1, 4])
     with col_exp:
         st.download_button(
             "📥 Exporter Excel",
-            data=_export_bilan_cr_excel(bilan_rows, code_to_prenom),
+            data=_export_bilan_cr_excel(filtered_rows, code_to_prenom),
             file_name=f"bilan_semaine_{datetime.date.today():%Y%m%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="cr_bilan_dl",
@@ -698,8 +754,8 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
     st.divider()
 
     # ── Accordéons par réappro ────────────────────────────────────────────────
-    for reappro in sorted({r["reappro"] for r in bilan_rows}):
-        sub    = [r for r in bilan_rows if r["reappro"] == reappro]
+    for reappro in sorted({r["reappro"] for r in filtered_rows}):
+        sub    = [r for r in filtered_rows if r["reappro"] == reappro]
         nb_f   = sum(1 for r in sub if r["statut"].startswith("Fait"))
         nb_jok = sum(1 for r in sub if r["statut"].startswith("Fait par"))
         nb_t   = len(sub)
