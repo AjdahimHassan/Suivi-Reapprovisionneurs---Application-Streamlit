@@ -718,12 +718,19 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
             placeholder="Tous les réappros",
         )
 
+    only_nf = st.checkbox(
+        "Afficher uniquement les salles non faites",
+        value=False,
+        key="cr_bilan_f_nf",
+    )
+
     # Appliquer les filtres
-    filtered_rows = bilan_rows
     active_reappros = sel_reappros if sel_reappros else (
         reappro_options if sel_resp else all_reappros_in_bilan
     )
     filtered_rows = [r for r in bilan_rows if r["reappro"] in active_reappros]
+    if only_nf:
+        filtered_rows = [r for r in filtered_rows if r["statut"] == "Non fait"]
 
     # ── KPIs ─────────────────────────────────────────────────────────────────
     nb_plan  = len(filtered_rows)
