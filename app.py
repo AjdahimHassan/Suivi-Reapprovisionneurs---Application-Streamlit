@@ -25,6 +25,127 @@ from excel_export import generer_excel
 # ────────────────────────────────────────────────────────
 # CONFIG PAGE
 # ────────────────────────────────────────────────────────
+DARK_CSS = """<style>
+/* ── DARK MODE OVERRIDE ── */
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {
+    background-color: #0F1923 !important;
+    color: #E8EEF7 !important;
+}
+[data-testid="block-container"],
+.block-container {
+    background-color: #0F1923 !important;
+}
+[data-testid="stSidebar"] {
+    background-color: #1A2535 !important;
+}
+.main-title { color: #7BC4E8 !important; }
+.subtitle   { color: #8FA8C8 !important; }
+p, span, label, div { color: #E8EEF7 !important; }
+.stButton > button[kind="secondary"] {
+    color: #7BC4E8 !important;
+    border-color: #2A4A6B !important;
+    background-color: transparent !important;
+}
+.stButton > button[kind="secondary"]:hover {
+    background-color: #1E2E42 !important;
+    border-color: #E8922A !important;
+    color: #E8922A !important;
+}
+[data-testid="metric-container"] {
+    background-color: #1A2535 !important;
+    border: 1px solid #2A4A6B !important;
+    border-radius: 0.5rem !important;
+    padding: 0.5rem !important;
+}
+[data-testid="metric-container"] label,
+[data-testid="metric-container"] [data-testid="stMetricLabel"] { color: #7BC4E8 !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #E8EEF7 !important; }
+[data-testid="metric-container"] [data-testid="stMetricDelta"] { color: #8FA8C8 !important; }
+.stTextInput input,
+.stNumberInput input,
+.stTextArea textarea,
+[data-testid="stSelectbox"] > div > div,
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div {
+    background-color: #1A2535 !important;
+    color: #E8EEF7 !important;
+    border-color: #2A4A6B !important;
+}
+[data-baseweb="popover"],
+[data-baseweb="menu"],
+ul[data-baseweb="menu"] {
+    background-color: #1E2E42 !important;
+    border-color: #2A4A6B !important;
+}
+[data-baseweb="menu"] li { color: #E8EEF7 !important; }
+[data-baseweb="menu"] li:hover { background-color: #2A4A6B !important; }
+[data-testid="stDataFrame"] > div,
+.stDataFrame { background-color: #1A2535 !important; }
+[data-testid="stDataFrame"] > div > div { border-color: #2A4A6B !important; }
+[data-testid="stExpander"] {
+    border-color: #2A4A6B !important;
+    background-color: #1A2535 !important;
+}
+[data-testid="stExpander"] summary {
+    color: #E8EEF7 !important;
+    background-color: #1A2535 !important;
+}
+[data-testid="stExpander"] summary:hover { background-color: #1E2E42 !important; }
+[data-testid="stTabs"] [role="tablist"] { border-bottom-color: #2A4A6B !important; }
+[data-testid="stTabs"] button[role="tab"] { color: #8FA8C8 !important; }
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    color: #E8922A !important;
+    border-bottom-color: #E8922A !important;
+}
+hr { border-color: rgba(123,196,232,0.2) !important; }
+[data-testid="stFileUploader"],
+[data-testid="stFileUploaderDropzone"],
+section[data-testid="stFileUploaderDropzone"] {
+    background-color: #1A2535 !important;
+    border-color: #2A4A6B !important;
+}
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploader"] small,
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small,
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploaderDropzone"] p {
+    color: #E8EEF7 !important;
+}
+[data-testid="stFileUploaderDropzone"] button,
+[data-testid="stFileUploaderDropzone"] button span {
+    background-color: #1E2E42 !important;
+    color: #7BC4E8 !important;
+    border-color: #2A4A6B !important;
+}
+[data-testid="stFileUploaderDropzone"] button:hover,
+[data-testid="stFileUploaderDropzone"] button:hover span {
+    background-color: #2A4A6B !important;
+    border-color: #7BC4E8 !important;
+    color: #E8EEF7 !important;
+}
+[data-testid="stAlert"] {
+    background-color: #1E2E42 !important;
+    border-color: #2A4A6B !important;
+}
+.stCaption, [data-testid="stCaptionContainer"] { color: #8FA8C8 !important; }
+.stDownloadButton > button {
+    background-color: #1E2E42 !important;
+    color: #7BC4E8 !important;
+    border-color: #2A4A6B !important;
+}
+.stDownloadButton > button:hover {
+    background-color: #2A4A6B !important;
+    border-color: #7BC4E8 !important;
+}
+[data-baseweb="tag"] { background-color: #2A4A6B !important; }
+[data-baseweb="tag"] span { color: #E8EEF7 !important; }
+</style>"""
+
 st.set_page_config(
     page_title="Distriprot Data",
     page_icon="📦",
@@ -73,8 +194,28 @@ st.markdown("""
 /* Remonte le contenu au maximum en haut */
 [data-testid="stHeader"] { display: none !important; }
 .block-container { padding-top: 0.5rem !important; }
+
+/* Bouton toggle thème */
+.theme-toggle-btn > button {
+    background-color: transparent !important;
+    border: 1px solid #7BC4E8 !important;
+    color: #1B3D6F !important;
+    font-size: 1.1rem !important;
+    height: 2rem !important;
+    width: 2.6rem !important;
+    min-height: 0 !important;
+    border-radius: 50% !important;
+    padding: 0.2rem 0.5rem !important;
+}
+.theme-toggle-btn > button:hover {
+    background-color: #EEF5FC !important;
+    border-color: #E8922A !important;
+}
 </style>
 """, unsafe_allow_html=True)
+
+if st.session_state.get("dark_mode", False):
+    st.markdown(DARK_CSS, unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────────────
 # SESSION STATE
@@ -89,6 +230,8 @@ if "chargement_bytes" not in st.session_state:
     st.session_state["chargement_bytes"] = None
 if "excel_bytes" not in st.session_state:
     st.session_state["excel_bytes"] = None
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
 
 # ────────────────────────────────────────────────────────
 # NAVIGATION — barre en haut de la page principale
@@ -97,12 +240,19 @@ import os as _os
 
 # Logo — ligne dédiée, aligné à gauche
 _logo_path = "assets/logo.png"
-_logo_col, _ = st.columns([1, 9])
+_logo_col, _theme_col, _ = st.columns([1, 1, 8])
 with _logo_col:
     if _os.path.exists(_logo_path):
         st.image(_logo_path, width=90)
     else:
         st.markdown('<div style="font-size:1.3rem;font-weight:900;color:#1B3D6F;">DP</div>', unsafe_allow_html=True)
+with _theme_col:
+    _icon = "🌙" if not st.session_state.dark_mode else "☀️"
+    st.markdown('<div class="theme-toggle-btn">', unsafe_allow_html=True)
+    if st.button(_icon, key="toggle_dark_mode", help="Basculer mode sombre/clair"):
+        st.session_state.dark_mode = not st.session_state.dark_mode
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Barre de navigation — 10 boutons
 nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9, nav_c10 = st.columns(10)
