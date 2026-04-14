@@ -472,7 +472,6 @@ def _build_bilan_cr(df: pd.DataFrame, plannings_mongo: dict) -> list:
     date réelle ("Fait le DD/MM/YY" / "Fait par X (le DD/MM/YY)").
     """
     df = df.copy()
-    df["_jour_fr"] = df["_dt"].dt.weekday.map(_WEEKDAY_TO_JOUR)
     df["_iso_year"] = df["_dt"].dt.isocalendar().year.astype("Int64")
     df["_iso_week"] = df["_dt"].dt.isocalendar().week.astype("Int64")
 
@@ -487,29 +486,24 @@ def _build_bilan_cr(df: pd.DataFrame, plannings_mongo: dict) -> list:
         for i in range(5)
     }
 
-    # Index : (employe, jour_fr, machine) → (date_réelle, val)
-    # Priorité : date de la semaine de référence ; sinon première trouvée
-    done_own: dict = {}
-    for _, row in df.iterrows():
-        jour = row["_jour_fr"]
-        if not jour or pd.isna(jour):
-            continue
-        key  = (row["Employé"], jour, row["Machine"])
-        date = row["Date"]
-        val  = row["Val_ref"]
-        if key not in done_own or date == ref_dates.get(jour):
-            done_own[key] = (date, val)
+    # Index par (employe, machine) sur TOUTE la semaine — indépendant du jour réel
+    # Un réappro peut faire ses salles sur un jour différent de celui planifié
+    done_by_emp: dict = {}   # {(employe, machine): (actual_date, val)}
+    done_by_any: dict = {}   # {machine: (employe, actual_date, val)} — pour jokers
 
-    # Index joker : (jour_fr, machine) → (employe, date_réelle, val)
-    done_any: dict = {}
     for _, row in df.iterrows():
-        jour = row["_jour_fr"]
-        if not jour or pd.isna(jour):
-            continue
-        key  = (jour, row["Machine"])
-        date = row["Date"]
-        if key not in done_any or date == ref_dates.get(jour):
-            done_any[key] = (row["Employé"], date, row["Val_ref"])
+        emp     = row["Employé"]
+        machine = row["Machine"]
+        date    = row["Date"]
+        val     = row["Val_ref"]
+
+        key_emp = (emp, machine)
+        # Priorité à la date de la semaine de référence si plusieurs entrées
+        if key_emp not in done_by_emp or date in ref_dates.values():
+            done_by_emp[key_emp] = (date, val)
+
+        if machine not in done_by_any or date in ref_dates.values():
+            done_by_any[machine] = (emp, date, val)
 
     rows = []
     for reappro, planning_raw in sorted(plannings_mongo.items()):
@@ -520,15 +514,14 @@ def _build_bilan_cr(df: pd.DataFrame, plannings_mongo: dict) -> list:
             ref_date = ref_dates[jour_fr]
             for machine, info in sorted(planning[jour_fr].items(),
                                         key=lambda x: x[1]["label"]):
-                own_key = (reappro, jour_fr, machine)
-                any_key = (jour_fr, machine)
+                own_key = (reappro, machine)
 
-                if own_key in done_own:
-                    actual_date, val = done_own[own_key]
+                if own_key in done_by_emp:
+                    actual_date, val = done_by_emp[own_key]
                     fait_par = reappro
                     statut   = "Fait" if actual_date == ref_date else f"Fait le {actual_date}"
-                elif any_key in done_any:
-                    joker_emp, actual_date, val = done_any[any_key]
+                elif machine in done_by_any:
+                    joker_emp, actual_date, val = done_by_any[machine]
                     fait_par = joker_emp
                     statut   = (f"Fait par {joker_emp}" if actual_date == ref_date
                                 else f"Fait par {joker_emp} (le {actual_date})")
