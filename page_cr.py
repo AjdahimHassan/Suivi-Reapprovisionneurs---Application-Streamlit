@@ -378,6 +378,387 @@ def _build_inventaire_cr_text(
 
 
 # ────────────────────────────────────────────────────────
+# BILAN SEMAINE (page CR, indépendant)
+# ────────────────────────────────────────────────────────
+
+def _parse_bilan_export(raw_bytes: bytes) -> pd.DataFrame:
+    """Parse le nouvel export inventaires (Employé/Machine/Val.Ref) sans détail produit."""
+    df = pd.read_csv(
+        io.BytesIO(raw_bytes), sep=";", encoding="utf-8-sig",
+        dtype=str, skipinitialspace=True,
+    )
+    # Nettoyer les noms de colonnes (guillemets, <br/>, espaces)
+    df.columns = [
+        c.strip().strip('"').replace("<br/>", " ").replace("\n", "")
+        for c in df.columns
+    ]
+    # Supprimer colonne vide éventuelle (trailing semicolon)
+    df = df.loc[:, df.columns.str.strip() != ""]
+
+    required = ["Tiers", "Date début", "Statut", "Employé", "Machine", "Val. Ref"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Colonnes manquantes : {', '.join(missing)}")
+
+    # Strip champs texte clés
+    for col in ["Statut", "Employé", "Machine", "Tiers"]:
+        df[col] = df[col].str.strip().str.strip('"')
+
+    # Filtre : uniquement les inventaires "Fait"
+    df = df[df["Statut"] == "Fait"].copy()
+
+    # Parse date (format "dd/mm/yyyy HH:MM")
+    df["_dt"] = pd.to_datetime(
+        df["Date début"].str.strip().str.strip('"'),
+        format="%d/%m/%Y %H:%M", errors="coerce",
+    )
+    df["Date"] = df["_dt"].dt.strftime("%d/%m/%Y")
+
+    # Val. Ref → float
+    df["Val_ref"] = pd.to_numeric(
+        df["Val. Ref"].str.strip().str.strip('"').str.replace(",", ".", regex=False),
+        errors="coerce",
+    ).fillna(0.0)
+
+    # Déduplique (Employé, Machine, Date) : garde le max Val_ref (ignore doublons à 0)
+    df = (
+        df.sort_values("Val_ref", ascending=False)
+        .groupby(["Employé", "Machine", "Date"], as_index=False)
+        .first()
+    )
+
+    return df[["Employé", "Machine", "Tiers", "Date", "_dt", "Val_ref"]].dropna(subset=["Date"])
+
+
+def _planning_by_machine(planning_raw: dict) -> dict:
+    """
+    Construit {jour_fr: {machine_code: {"label": ..., "client_code": ...}}}
+    depuis le planning brut MongoDB (même format que load_plannings_from_mongo).
+    Clé = code machine (ex "2219M1"), pas le code client.
+    """
+    JOURS = {"Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"}
+    result = {}
+    for jour, salles in planning_raw.items():
+        if jour not in JOURS:
+            continue
+        result[jour] = {}
+        for salle in salles:
+            if len(salle) < 2:
+                continue
+            client_full = str(salle[0]).strip()
+            machine     = str(salle[1]).strip()
+            if not machine:
+                continue
+            if " - " in client_full:
+                client_code = client_full.split(" - ")[0].strip()
+                label       = client_full.split(" - ", 1)[1].strip()
+            else:
+                client_code = client_full
+                label       = client_full
+            result[jour][machine] = {"label": label, "client_code": client_code}
+    return result
+
+
+_JOURS_ORDER = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"]
+_WEEKDAY_TO_JOUR = {0: "Lundi", 1: "Mardi", 2: "Mercredi", 3: "Jeudi", 4: "Vendredi"}
+
+
+def _build_bilan_cr(df: pd.DataFrame, plannings_mongo: dict) -> list:
+    """
+    Croise le DataFrame d'inventaires avec les plannings MongoDB.
+    Groupé par jour de semaine (Lundi…Vendredi) — jamais dupliqué même si le fichier
+    couvre plusieurs semaines. La semaine ISO la plus représentée est la semaine de
+    référence ; si une salle a été faite un autre lundi/mardi, le statut indique la
+    date réelle ("Fait le DD/MM/YY" / "Fait par X (le DD/MM/YY)").
+    """
+    df = df.copy()
+    df["_jour_fr"] = df["_dt"].dt.weekday.map(_WEEKDAY_TO_JOUR)
+    df["_iso_year"] = df["_dt"].dt.isocalendar().year.astype("Int64")
+    df["_iso_week"] = df["_dt"].dt.isocalendar().week.astype("Int64")
+
+    # Semaine de référence = ISO week avec le plus d'inventaires
+    week_counts = df.groupby(["_iso_year", "_iso_week"]).size()
+    if week_counts.empty:
+        return []
+    ref_year, ref_week = week_counts.idxmax()
+    ref_monday = datetime.datetime.fromisocalendar(int(ref_year), int(ref_week), 1)
+    ref_dates  = {
+        _WEEKDAY_TO_JOUR[i]: (ref_monday + datetime.timedelta(days=i)).strftime("%d/%m/%Y")
+        for i in range(5)
+    }
+
+    # Index : (employe, jour_fr, machine) → (date_réelle, val)
+    # Priorité : date de la semaine de référence ; sinon première trouvée
+    done_own: dict = {}
+    for _, row in df.iterrows():
+        jour = row["_jour_fr"]
+        if not jour or pd.isna(jour):
+            continue
+        key  = (row["Employé"], jour, row["Machine"])
+        date = row["Date"]
+        val  = row["Val_ref"]
+        if key not in done_own or date == ref_dates.get(jour):
+            done_own[key] = (date, val)
+
+    # Index joker : (jour_fr, machine) → (employe, date_réelle, val)
+    done_any: dict = {}
+    for _, row in df.iterrows():
+        jour = row["_jour_fr"]
+        if not jour or pd.isna(jour):
+            continue
+        key  = (jour, row["Machine"])
+        date = row["Date"]
+        if key not in done_any or date == ref_dates.get(jour):
+            done_any[key] = (row["Employé"], date, row["Val_ref"])
+
+    rows = []
+    for reappro, planning_raw in sorted(plannings_mongo.items()):
+        planning = _planning_by_machine(planning_raw)
+        for jour_fr in _JOURS_ORDER:
+            if jour_fr not in planning:
+                continue
+            ref_date = ref_dates[jour_fr]
+            for machine, info in sorted(planning[jour_fr].items(),
+                                        key=lambda x: x[1]["label"]):
+                own_key = (reappro, jour_fr, machine)
+                any_key = (jour_fr, machine)
+
+                if own_key in done_own:
+                    actual_date, val = done_own[own_key]
+                    fait_par = reappro
+                    statut   = "Fait" if actual_date == ref_date else f"Fait le {actual_date}"
+                elif any_key in done_any:
+                    joker_emp, actual_date, val = done_any[any_key]
+                    fait_par = joker_emp
+                    statut   = (f"Fait par {joker_emp}" if actual_date == ref_date
+                                else f"Fait par {joker_emp} (le {actual_date})")
+                else:
+                    statut   = "Non fait"
+                    fait_par = None
+                    val      = None
+
+                rows.append({
+                    "reappro":  reappro,
+                    "jour":     jour_fr,
+                    "ref_date": ref_date,
+                    "machine":  machine,
+                    "salle":    info["label"],
+                    "statut":   statut,
+                    "fait_par": fait_par,
+                    "val":      val,
+                })
+    return rows
+
+
+def _export_bilan_cr_excel(rows: list, code_to_prenom: dict) -> bytes:
+    """Génère un Excel avec 1 onglet par réappro."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    def _fill(h): return PatternFill("solid", fgColor=h.lstrip("#"))
+    def _font(bold=False, color="000000", size=9):
+        return Font(bold=bold, color=color, name="Arial", size=size)
+    def _align(h="left"):
+        return Alignment(horizontal=h, vertical="center", wrap_text=False)
+    _s   = Side(style="thin", color="CCCCCC")
+    _brd = Border(left=_s, right=_s, top=_s, bottom=_s)
+
+    C_DARK  = "1F4E79"; C_MID = "2E75B6"; C_SUB = "BDD7EE"
+    C_OK_BG = "D4EDDA"; C_OK_FG = "1E7E34"
+    C_NOK_BG = "BBDEFB"; C_NOK_FG = "1565C0"
+    C_JOK_BG = "E8DAEF"; C_JOK_FG = "6C3483"
+    C_WHITE  = "FFFFFF"
+
+    HDRS   = ["Date", "Jour", "Salle", "Machine", "Statut", "Valeur HT"]
+    WIDTHS = [11,      10,     40,      10,         22,       12]
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    reappros = sorted({r["reappro"] for r in rows})
+
+    for reappro in reappros:
+        prenom  = code_to_prenom.get(reappro, reappro)
+        ws      = wb.create_sheet(reappro[:31])
+        ws.freeze_panes = "A3"
+
+        N = len(HDRS)
+        ws.merge_cells(f"A1:{get_column_letter(N)}1")
+        tc = ws.cell(1, 1, f"Bilan semaine — {prenom} ({reappro})")
+        tc.fill = _fill(C_DARK); tc.font = _font(True, C_WHITE, 12)
+        tc.alignment = _align("center"); ws.row_dimensions[1].height = 24
+
+        for ci, (h, w) in enumerate(zip(HDRS, WIDTHS), 1):
+            c = ws.cell(2, ci, h)
+            c.fill = _fill(C_MID); c.font = _font(True, C_WHITE, 9)
+            c.alignment = _align("center")
+            ws.column_dimensions[get_column_letter(ci)].width = w
+        ws.row_dimensions[2].height = 18
+
+        sub = [r for r in rows if r["reappro"] == reappro]
+        ri  = 3
+        cur = None
+
+        for r in sub:
+            if r["jour"] != cur:
+                cur      = r["jour"]
+                day_rows = [x for x in sub if x["jour"] == r["jour"]]
+                nb_f = sum(1 for x in day_rows if not x["statut"].startswith("Non"))
+                nb_t = len(day_rows)
+                txt  = f"  {r['jour']}  {r['ref_date']}   |   {nb_f} / {nb_t} faits"
+                ws.merge_cells(f"A{ri}:{get_column_letter(N)}{ri}")
+                sep = ws.cell(ri, 1, txt)
+                sep.fill = _fill(C_SUB); sep.font = _font(True, C_DARK, 10)
+                sep.alignment = _align("left"); ws.row_dimensions[ri].height = 20
+                ri += 1
+
+            st = r["statut"]
+            if st.startswith("Non"):
+                bg, fg = C_NOK_BG, C_NOK_FG
+            elif st.startswith("Fait par"):
+                bg, fg = C_JOK_BG, C_JOK_FG
+            else:  # Fait / Fait le XX
+                bg, fg = C_OK_BG, C_OK_FG
+
+            ht   = round(r["val"], 2) if r["val"] is not None else ""
+            vals = [r["ref_date"], r["jour"], r["salle"], r["machine"], st, ht]
+
+            for ci, v in enumerate(vals, 1):
+                c = ws.cell(ri, ci, v)
+                c.fill = _fill(bg); c.border = _brd
+                c.font = _font(bold=(ci == 5), color=(fg if ci == 5 else "000000"), size=9)
+                c.alignment = _align("center" if ci in (1, 2, 4, 5, 6) else "left")
+                if ci == 6 and isinstance(v, float):
+                    c.number_format = "#,##0.00 €"
+            ws.row_dimensions[ri].height = 16
+            ri += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
+    """Section Bilan semaine dans la page CR — indépendante de tout autre upload."""
+    st.markdown("---")
+    st.markdown("### 📅 Bilan semaine")
+    st.caption(
+        "Uploadez l'export inventaires de la semaine. "
+        "Chaque salle planifiée apparaît — **verte** si faite, **bleue** si absente, **violette** si joker."
+    )
+
+    up = st.file_uploader(
+        "Export inventaires (CSV)", type=["csv"],
+        key="cr_bilan_upload", label_visibility="collapsed",
+    )
+    if up is None:
+        st.info("Déposez un fichier CSV pour générer le bilan.")
+        return
+    if not plannings_mongo:
+        st.warning("⚠️ Plannings non disponibles.")
+        return
+
+    try:
+        with st.spinner("Analyse…"):
+            df_bilan   = _parse_bilan_export(up.read())
+            bilan_rows = _build_bilan_cr(df_bilan, plannings_mongo)
+    except Exception as e:
+        st.error(f"❌ {e}")
+        return
+
+    if not bilan_rows:
+        st.warning("Aucune correspondance entre le fichier et les plannings.")
+        return
+
+    code_to_prenom = (
+        dict(zip(reappros_df["code"].str.strip(), reappros_df["prenom"].str.strip()))
+        if not reappros_df.empty else {}
+    )
+
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    nb_plan  = len(bilan_rows)
+    nb_fait  = sum(1 for r in bilan_rows if r["statut"].startswith("Fait"))
+    nb_joker = sum(1 for r in bilan_rows if r["statut"].startswith("Fait par"))
+    nb_nf    = sum(1 for r in bilan_rows if r["statut"] == "Non fait")
+    pct      = round((nb_fait + nb_joker) / nb_plan * 100, 1) if nb_plan else 0
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("📋 Planifiées",  nb_plan)
+    k2.metric("✅ Faites",      nb_fait,  delta=f"{pct}%")
+    k3.metric("👥 Fait par autre", nb_joker)
+    k4.metric("🔵 Non faites",  nb_nf,
+              delta=f"-{nb_nf}" if nb_nf else None, delta_color="inverse")
+    k5.metric("👥 Réappros",    len({r["reappro"] for r in bilan_rows}))
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    col_exp, _ = st.columns([1, 4])
+    with col_exp:
+        st.download_button(
+            "📥 Exporter Excel",
+            data=_export_bilan_cr_excel(bilan_rows, code_to_prenom),
+            file_name=f"bilan_semaine_{datetime.date.today():%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="cr_bilan_dl",
+        )
+
+    st.divider()
+
+    # ── Accordéons par réappro ────────────────────────────────────────────────
+    for reappro in sorted({r["reappro"] for r in bilan_rows}):
+        sub    = [r for r in bilan_rows if r["reappro"] == reappro]
+        nb_f   = sum(1 for r in sub if r["statut"].startswith("Fait"))
+        nb_jok = sum(1 for r in sub if r["statut"].startswith("Fait par"))
+        nb_t   = len(sub)
+        nb_a   = nb_t - nb_f - nb_jok
+        pct_r  = round((nb_f + nb_jok) / nb_t * 100, 1) if nb_t else 0
+        prenom = code_to_prenom.get(reappro, reappro)
+
+        titre = (
+            f"**{prenom}** ({reappro}) — {nb_f + nb_jok}/{nb_t}"
+            f" · ✅ {nb_f} · 🔀 {nb_jok} · 🔵 {nb_a} abs · {pct_r}%"
+        )
+        with st.expander(titre, expanded=False):
+            for jour_fr in _JOURS_ORDER:
+                day_rows = [r for r in sub if r["jour"] == jour_fr]
+                if not day_rows:
+                    continue
+                nb_df = sum(1 for r in day_rows if not r["statut"].startswith("Non"))
+                nb_dt = len(day_rows)
+                ref_date = day_rows[0]["ref_date"]
+
+                color = "#2e7d32" if nb_df == nb_dt else ("#1565c0" if nb_df == 0 else "#e65100")
+                icon  = "✅" if nb_df == nb_dt else ("🔵" if nb_df == 0 else "🟠")
+                st.markdown(
+                    f'<div style="border-left:4px solid {color};padding:6px 12px;'
+                    f'border-radius:4px;margin-bottom:4px">'
+                    f'<b>{icon} {jour_fr} {ref_date}</b> — {nb_df}/{nb_dt} faits</div>',
+                    unsafe_allow_html=True,
+                )
+
+                df_display = pd.DataFrame([{
+                    "Machine": r["machine"],
+                    "Salle":   r["salle"],
+                    "Statut":  r["statut"],
+                    "Val. HT": f"{r['val']:.2f} €" if r["val"] else "",
+                } for r in day_rows])
+
+                def _row_style(row):
+                    if row["Statut"].startswith("Non"):
+                        return ["background-color:#BBDEFB"] * len(row)
+                    elif row["Statut"].startswith("Fait par"):
+                        return ["background-color:#E8DAEF"] * len(row)
+                    else:
+                        return ["background-color:#D4EDDA"] * len(row)
+
+                st.dataframe(
+                    df_display.style.apply(_row_style, axis=1),
+                    hide_index=True, use_container_width=True,
+                    height=min(300, 38 + len(df_display) * 35),
+                )
+
+
+# ────────────────────────────────────────────────────────
 # RENDER
 # ────────────────────────────────────────────────────────
 
@@ -645,3 +1026,5 @@ def render():
                 use_container_width=True,
                 hide_index=True,
             )
+
+    _section_bilan_cr(plannings_mongo, reappros_df)
