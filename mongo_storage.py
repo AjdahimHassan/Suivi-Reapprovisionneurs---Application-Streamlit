@@ -357,6 +357,75 @@ def list_inventaires_semaines() -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BILAN SEMAINE CR — résultats calculés du bilan semaine (salles faites/non faites)
+#
+# Un document par semaine ISO :
+# {
+#   "iso_year":  2026,
+#   "iso_week":  15,
+#   "saved_at":  "2026-04-17T10:00:00",
+#   "rows": [{"reappro": "RIDF1", "jour": "Lundi", "ref_date": "13/04/2026",
+#             "machine": "2219M1", "salle": "...", "statut": "Non fait", "val": null}, ...]
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_bilan_semaine_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["bilan_semaine"]
+
+
+def save_bilan_semaine(rows: list, iso_year: int, iso_week: int, label: str = "") -> None:
+    """Sauvegarde (upsert) le bilan calculé pour une semaine ISO."""
+    col = _get_bilan_semaine_col()
+    col.update_one(
+        {"iso_year": iso_year, "iso_week": iso_week},
+        {"$set": {
+            "iso_year": iso_year,
+            "iso_week": iso_week,
+            "label":    label,
+            "rows":     rows,
+        }},
+        upsert=True,
+    )
+
+
+def load_bilan_semaine(iso_year: int = None, iso_week: int = None) -> dict:
+    """
+    Charge le bilan d'une semaine ISO.
+    Si iso_year/iso_week non fournis, charge la semaine la plus récente.
+    Retourne le document ou {} si absent.
+    """
+    try:
+        col = _get_bilan_semaine_col()
+        if iso_year is not None and iso_week is not None:
+            doc = col.find_one({"iso_year": iso_year, "iso_week": iso_week}, {"_id": 0})
+        else:
+            doc = col.find_one({}, {"_id": 0}, sort=[("iso_year", -1), ("iso_week", -1)])
+        return doc or {}
+    except Exception:
+        return {}
+
+
+def list_bilan_semaines() -> list:
+    """Liste toutes les semaines de bilan disponibles (triées décroissantes). Retourne [] si erreur."""
+    try:
+        col  = _get_bilan_semaine_col()
+        docs = list(col.find(
+            {},
+            {"_id": 0, "iso_year": 1, "iso_week": 1, "saved_at": 1},
+        ).sort([("iso_year", -1), ("iso_week", -1)]))
+        return docs
+    except Exception:
+        return []
+
+
+def delete_bilan_semaine(iso_year: int, iso_week: int) -> None:
+    """Supprime le bilan d'une semaine ISO."""
+    _get_bilan_semaine_col().delete_one({"iso_year": iso_year, "iso_week": iso_week})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SALLES TRAITÉES — contrôle des prix
 # ─────────────────────────────────────────────────────────────────────────────
 

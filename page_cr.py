@@ -11,10 +11,17 @@ Sources :
 import io
 import datetime
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
-from mongo_storage import _get_client
+import re as _re
+
+from mongo_storage import (
+    _get_client,
+    save_bilan_semaine, load_bilan_semaine, list_bilan_semaines, delete_bilan_semaine,
+    list_inventaires_semaines, load_inventaires_semaine,
+)
 from page_inventaires import _parse_planning_for_reappro, WEEKDAY_TO_JOUR
 
 # ────────────────────────────────────────────────────────
@@ -377,6 +384,144 @@ def _build_inventaire_cr_text(
     return "\n\n".join(result_blocks)
 
 
+def _extract_joker_name(statut: str) -> str:
+    """Extrait le prénom du joker depuis 'Fait par X' ou 'Fait par X (le DD/MM/YY)'."""
+    return _re.sub(r"\s*\(le .+?\)$", "", statut[len("Fait par"):]).strip()
+
+
+def _build_inventaire_cr_text_from_bilan(
+    bilan_rows: list,
+    reappros_df: pd.DataFrame,
+    zone: str,
+    include_vendredi: bool = False,
+) -> str:
+    """
+    Génère le même texte que _build_inventaire_cr_text mais depuis les bilan_rows
+    déjà calculés (collection bilan_semaine).
+    Statuts : 'Fait' | 'Fait le DD/MM' | 'Fait par X' | 'Fait par X (le DD/MM)' | 'Non fait'
+    """
+    if not bilan_rows:
+        return "Aucune donnée de bilan disponible."
+
+    if not reappros_df.empty and zone:
+        zone_codes = set(reappros_df[reappros_df["zone"] == zone]["code"].str.strip())
+    else:
+        zone_codes = {r["reappro"] for r in bilan_rows}
+
+    code_to_prenom = (
+        dict(zip(reappros_df["code"].str.strip(), reappros_df["prenom"].str.strip()))
+        if not reappros_df.empty else {}
+    )
+
+    rows = [
+        r for r in bilan_rows
+        if r["reappro"] in zone_codes
+        and (include_vendredi or r.get("jour") != "Vendredi")
+    ]
+    if not rows:
+        return "Aucun réappro trouvé pour cette zone dans le bilan."
+
+    def _accord(n):
+        return "n'ont pas été faites" if n > 1 else "n'a pas été faite"
+
+    result_blocks = []
+
+    for reappro in sorted(zone_codes):
+        sub = [r for r in rows if r["reappro"] == reappro]
+        if not sub:
+            continue
+
+        prenom = code_to_prenom.get(reappro, reappro)
+
+        def _unique_salles(rows, pred):
+            """Unique cleaned salle names for rows matching pred."""
+            seen, out = set(), []
+            for r in rows:
+                if pred(r):
+                    s = r["salle"].strip().rstrip(",").strip()
+                    if s not in seen:
+                        seen.add(s)
+                        out.append(s)
+            return out
+
+        # Salle done = statut starts with "Fait" (own OR joker — we don't care who did it)
+        def _sauf_label(salle: str, row) -> str:
+            """'salle' or 'salle (fait par Prénom)' depending on whether it was a joker."""
+            if row["statut"].startswith("Fait par"):
+                code = _extract_joker_name(row["statut"])
+                name = code_to_prenom.get(code, code)
+                return f"{salle} (fait par {name})"
+            return salle
+
+        week_done_rows = [r for r in sub if r["statut"].startswith("Fait")]
+        week_missing   = _unique_salles(sub, lambda r: r["statut"] == "Non fait")
+
+        # Deduplicate done rows by salle name, keeping first occurrence
+        _seen_done: set = set()
+        week_done_dedup = []
+        for r in week_done_rows:
+            s = r["salle"].strip().rstrip(",").strip()
+            if s not in _seen_done:
+                _seen_done.add(s)
+                week_done_dedup.append((s, r))
+        week_done = len(week_done_dedup)
+
+        if week_done == 0 and week_missing:
+            result_blocks.append(f"{prenom} ({reappro}) :\n- aucune salle faite de la semaine")
+            continue
+
+        if week_done <= 2 and week_missing:
+            sauf = [_sauf_label(s, r) for s, r in week_done_dedup]
+            result_blocks.append(
+                f"{prenom} ({reappro}) :\n"
+                f"- aucune salle faite cette semaine sauf {', '.join(sauf)}"
+            )
+            continue
+
+        day_lines = []
+        for jour_fr in _JOURS_ORDER:
+            if jour_fr == "Vendredi" and not include_vendredi:
+                continue
+            day_sub = [r for r in sub if r.get("jour") == jour_fr]
+            if not day_sub:
+                continue
+
+            # Deduplicate done rows for this day
+            _seen_day: set = set()
+            done_dedup = []
+            for r in day_sub:
+                if r["statut"].startswith("Fait"):
+                    s = r["salle"].strip().rstrip(",").strip()
+                    if s not in _seen_day:
+                        _seen_day.add(s)
+                        done_dedup.append((s, r))
+
+            missing = _unique_salles(day_sub, lambda r: r["statut"] == "Non fait")
+
+            if not missing:
+                continue  # tout fait ce jour → on ne mentionne rien
+
+            done_count = len(done_dedup)
+
+            if done_count == 0:
+                line = f"- {jour_fr} : aucune salle n'a été faite"
+            elif done_count == 1:
+                s, r = done_dedup[0]
+                line = f"- {jour_fr} : aucune salle n'a été faite sauf {_sauf_label(s, r)}"
+            else:
+                line = f"- {jour_fr} : {', '.join(missing)} {_accord(len(missing))}"
+
+            day_lines.append(line)
+
+        if day_lines:
+            result_blocks.append(f"{prenom} ({reappro}) :\n" + "\n".join(day_lines))
+
+    if not result_blocks:
+        return "Tous les inventaires ont été réalisés conformément au planning."
+
+    return "\n\n".join(result_blocks)
+
+
 # ────────────────────────────────────────────────────────
 # BILAN SEMAINE (page CR, indépendant)
 # ────────────────────────────────────────────────────────
@@ -642,28 +787,65 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
     """Section Bilan semaine dans la page CR — indépendante de tout autre upload."""
     st.markdown("---")
     st.markdown("### 📅 Bilan semaine")
-    st.caption(
-        "Uploadez l'export inventaires de la semaine. "
-        "Chaque salle planifiée apparaît — **verte** si faite, **bleue** si absente, **violette** si joker."
-    )
 
-    up = st.file_uploader(
-        "Export inventaires (CSV)", type=["csv"],
-        key="cr_bilan_upload", label_visibility="collapsed",
-    )
-    if up is None:
-        st.info("Déposez un fichier CSV pour générer le bilan.")
-        return
     if not plannings_mongo:
         st.warning("⚠️ Plannings non disponibles.")
         return
 
-    try:
-        with st.spinner("Analyse…"):
-            df_bilan   = _parse_bilan_export(up.read())
-            bilan_rows = _build_bilan_cr(df_bilan, plannings_mongo)
-    except Exception as e:
-        st.error(f"❌ {e}")
+    # ── Source : BDD ou fichier ───────────────────────────────────────────────
+    saved_bilans = list_bilan_semaines()
+    bilan_rows: list = []
+
+    if saved_bilans:
+        sem_labels = [d.get("label") or f"S{d['iso_week']} {d['iso_year']}" for d in saved_bilans]
+        st.caption("**Charger un bilan sauvegardé :**")
+        col_sel, col_load, col_del = st.columns([3, 1, 1])
+        with col_sel:
+            sel_idx = st.selectbox(
+                "Semaine BDD", range(len(sem_labels)),
+                format_func=lambda i: sem_labels[i],
+                key="cr_bilan_bdd_sel", label_visibility="collapsed",
+            )
+        with col_load:
+            if st.button("📂 Charger", key="cr_bilan_bdd_btn", use_container_width=True):
+                sel = saved_bilans[sel_idx]
+                doc = load_bilan_semaine(sel["iso_year"], sel["iso_week"])
+                st.session_state["cr_bilan_rows_bdd"] = doc.get("rows", [])
+                st.session_state["cr_bilan_src_label"] = sem_labels[sel_idx]
+        with col_del:
+            if st.button("🗑️ Supprimer", key="cr_bilan_bdd_del", use_container_width=True,
+                         type="secondary"):
+                sel = saved_bilans[sel_idx]
+                delete_bilan_semaine(sel["iso_year"], sel["iso_week"])
+                st.session_state.pop("cr_bilan_rows_bdd", None)
+                st.success(f"✅ Bilan S{sel['iso_week']} {sel['iso_year']} supprimé.")
+                st.rerun()
+
+        if "cr_bilan_rows_bdd" in st.session_state and st.session_state["cr_bilan_rows_bdd"]:
+            bilan_rows = st.session_state["cr_bilan_rows_bdd"]
+            st.success(f"📂 Bilan {st.session_state.get('cr_bilan_src_label', '')} chargé depuis la BDD.")
+
+        st.markdown("<div style='margin:8px 0;text-align:center;color:#aaa'>— ou —</div>",
+                    unsafe_allow_html=True)
+
+    st.caption("**Uploader un nouveau fichier :**")
+    up = st.file_uploader(
+        "Export inventaires (CSV)", type=["csv"],
+        key="cr_bilan_upload", label_visibility="collapsed",
+    )
+    if up is not None:
+        try:
+            with st.spinner("Analyse…"):
+                df_bilan   = _parse_bilan_export(up.read())
+                bilan_rows = _build_bilan_cr(df_bilan, plannings_mongo)
+                # reset BDD cache so the fresh file takes precedence
+                st.session_state.pop("cr_bilan_rows_bdd", None)
+        except Exception as e:
+            st.error(f"❌ {e}")
+            return
+
+    if not bilan_rows:
+        st.info("Déposez un fichier CSV ou chargez un bilan depuis la BDD.")
         return
 
     if not bilan_rows:
@@ -734,7 +916,7 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
 
     # ── KPIs ─────────────────────────────────────────────────────────────────
     nb_plan  = len(filtered_rows)
-    nb_fait  = sum(1 for r in filtered_rows if r["statut"].startswith("Fait"))
+    nb_fait  = sum(1 for r in filtered_rows if r["statut"].startswith("Fait") and not r["statut"].startswith("Fait par"))
     nb_joker = sum(1 for r in filtered_rows if r["statut"].startswith("Fait par"))
     nb_nf    = sum(1 for r in filtered_rows if r["statut"] == "Non fait")
     pct      = round((nb_fait + nb_joker) / nb_plan * 100, 1) if nb_plan else 0
@@ -747,8 +929,175 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
               delta=f"-{nb_nf}" if nb_nf else None, delta_color="inverse")
     k5.metric("👥 Réappros",    len({r["reappro"] for r in filtered_rows}))
 
-    # ── Export ────────────────────────────────────────────────────────────────
-    col_exp, _ = st.columns([1, 4])
+    # ── Graphiques ────────────────────────────────────────────────────────────
+    _COLOR_SCALE = alt.Scale(
+        domain=["✅ Fait", "🔀 Fait par autre", "🔵 Non fait"],
+        range=["#2e7d32", "#7b1fa2", "#1565c0"],
+    )
+
+    chart_df = pd.DataFrame([{
+        "prenom":  code_to_prenom.get(r["reappro"], r["reappro"]),
+        "reappro": r["reappro"],
+        "jour":    r["jour"],
+        "cat": (
+            "🔀 Fait par autre" if r["statut"].startswith("Fait par")
+            else "✅ Fait"       if r["statut"].startswith("Fait")
+            else "🔵 Non fait"
+        ),
+    } for r in filtered_rows])
+
+    # — Donut global —
+    donut_src = chart_df.groupby("cat").size().reset_index(name="n")
+    donut_src["pct_label"] = donut_src["n"].apply(
+        lambda v: f"{round(v / donut_src['n'].sum() * 100, 1)}%"
+    )
+    donut = (
+        alt.Chart(donut_src)
+        .mark_arc(innerRadius=52, outerRadius=90)
+        .encode(
+            theta=alt.Theta("n:Q"),
+            color=alt.Color("cat:N", scale=_COLOR_SCALE,
+                            legend=alt.Legend(title=None, orient="bottom",
+                                              labelFontSize=11)),
+            tooltip=[
+                alt.Tooltip("cat:N",       title="Statut"),
+                alt.Tooltip("n:Q",         title="Nb salles"),
+                alt.Tooltip("pct_label:N", title="Part"),
+            ],
+        )
+        .properties(title=alt.TitleParams("Composition globale", fontSize=13),
+                    width=210, height=210)
+    )
+
+    # — Barres verticales empilées (normalisées) par réappro —
+    joker_rows = [
+        {"prenom": code_to_prenom.get(r["reappro"], r["reappro"]),
+         "joker":  _extract_joker_name(r["statut"])}
+        for r in filtered_rows if r["statut"].startswith("Fait par")
+    ]
+    joker_by_prenom = (
+        pd.DataFrame(joker_rows).groupby("prenom")["joker"]
+        .apply(lambda s: ", ".join(sorted(set(s))))
+        .reset_index(name="jokers")
+        if joker_rows else pd.DataFrame(columns=["prenom", "jokers"])
+    )
+
+    bar_src = chart_df.groupby(["prenom", "cat"]).size().reset_index(name="n")
+    bar_src = bar_src.merge(joker_by_prenom, on="prenom", how="left")
+    bar_src["jokers"] = bar_src.apply(
+        lambda row: row["jokers"] if row["cat"] == "🔀 Fait par autre" else "", axis=1
+    ).fillna("")
+    totals    = chart_df.groupby("prenom").size().rename("total")
+    done_cnt  = (
+        chart_df[chart_df["cat"] != "🔵 Non fait"]
+        .groupby("prenom").size().rename("done")
+    )
+    pct_order = (
+        pd.concat([totals, done_cnt], axis=1)
+        .fillna(0)
+        .assign(pct=lambda d: d["done"] / d["total"])
+        .sort_values("pct", ascending=False)
+        .index.tolist()
+    )
+    lolli_chart = (
+        alt.Chart(bar_src)
+        .mark_bar()
+        .encode(
+            x=alt.X("prenom:N", sort=pct_order,
+                    axis=alt.Axis(title=None, labelAngle=-40, labelFontSize=11)),
+            y=alt.Y("n:Q", stack="normalize",
+                    axis=alt.Axis(format="%", title=None, tickCount=4)),
+            color=alt.Color("cat:N", scale=_COLOR_SCALE,
+                            legend=alt.Legend(title=None, orient="top",
+                                              labelFontSize=11)),
+            tooltip=[
+                alt.Tooltip("prenom:N", title="Réappro"),
+                alt.Tooltip("cat:N",    title="Statut"),
+                alt.Tooltip("n:Q",      title="Nb salles"),
+                alt.Tooltip("jokers:N", title="Fait par"),
+            ],
+        )
+        .properties(
+            title=alt.TitleParams("Taux de complétion par réappro", fontSize=13),
+            height=220,
+        )
+    )
+
+    # — Non faites par jour —
+    day_src = (
+        chart_df[chart_df["cat"] == "🔵 Non fait"]
+        .groupby("jour").size().reset_index(name="non_fait")
+    )
+    # Ensure all days present even with 0
+    day_src = (
+        pd.DataFrame({"jour": _JOURS_ORDER})
+        .merge(day_src, on="jour", how="left")
+        .fillna(0)
+        .astype({"non_fait": int})
+    )
+    max_nf = int(day_src["non_fait"].max()) if not day_src.empty else 1
+
+    day_bars = (
+        alt.Chart(day_src)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X("jour:N", sort=_JOURS_ORDER, axis=alt.Axis(title=None, labelFontSize=13)),
+            y=alt.Y("non_fait:Q", axis=alt.Axis(title="Non faites", tickMinStep=1)),
+            color=alt.condition(
+                alt.datum.non_fait >= max_nf,
+                alt.value("#c62828"),
+                alt.value("#1565c0"),
+            ),
+            tooltip=[
+                alt.Tooltip("jour:N",     title="Jour"),
+                alt.Tooltip("non_fait:Q", title="Non faites"),
+            ],
+        )
+    )
+    day_text = (
+        alt.Chart(day_src)
+        .mark_text(dy=-8, fontSize=13, fontWeight="bold", color="#333")
+        .encode(
+            x=alt.X("jour:N", sort=_JOURS_ORDER),
+            y=alt.Y("non_fait:Q"),
+            text=alt.Text("non_fait:Q"),
+        )
+    )
+    day_chart = (
+        alt.layer(day_bars, day_text)
+        .properties(
+            title=alt.TitleParams("Non faites par jour", fontSize=13),
+            width=460, height=260,
+        )
+    )
+
+    # ── Onglets ───────────────────────────────────────────────────────────────
+    tab_lolli, tab_donut, tab_jour = st.tabs([
+        "📊 Complétion par réappro",
+        "🍩 Répartition globale",
+        "📅 Non faites par jour",
+    ])
+
+    with tab_lolli:
+        st.altair_chart(lolli_chart, use_container_width=True)
+
+    with tab_donut:
+        c_left, c_right = st.columns([1, 2])
+        with c_left:
+            st.altair_chart(donut.properties(width=260, height=260),
+                            use_container_width=False)
+        with c_right:
+            detail = donut_src.rename(columns={
+                "cat": "Statut", "n": "Nb salles", "pct_label": "Part"
+            })
+            st.dataframe(detail[["Statut", "Nb salles", "Part"]],
+                         hide_index=True, use_container_width=False)
+
+    with tab_jour:
+        st.altair_chart(day_chart, use_container_width=False)
+
+    # ── Export + Sauvegarde BDD ───────────────────────────────────────────────
+    col_exp, col_name, col_save = st.columns([1, 2, 1])
     with col_exp:
         st.download_button(
             "📥 Exporter Excel",
@@ -757,13 +1106,40 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="cr_bilan_dl",
         )
+    with col_name:
+        ref_dt_default = datetime.datetime.strptime(bilan_rows[0]["ref_date"], "%d/%m/%Y")
+        iso_cal_default = ref_dt_default.isocalendar()
+        default_label = f"S{iso_cal_default[1]} {iso_cal_default[0]}"
+        save_label = st.text_input(
+            "Nom de la sauvegarde",
+            value=default_label,
+            key="cr_bilan_save_label",
+            label_visibility="collapsed",
+            placeholder="Ex : S15 2026 — semaine normale",
+        )
+    with col_save:
+        if st.button("💾 Sauvegarder en BDD", key="cr_bilan_save",
+                     use_container_width=True):
+            if not save_label.strip():
+                st.warning("Donnez un nom à la sauvegarde.")
+            else:
+                try:
+                    ref_dt  = datetime.datetime.strptime(bilan_rows[0]["ref_date"], "%d/%m/%Y")
+                    iso_cal = ref_dt.isocalendar()
+                    iso_y, iso_w = int(iso_cal[0]), int(iso_cal[1])
+                    save_bilan_semaine(bilan_rows, iso_y, iso_w, label=save_label.strip())
+                    st.session_state["cr_bilan_rows_bdd"]  = bilan_rows
+                    st.session_state["cr_bilan_src_label"] = save_label.strip()
+                    st.success(f"✅ « {save_label.strip()} » sauvegardé en BDD !")
+                except Exception as e:
+                    st.error(f"❌ Erreur lors de la sauvegarde : {e}")
 
     st.divider()
 
     # ── Accordéons par réappro ────────────────────────────────────────────────
     for reappro in sorted({r["reappro"] for r in filtered_rows}):
         sub    = [r for r in filtered_rows if r["reappro"] == reappro]
-        nb_f   = sum(1 for r in sub if r["statut"].startswith("Fait"))
+        nb_f   = sum(1 for r in sub if r["statut"].startswith("Fait") and not r["statut"].startswith("Fait par"))
         nb_jok = sum(1 for r in sub if r["statut"].startswith("Fait par"))
         nb_t   = len(sub)
         nb_a   = nb_t - nb_f - nb_jok
@@ -903,20 +1279,12 @@ def render():
 
         if checked:
             if titre == "Inventaire":
-                # ── Section Inventaire — données depuis la BDD ──────────────
-                try:
-                    from mongo_storage import list_inventaires_semaines, load_inventaires_semaine
-                    semaines_dispo = list_inventaires_semaines()
-                except Exception:
-                    semaines_dispo = []
+                # ── Source 1 : inventaires_semaine (page Inventaires) ───────
+                semaines_dispo  = list_inventaires_semaines()
+                bilan_semaines  = list_bilan_semaines()
 
-                if not semaines_dispo:
-                    st.caption(
-                        "⚠️ Aucune semaine sauvegardée. "
-                        "Uploadez un CSV dans la page Inventaires et cliquez sur "
-                        "**💾 Sauvegarder en BDD**."
-                    )
-                else:
+                if semaines_dispo:
+                    st.caption("**Depuis la page Inventaires :**")
                     sem_labels = [
                         f"S{d['iso_week']} {d['iso_year']}"
                         + (f"  (sauvé le {d['saved_at'][:10]})" if d.get("saved_at") else "")
@@ -925,7 +1293,7 @@ def render():
                     col_sel, col_vend, col_gen_inv = st.columns([3, 2, 2])
                     with col_sel:
                         sel_idx = st.selectbox(
-                            "Semaine", range(len(sem_labels)),
+                            "Semaine inv", range(len(sem_labels)),
                             format_func=lambda i: sem_labels[i],
                             key=f"cr_inv_sem_{zone}",
                             label_visibility="collapsed",
@@ -937,22 +1305,65 @@ def render():
                             key=f"cr_inv_vend_{zone}",
                         )
                     with col_gen_inv:
-                        if st.button("🔄 Générer le texte", key=f"cr_inv_gen_{zone}",
+                        if st.button("🔄 Générer", key=f"cr_inv_gen_{zone}",
                                      use_container_width=True):
                             with st.spinner("Chargement…"):
-                                sel_doc = semaines_dispo[sel_idx]
-                                inv_doc = load_inventaires_semaine(
-                                    sel_doc["iso_year"], sel_doc["iso_week"]
-                                )
+                                sel_doc      = semaines_dispo[sel_idx]
+                                inv_doc      = load_inventaires_semaine(sel_doc["iso_year"], sel_doc["iso_week"])
                                 done_records = inv_doc.get("done", [])
-                                generated = _build_inventaire_cr_text(
-                                    done_records,
-                                    plannings_mongo, reappros_df, zone,
+                                generated    = _build_inventaire_cr_text(
+                                    done_records, plannings_mongo, reappros_df, zone,
                                     include_vendredi=include_vend,
                                 )
                             st.session_state[f"cr_inv_text_{zone}"] = generated
                             st.session_state[f"cr_txt_{titre}_{zone}"] = generated
                             st.rerun()
+
+                # ── Source 2 : bilan_semaine (page CR) ──────────────────────
+                if bilan_semaines:
+                    if semaines_dispo:
+                        st.markdown(
+                            "<div style='margin:6px 0;text-align:center;color:#aaa;font-size:0.85rem'>— ou depuis le bilan semaine —</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("**Depuis le bilan semaine :**")
+
+                    bilan_labels = [d.get("label") or f"S{d['iso_week']} {d['iso_year']}" for d in bilan_semaines]
+                    col_bsel, col_bvend, col_bgen = st.columns([3, 2, 2])
+                    with col_bsel:
+                        bsel_idx = st.selectbox(
+                            "Semaine bilan", range(len(bilan_labels)),
+                            format_func=lambda i: bilan_labels[i],
+                            key=f"cr_bilan_inv_sem_{zone}",
+                            label_visibility="collapsed",
+                        )
+                    with col_bvend:
+                        binclude_vend = st.checkbox(
+                            "Inclure vendredi",
+                            value=False,
+                            key=f"cr_bilan_inv_vend_{zone}",
+                        )
+                    with col_bgen:
+                        if st.button("🔄 Générer", key=f"cr_bilan_inv_gen_{zone}",
+                                     use_container_width=True):
+                            with st.spinner("Chargement…"):
+                                bsel_doc   = bilan_semaines[bsel_idx]
+                                bilan_doc  = load_bilan_semaine(bsel_doc["iso_year"], bsel_doc["iso_week"])
+                                generated  = _build_inventaire_cr_text_from_bilan(
+                                    bilan_doc.get("rows", []),
+                                    reappros_df, zone,
+                                    include_vendredi=binclude_vend,
+                                )
+                            st.session_state[f"cr_inv_text_{zone}"] = generated
+                            st.session_state[f"cr_txt_{titre}_{zone}"] = generated
+                            st.rerun()
+
+                if not semaines_dispo and not bilan_semaines:
+                    st.caption(
+                        "⚠️ Aucune donnée sauvegardée. "
+                        "Utilisez **💾 Sauvegarder en BDD** depuis la page Inventaires ou le Bilan semaine ci-dessous."
+                    )
 
                 inv_default = st.session_state.get(f"cr_inv_text_{zone}",
                                                     SECTION_DEFAULTS.get("Inventaire", ""))
