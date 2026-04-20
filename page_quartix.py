@@ -20,6 +20,7 @@ from mongo_storage import (
     load_quartix_vehicle,
     load_all_quartix_vehicles,
     upsert_quartix_vehicle,
+    upsert_quartix_vehicle_info,
     load_plannings_from_mongo,
     load_geocode_cache,
     save_geocode_entry,
@@ -1941,12 +1942,425 @@ def _render_tab_passages() -> None:
     _render_passages_cache_admin()
 
 
+# ── Onglet 3 : Analyse Hebdomadaire ──────────────────────────────────────────
+
+_JOURS_FR = {0: "Lundi", 1: "Mardi", 2: "Mercredi", 3: "Jeudi",
+             4: "Vendredi", 5: "Samedi", 6: "Dimanche"}
+
+_MIN_TRIP_KM = 1.0  # seuil minimal — trajet < 1 km ignoré
+
+
+def _normalize_plate(plate: str) -> str:
+    """Normalise une plaque pour la comparaison (retire espaces/tirets, majuscules)."""
+    return re.sub(r'[\s\-\.]', '', str(plate)).upper()
+
+
+def _vehicle_label(plate: str, vehicles_db: dict) -> str:
+    """Retourne 'PLAQUE — Prénom' si connu, sinon juste la plaque."""
+    prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+    return f"{plate}  —  {prenom}" if prenom else plate
+
+
+def _build_hebdo_mail(
+    resp_nom: str,
+    date_min,
+    date_max,
+    cutoff,
+    late_trips: dict,
+    weekend_trips: dict,
+    vehicles_db: dict,
+) -> str:
+    date_str_min = date_min.strftime("%d/%m/%Y")
+    date_str_max = date_max.strftime("%d/%m/%Y")
+    cutoff_str   = cutoff.strftime("%H:%M")
+
+    lines = [
+        f"Objet : Rapport hebdomadaire des trajets — semaine du {date_str_min} au {date_str_max}",
+        "",
+        "Bonjour,",
+        "",
+        f"Suite à l'analyse des données Quartix pour la semaine du {date_str_min} au {date_str_max},",
+    ]
+
+    if not late_trips and not weekend_trips:
+        lines += [
+            "aucune anomalie n'a été détectée sur cette période.",
+            "",
+            "Les tournées se sont déroulées dans les horaires et jours habituels.",
+        ]
+    else:
+        lines.append("voici les points d'attention identifiés :")
+
+        if late_trips:
+            lines += ["", "─" * 60, f"TRAJETS HORS HORAIRES (après {cutoff_str})", "─" * 60]
+            for plate, trips in late_trips.items():
+                doc   = vehicles_db.get(plate, {})
+                prenom = doc.get("prenom", "").strip()
+                vlabel = f"{plate}" + (f" ({prenom})" if prenom else "")
+                lines.append(f"\nVéhicule {vlabel} :")
+                for t in trips:
+                    lines.append(
+                        f"  • {t['date'].strftime('%d/%m/%Y')} ({t['jour']}) : "
+                        f"départ {t['heure_dep']} – arrivée {t['heure_arr']} "
+                        f"| {t['lieu_dep']} → {t['lieu_arr']} ({t['distance_km']} km)"
+                    )
+
+        if weekend_trips:
+            lines += ["", "─" * 60, "ACTIVITÉ WEEKEND", "─" * 60]
+            for plate, days in weekend_trips.items():
+                doc    = vehicles_db.get(plate, {})
+                prenom = doc.get("prenom", "").strip()
+                vlabel = f"{plate}" + (f" ({prenom})" if prenom else "")
+                lines.append(f"\nVéhicule {vlabel} :")
+                for d in days:
+                    lines.append(
+                        f"  • {d['jour']} {d['date'].strftime('%d/%m/%Y')} : "
+                        f"{d['nb_trajets']} trajet(s), {d['distance_km']} km parcourus"
+                    )
+
+        lines += ["", "Cordialement,"]
+
+    lines += [""]
+    return "\n".join(lines)
+
+
+def _render_hebdo_vehicle_editor(vehicle_sheets: list[str], vehicles_db: dict) -> dict:
+    """
+    Affiche une section éditable des informations conducteurs/zones.
+    Retourne le vehicles_db mis à jour après une éventuelle sauvegarde.
+    """
+    with st.expander("⚙️ Informations conducteurs & zones (édition)", expanded=False):
+
+        # ── Sous-section : import depuis le guide Excel ────
+        with st.expander("📥 Importer depuis le guide Excel (Reappro_Guide_Plaque)", expanded=False):
+            guide_file = st.file_uploader(
+                "Fichier guide plaques (.xlsx)",
+                type=["xls", "xlsx"],
+                key="hebdo_guide_uploader",
+            )
+            if guide_file and st.button("⬇️ Importer", key="hebdo_guide_import"):
+                try:
+                    df_guide = pd.read_excel(guide_file)
+                    # Colonnes attendues (insensible à la casse)
+                    df_guide.columns = [c.strip() for c in df_guide.columns]
+                    col_map = {c.lower(): c for c in df_guide.columns}
+
+                    plate_col  = col_map.get("plaque")
+                    prenom_col = col_map.get("prenom")
+                    zone_col   = col_map.get("zone") or col_map.get("zone géographique")
+                    resp_col   = col_map.get("responsable")
+
+                    if not plate_col:
+                        st.error("Colonne 'Plaque' introuvable dans le guide.")
+                    else:
+                        # Index normalisé pour la correspondance
+                        guide_index: dict[str, dict] = {}
+                        for _, row in df_guide.iterrows():
+                            raw = str(row[plate_col]).strip()
+                            if raw and raw.lower() != "nan":
+                                guide_index[_normalize_plate(raw)] = {
+                                    "prenom":      str(row[prenom_col]).strip() if prenom_col and pd.notna(row.get(prenom_col)) else "",
+                                    "zone":        str(row[zone_col]).strip()   if zone_col   and pd.notna(row.get(zone_col))   else "",
+                                    "responsable": str(row[resp_col]).strip()   if resp_col   and pd.notna(row.get(resp_col))   else "",
+                                }
+
+                        matched, unmatched = 0, []
+                        for plate in vehicle_sheets:
+                            info = guide_index.get(_normalize_plate(plate))
+                            if info:
+                                upsert_quartix_vehicle_info(
+                                    plate=plate,
+                                    prenom=info["prenom"],
+                                    zone=info["zone"],
+                                    responsable=info["responsable"],
+                                )
+                                matched += 1
+                            else:
+                                unmatched.append(plate)
+
+                        st.success(f"✅ {matched} véhicule(s) mis à jour.")
+                        if unmatched:
+                            st.warning(f"Plaques non trouvées dans le guide : {', '.join(unmatched)}")
+                        # Recharge la BDD après import
+                        try:
+                            vehicles_db = load_all_quartix_vehicles()
+                        except Exception:
+                            pass
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur lecture guide : {e}")
+
+        # ── Tableau éditable ───────────────────────────────
+        st.markdown("**Modifiez directement les informations puis cliquez Sauvegarder.**")
+
+        rows = []
+        for plate in vehicle_sheets:
+            doc = vehicles_db.get(plate, {})
+            rows.append({
+                "Plaque":       plate,
+                "Conducteur":   doc.get("prenom", ""),
+                "Zone":         doc.get("zone", ""),
+                "Responsable":  doc.get("responsable", ""),
+            })
+
+        edited_df = st.data_editor(
+            pd.DataFrame(rows),
+            column_config={
+                "Plaque":      st.column_config.TextColumn("Plaque", disabled=True, width="small"),
+                "Conducteur":  st.column_config.TextColumn("Conducteur", width="medium"),
+                "Zone":        st.column_config.TextColumn("Zone", width="medium"),
+                "Responsable": st.column_config.TextColumn("Responsable", width="medium"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="hebdo_veh_editor",
+        )
+
+        if st.button("💾 Sauvegarder les modifications", type="primary", key="hebdo_veh_save"):
+            for _, row in edited_df.iterrows():
+                upsert_quartix_vehicle_info(
+                    plate=str(row["Plaque"]),
+                    prenom=str(row["Conducteur"]).strip(),
+                    zone=str(row["Zone"]).strip(),
+                    responsable=str(row["Responsable"]).strip(),
+                )
+            st.success("✅ Informations sauvegardées.")
+            try:
+                vehicles_db = load_all_quartix_vehicles()
+            except Exception:
+                pass
+            st.rerun()
+
+    return vehicles_db
+
+
+def _render_tab_hebdo() -> None:
+    from datetime import time as _dtime
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,{C_BLUE_DARK},{C_BLUE_LIGHT});"
+        f"padding:16px 20px;border-radius:10px;margin-bottom:20px'>"
+        f"<span style='color:white;font-size:17px;font-weight:700'>📅 Analyse Hebdomadaire</span>"
+        f"<p style='color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px'>"
+        f"Importez un rapport de trajets sur une semaine complète pour détecter les trajets "
+        f"hors horaires et les activités weekend, puis générez un mail récapitulatif.</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 1. Upload ─────────────────────────────────────────
+    col_up, _ = st.columns([2, 3])
+    with col_up:
+        uploaded = st.file_uploader(
+            "📂 Importer un rapport Quartix (semaine complète)",
+            type=["xls", "xlsx"],
+            key="quartix_hebdo_uploader",
+        )
+
+    if not uploaded:
+        st.markdown(
+            f"<div style='background:#f0f4fa;border-left:5px solid {C_BLUE_DARK};"
+            f"padding:16px 20px;border-radius:8px;margin-top:20px'>"
+            f"<b style='color:{C_BLUE_DARK}'>👆 Importez un fichier Excel QUARTIX (semaine)</b>"
+            f"<p style='margin:6px 0 0;color:#555;font-size:14px'>"
+            f"Format standard QUARTIX multi-feuilles : feuille résumé + une feuille par véhicule. "
+            f"Idéalement du lundi au lundi (7 jours).</p></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    try:
+        xls = pd.ExcelFile(uploaded)
+    except Exception as e:
+        st.error(f"Impossible de lire le fichier : {e}")
+        return
+
+    sheets = xls.sheet_names
+    if len(sheets) <= 1:
+        st.error("Fichier invalide : au moins 2 feuilles attendues (résumé + 1 feuille par véhicule).")
+        return
+
+    vehicle_sheets = sheets[1:]
+
+    # ── 2. Parsing de tous les véhicules ──────────────────
+    all_dfs: dict[str, pd.DataFrame] = {}
+    parse_errors: list[str] = []
+    for sheet in vehicle_sheets:
+        try:
+            df_raw = pd.read_excel(xls, sheet_name=sheet, header=4, usecols="B:N")
+            df_raw.columns = COLS
+            df_raw["_dep"] = pd.to_datetime(
+                df_raw["Départ"].astype(str).str.replace(r'\s+[A-Z]{2,5}$', '', regex=True),
+                errors="coerce",
+            )
+            df_raw["_arr"] = pd.to_datetime(
+                df_raw["Arrivée"].astype(str).str.replace(r'\s+[A-Z]{2,5}$', '', regex=True),
+                errors="coerce",
+            )
+            df_raw = df_raw.dropna(subset=["_dep"]).sort_values("_dep").reset_index(drop=True)
+            for col in ["Lieu de départ", "Lieu d'arrivée"]:
+                df_raw[col] = df_raw[col].astype(str).map(_clean_addr)
+            if not df_raw.empty:
+                all_dfs[sheet] = df_raw
+        except Exception as e:
+            parse_errors.append(f"{sheet} : {e}")
+
+    if parse_errors:
+        st.warning("Erreurs de lecture pour certaines feuilles : " + " | ".join(parse_errors))
+
+    if not all_dfs:
+        st.error("Aucune donnée valide trouvée dans le fichier.")
+        return
+
+    all_dep_series = pd.concat([df["_dep"] for df in all_dfs.values()])
+    date_min = all_dep_series.dt.date.min()
+    date_max = all_dep_series.dt.date.max()
+
+    # ── 3. Chargement BDD véhicules + éditeur ─────────────
+    try:
+        vehicles_db = load_all_quartix_vehicles()
+    except Exception:
+        vehicles_db = {}
+
+    vehicles_db = _render_hebdo_vehicle_editor(vehicle_sheets, vehicles_db)
+
+    # ── 4. Paramètres analyse ─────────────────────────────
+    st.divider()
+    col_cut, col_info = st.columns([2, 3])
+    with col_cut:
+        cutoff = st.time_input(
+            "🕐 Heure limite de fin de tournée",
+            value=_dtime(18, 0),
+            key="hebdo_cutoff",
+            help="Tout trajet ≥ 1 km dont le départ ou l'arrivée dépasse cette heure sera signalé.",
+        )
+    with col_info:
+        nb_veh     = len(all_dfs)
+        nb_trajets = sum(len(df) for df in all_dfs.values())
+        st.markdown(
+            f"<div style='background:#f0f4fa;border-radius:8px;padding:10px 14px;"
+            f"margin-top:24px;font-size:13px;color:{C_BLUE_DARK}'>"
+            f"<b>Période :</b> {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}"
+            f"&nbsp;|&nbsp; <b>Véhicules :</b> {nb_veh}"
+            f"&nbsp;|&nbsp; <b>Trajets :</b> {nb_trajets}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── 5. Analyse ────────────────────────────────────────
+    late_trips:    dict[str, list] = {}
+    weekend_trips: dict[str, list] = {}
+
+    for plate, df in all_dfs.items():
+        # Trajets hors horaires (jours de semaine, distance ≥ 1 km)
+        weekday_df = df[(df["_dep"].dt.weekday < 5) &
+                        (df["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM)].copy()
+        mask_late = weekday_df["_dep"].dt.time > cutoff
+        mask_arr  = weekday_df["_arr"].notna() & (weekday_df["_arr"].dt.time > cutoff)
+        late_df   = weekday_df[mask_late | mask_arr]
+        if not late_df.empty:
+            late_trips[plate] = [
+                {
+                    "date":        row["_dep"].date(),
+                    "jour":        _JOURS_FR[row["_dep"].weekday()],
+                    "heure_dep":   row["_dep"].strftime("%H:%M"),
+                    "heure_arr":   row["_arr"].strftime("%H:%M") if pd.notna(row["_arr"]) else "—",
+                    "lieu_dep":    str(row["Lieu de départ"]),
+                    "lieu_arr":    str(row["Lieu d'arrivée"]),
+                    "distance_km": _to_km(row["Distance totale"]),
+                }
+                for _, row in late_df.iterrows()
+            ]
+
+        # Activité weekend (distance totale du jour ≥ 1 km)
+        wkend_df = df[df["_dep"].dt.weekday >= 5]
+        if not wkend_df.empty:
+            days_list = []
+            for date, grp in wkend_df.groupby(wkend_df["_dep"].dt.date):
+                dist = round(grp["Distance totale"].apply(_to_km).sum(), 1)
+                if dist >= _MIN_TRIP_KM:
+                    days_list.append({
+                        "date":        date,
+                        "jour":        _JOURS_FR[date.weekday()],
+                        "nb_trajets":  int((grp["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM).sum()),
+                        "distance_km": dist,
+                    })
+            if days_list:
+                weekend_trips[plate] = days_list
+
+    # ── 6. Affichage résultats ────────────────────────────
+    st.divider()
+    st.markdown("### 🔍 Résultats de l'analyse")
+
+    for plate in vehicle_sheets:
+        if plate not in all_dfs:
+            continue
+        label_base = _vehicle_label(plate, vehicles_db)
+        has_late   = plate in late_trips
+        has_wkend  = plate in weekend_trips
+        tags       = (" ⚠️" if has_late else "") + (" 🗓️" if has_wkend else "")
+        label      = f"🚗 {label_base}{tags}"
+
+        with st.expander(label, expanded=(has_late or has_wkend)):
+            if not has_late and not has_wkend:
+                st.success("✅ Aucune anomalie détectée")
+            else:
+                if has_late:
+                    st.markdown(f"**⚠️ Trajets hors horaires** (après {cutoff.strftime('%H:%M')})")
+                    late_rows = [
+                        {
+                            "Date":           t["date"].strftime("%d/%m/%Y"),
+                            "Jour":           t["jour"],
+                            "Départ":         t["heure_dep"],
+                            "Arrivée":        t["heure_arr"],
+                            "Lieu départ":    t["lieu_dep"][:45] + "…" if len(t["lieu_dep"]) > 45 else t["lieu_dep"],
+                            "Lieu arrivée":   t["lieu_arr"][:45] + "…" if len(t["lieu_arr"]) > 45 else t["lieu_arr"],
+                            "Distance (km)":  t["distance_km"],
+                        }
+                        for t in late_trips[plate]
+                    ]
+                    st.dataframe(pd.DataFrame(late_rows), use_container_width=True, hide_index=True)
+
+                if has_wkend:
+                    st.markdown("**🗓️ Activité weekend**")
+                    wk_rows = [
+                        {
+                            "Jour":                 d["jour"],
+                            "Date":                 d["date"].strftime("%d/%m/%Y"),
+                            "Nb trajets (≥1 km)":   d["nb_trajets"],
+                            "Distance totale (km)":  d["distance_km"],
+                        }
+                        for d in weekend_trips[plate]
+                    ]
+                    st.dataframe(pd.DataFrame(wk_rows), use_container_width=True, hide_index=True)
+
+    # ── 7. Génération mail ────────────────────────────────
+    st.divider()
+    st.markdown("### 📧 Générer un mail de signalement")
+
+    # Génère (ou régénère) le mail à chaque clic, même si un mail existait déjà
+    if st.button("📝 Générer le mail", type="primary", key="hebdo_gen_mail"):
+        st.session_state["hebdo_mail_text"] = _build_hebdo_mail(
+            resp_nom      = "",
+            date_min      = date_min,
+            date_max      = date_max,
+            cutoff        = cutoff,
+            late_trips    = late_trips,
+            weekend_trips = weekend_trips,
+            vehicles_db   = vehicles_db,
+        )
+
+    if st.session_state.get("hebdo_mail_text"):
+        st.text_area("📋 Texte du mail (copiez-collez dans votre messagerie)",
+                     value=st.session_state["hebdo_mail_text"], height=440, key="hebdo_mail_area")
+
+
 # ── Point d'entrée de la page ─────────────────────────────────────────────────
 
 def render() -> None:
-    tab_carte, tab_passages = st.tabs([
+    tab_carte, tab_passages, tab_hebdo = st.tabs([
         "🗺️  Carte & Trajets",
         "📍  Analyse Passages Dépôt",
+        "📅  Analyse hebdomadaire",
     ])
 
     with tab_carte:
@@ -1954,3 +2368,6 @@ def render() -> None:
 
     with tab_passages:
         _render_tab_passages()
+
+    with tab_hebdo:
+        _render_tab_hebdo()

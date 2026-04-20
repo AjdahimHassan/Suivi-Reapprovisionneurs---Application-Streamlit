@@ -168,6 +168,22 @@ def upsert_quartix_vehicle(plate: str, employe: str,
     )
 
 
+def upsert_quartix_vehicle_info(plate: str, prenom: str = "",
+                                 zone: str = "", responsable: str = "") -> None:
+    """Met à jour conducteur/zone/responsable d'une plaque sans toucher au dépôt."""
+    _get_qv_col().update_one(
+        {"plate": plate},
+        {"$set": {
+            "plate":        plate,
+            "prenom":       prenom,
+            "zone":         zone,
+            "responsable":  responsable,
+            "updated_at":   datetime.date.today().isoformat(),
+        }},
+        upsert=True,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QUARTIX GEOCODE CACHE — collection `quartix_geocode_cache`
 #
