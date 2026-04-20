@@ -1648,13 +1648,70 @@ def _render_passages_result(
         label = (f"⚠️ {len(failed)} adresse(s) non géocodée(s) — invisibles pour la détection"
                  if failed else "✅ Toutes les adresses ont été géocodées")
         with st.expander(label, expanded=bool(failed)):
-            if failed:
-                st.caption("Ces adresses n'ont pas pu être localisées par l'API. "
-                           "Les trajets qui y passent ne sont donc pas analysés.")
-                for a in failed:
-                    st.markdown(f"- `{a}`")
-            else:
+            if not failed:
                 st.caption("Toutes les adresses du fichier ont été géocodées avec succès.")
+            else:
+                st.caption(
+                    "Ces adresses n'ont pas pu être localisées automatiquement. "
+                    "Renseignez les coordonnées GPS manuellement pour les inclure dans l'analyse."
+                )
+                any_saved = False
+                for addr in list(failed):
+                    col_addr, col_input, col_btn = st.columns([3, 2, 1])
+                    with col_addr:
+                        st.markdown(f"`{addr}`")
+                    with col_input:
+                        coords_raw = st.text_input(
+                            "Coordonnées GPS",
+                            placeholder="lat, lon  ex: 50.638, 2.979",
+                            key=f"q_manual_coords_{addr}",
+                            label_visibility="collapsed",
+                        )
+                    with col_btn:
+                        if st.button("✅ Valider", key=f"q_manual_save_{addr}",
+                                     use_container_width=True):
+                            coords_input = coords_raw.strip()
+                            coords_parsed = None
+                            # Essai parsing direct lat, lon
+                            m = re.match(r"^\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*$",
+                                         coords_input)
+                            if m:
+                                coords_parsed = (float(m.group(1)), float(m.group(2)))
+                            else:
+                                # Tentative géocodage via API
+                                tmp = _geocode_single_fr(coords_input)
+                                if tmp:
+                                    coords_parsed = tmp
+                            if coords_parsed:
+                                save_geocode_entry(addr, coords_parsed)
+                                # Retirer de la liste des échecs
+                                new_failed = [a for a in
+                                              st.session_state["q_passages_result"]["failed_addrs"]
+                                              if a != addr]
+                                st.session_state["q_passages_result"]["failed_addrs"] = new_failed
+                                any_saved = True
+                                st.success(f"Sauvegardé : {coords_parsed[0]:.5f}, {coords_parsed[1]:.5f}")
+                            else:
+                                st.error("Coordonnées invalides ou adresse introuvable.")
+
+                # Bouton relancer l'analyse si au moins une adresse a été corrigée
+                if any_saved or st.session_state.get("q_manual_rerun_ready"):
+                    st.session_state["q_manual_rerun_ready"] = True
+                    if st.button("🔄 Relancer l'analyse avec les corrections",
+                                 key="q_manual_rerun", type="primary"):
+                        cache = load_geocode_cache()
+                        depot_coords = result.get("depot_coords")
+                        if depot_coords and df_raw is not None:
+                            passages = _find_depot_passages(df_raw, cache, tuple(depot_coords))
+                            all_addrs = (
+                                set(df_raw["Lieu de départ"].dropna().astype(str))
+                                | set(df_raw["Lieu d'arrivée"].dropna().astype(str))
+                            )
+                            new_failed = sorted(a for a in all_addrs if not cache.get(a))
+                            st.session_state["q_passages_result"]["passages"]    = passages
+                            st.session_state["q_passages_result"]["failed_addrs"] = new_failed
+                            st.session_state.pop("q_manual_rerun_ready", None)
+                            st.rerun()
 
     # Méthodologie
     with st.expander("ℹ️ Méthodologie de détection des passages", expanded=False):
