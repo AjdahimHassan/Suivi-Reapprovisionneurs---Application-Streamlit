@@ -1753,8 +1753,12 @@ def _render_tab_passages() -> None:
 
     col_sel, col_info = st.columns([3, 2])
     with col_sel:
+        def _on_vehicle_change():
+            st.session_state.pop("q_passages_depot_input", None)
+
         sel_label = st.selectbox("🚗 Réappro à analyser", options_labels,
-                                 key="q_passages_vehicle_label")
+                                 key="q_passages_vehicle_label",
+                                 on_change=_on_vehicle_change)
     selected_plate = options_map[sel_label]
 
     # ── Chargement données ────────────────────────────────
