@@ -859,11 +859,11 @@ def render():
         with st.expander('✏️ Corriger les correspondances'):
             noms_recu_liste = ['—'] + list(recu_dict.keys())
             nouvelles_corr = {}
-            for nom_f in [p['designation'] for p in produits]:
+            for i, nom_f in enumerate(p['designation'] for p in produits):
                 actuel = correspondances.get(nom_f)
                 idx = noms_recu_liste.index(actuel) if actuel in noms_recu_liste else 0
                 choix = st.selectbox(
-                    f'Facture: {nom_f}', noms_recu_liste, index=idx, key=f'corr_{nom_f}',
+                    f'Facture: {nom_f}', noms_recu_liste, index=idx, key=f'corr_{i}_{nom_f}',
                 )
                 nouvelles_corr[nom_f] = choix if choix != '—' else None
             if st.button('🔄 Recalculer', key='btn_recalc'):
