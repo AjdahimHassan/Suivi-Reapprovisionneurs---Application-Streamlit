@@ -2156,6 +2156,12 @@ def _render_tab_hebdo() -> None:
             key="quartix_hebdo_uploader",
         )
 
+    # Efface le mail généré si un nouveau fichier est chargé
+    current_file_id = uploaded.name if uploaded else None
+    if current_file_id != st.session_state.get("hebdo_last_file_id"):
+        st.session_state["hebdo_last_file_id"] = current_file_id
+        st.session_state.pop("hebdo_mail_text", None)
+
     if not uploaded:
         st.markdown(
             f"<div style='background:#f0f4fa;border-left:5px solid {C_BLUE_DARK};"
