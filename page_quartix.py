@@ -2001,8 +2001,7 @@ def _build_hebdo_mail(
                 for t in trips:
                     lines.append(
                         f"  • {t['date'].strftime('%d/%m/%Y')} ({t['jour']}) : "
-                        f"départ {t['heure_dep']} – arrivée {t['heure_arr']} "
-                        f"| {t['lieu_dep']} → {t['lieu_arr']} ({t['distance_km']} km)"
+                        f"{t['heure_dep']} (heure de départ), {t['distance_km']} km"
                     )
 
         if weekend_trips:
@@ -2015,7 +2014,7 @@ def _build_hebdo_mail(
                 for d in days:
                     lines.append(
                         f"  • {d['jour']} {d['date'].strftime('%d/%m/%Y')} : "
-                        f"{d['nb_trajets']} trajet(s), {d['distance_km']} km parcourus"
+                        f"{d['heure_dep']} (heure de départ), {d['distance_km']} km"
                     )
 
         lines += ["", "Cordialement,"]
@@ -2271,21 +2270,19 @@ def _render_tab_hebdo() -> None:
                 for _, row in late_df.iterrows()
             ]
 
-        # Activité weekend (distance totale du jour ≥ 1 km)
-        wkend_df = df[df["_dep"].dt.weekday >= 5]
+        # Activité weekend — trajets individuels ≥ 1 km
+        wkend_df = df[(df["_dep"].dt.weekday >= 5) &
+                      (df["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM)]
         if not wkend_df.empty:
-            days_list = []
-            for date, grp in wkend_df.groupby(wkend_df["_dep"].dt.date):
-                dist = round(grp["Distance totale"].apply(_to_km).sum(), 1)
-                if dist >= _MIN_TRIP_KM:
-                    days_list.append({
-                        "date":        date,
-                        "jour":        _JOURS_FR[date.weekday()],
-                        "nb_trajets":  int((grp["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM).sum()),
-                        "distance_km": dist,
-                    })
-            if days_list:
-                weekend_trips[plate] = days_list
+            weekend_trips[plate] = [
+                {
+                    "date":        row["_dep"].date(),
+                    "jour":        _JOURS_FR[row["_dep"].weekday()],
+                    "heure_dep":   row["_dep"].strftime("%H:%M"),
+                    "distance_km": _to_km(row["Distance totale"]),
+                }
+                for _, row in wkend_df.iterrows()
+            ]
 
     # ── 6. Affichage résultats ────────────────────────────
     st.divider()
@@ -2308,13 +2305,10 @@ def _render_tab_hebdo() -> None:
                     st.markdown(f"**⚠️ Trajets hors horaires** (après {cutoff.strftime('%H:%M')})")
                     late_rows = [
                         {
-                            "Date":           t["date"].strftime("%d/%m/%Y"),
-                            "Jour":           t["jour"],
-                            "Départ":         t["heure_dep"],
-                            "Arrivée":        t["heure_arr"],
-                            "Lieu départ":    t["lieu_dep"][:45] + "…" if len(t["lieu_dep"]) > 45 else t["lieu_dep"],
-                            "Lieu arrivée":   t["lieu_arr"][:45] + "…" if len(t["lieu_arr"]) > 45 else t["lieu_arr"],
-                            "Distance (km)":  t["distance_km"],
+                            "Date":          t["date"].strftime("%d/%m/%Y"),
+                            "Jour":          t["jour"],
+                            "Heure départ":  t["heure_dep"],
+                            "Distance (km)": t["distance_km"],
                         }
                         for t in late_trips[plate]
                     ]
@@ -2324,10 +2318,10 @@ def _render_tab_hebdo() -> None:
                     st.markdown("**🗓️ Activité weekend**")
                     wk_rows = [
                         {
-                            "Jour":                 d["jour"],
-                            "Date":                 d["date"].strftime("%d/%m/%Y"),
-                            "Nb trajets (≥1 km)":   d["nb_trajets"],
-                            "Distance totale (km)":  d["distance_km"],
+                            "Date":          d["date"].strftime("%d/%m/%Y"),
+                            "Jour":          d["jour"],
+                            "Heure départ":  d["heure_dep"],
+                            "Distance (km)": d["distance_km"],
                         }
                         for d in weekend_trips[plate]
                     ]
