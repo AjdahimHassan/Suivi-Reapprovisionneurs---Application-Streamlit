@@ -166,12 +166,17 @@ NUTRAMINO_QTE_PAR_COLIS = [
     ('HFSS',           10),   # ON HFSS Protein Bar 60g / 68g
     ('XL SHAKE',       12),   # NMO XL Shake 475ML
     ('NGO SHAKE',      12),   # NMO Nutra-GO Shake 330ML
+    ('NGO SHKE',       12),
     ('CHOC SHAKE',     12),   # ON Choc Shake 330ML
     ('VAN SHAKE',      12),   # ON Van Shake 330ML
+    ('STRAW SHAKE' ,   12),
     ('+PRO PWO',       12),   # NMO Pre Workout Shot
     ('PWO SHOT',       12),   # variante nom PWO Shot
     ('PROTEIN BAR',    12),   # NMO Protein Bar 55G
+    ('PROTEINBAR ',    12),
     ('PROTEIN WAFER',  12),   # NMO Protein Wafer 39G
+    ('PRO WAFER',      12),
+    ('CHOC BROWNIE',   10),
 ]
 
 
@@ -382,9 +387,15 @@ TABLE_CORRESPONDANCE = [
     ('Peanut Boost',                        'PEANUT BOOST'),
     ('Crispy Protein Raspberry Toffee',     'RASPBERRY TOFFEE'),
     # NUTRAMINO
-    ('ON CHOC SHAKE 330ML',                 'NMO NGO SHKE CHOCOLATE'),
-    ('ON VAN SHAKE 330ML',                  'NMO NGO SHKE VANILLA'),
-    ('NMO NGO SHAKE VAN 330ML',             'NMO NGO SHKE VANILLA'),
+    ('ON CHOC SHAKE 330ML',                         'NMO NGO SHKE CHOCOLATE'),
+    ('ON VAN SHAKE 330ML',                          'NMO NGO SHKE VANILLA'),
+    ('NMO NGO SHAKE VAN 330ML',                     'NMO NGO SHKE VANILLA'),
+    ('NMO PRO WAFER CHOC EN/RO/FR/NL/DE 39G',       'NMO WAFER PROTEIN CHOCOLAT'),
+    ('NMO PRO WAFER VANILLA EN/RO/FR/NL/DE 39G',    'NMO WAFER PROTEIN VANILLE'),
+    ('ON STRAW SHAKE 330ML EN/FR/NL/ES/IT',         'NMO NGO SHKE STRAWBERRY'),
+    ('NMO NGO SHKE STRAW 330ML 7LA-2 NEW',          'NMO NGO SHKE STRAWBERRY'),
+    ('NMO XL SHAKE STRAWB 475ML 7LA',               'NMO XL STRAWBERRY 475ML'),
+    ('ON HFSS CHOC CARAMEL BAR 60G',                'ON BARRE CHOCOLAT CARAMEL'),
 ]
 
 
