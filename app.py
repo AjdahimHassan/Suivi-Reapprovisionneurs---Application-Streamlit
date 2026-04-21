@@ -14,7 +14,7 @@ import page_no_audit
 import page_cr
 import page_planogrammes
 import page_inventaires
-import page_commandes
+import page_controle_reception
 import page_indefinis
 import page_quartix
 import page_picklist
@@ -784,7 +784,7 @@ elif st.session_state.page == "commandes":
         unsafe_allow_html=True,
     )
 
-    page_commandes.render()
+    page_controle_reception.render()
 
 
 # ════════════════════════════════════════════════════════
