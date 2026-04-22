@@ -630,6 +630,450 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HISTORIQUE PÉRIODE — MongoDB
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_historique_col():
+    from mongo_storage import _get_client
+    client = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["picklist_historique"]
+
+
+def _save_periode(result_df: pd.DataFrame, date_debut, date_fin, label: str) -> int:
+    col = _get_historique_col()
+    now = datetime.datetime.utcnow()
+    col.delete_many({
+        "label": label,
+        "date_debut": date_debut.isoformat(),
+        "date_fin": date_fin.isoformat(),
+    })
+    docs = [
+        {
+            "label":           label,
+            "date_debut":      date_debut.isoformat(),
+            "date_fin":        date_fin.isoformat(),
+            "date_import":     now,
+            "approvisionneur": str(row.get("Approvisionneur", "") or ""),
+            "code_machine":    str(row.get("Code Machine", "") or ""),
+            "nom_client":      str(row.get("Nom client", "") or ""),
+            "libelle_produit": str(row.get("Libellé produit", "") or ""),
+            "picklist":        int(row.get("Picklist", 0) or 0),
+            "reel":            int(row.get("Réel", 0) or 0),
+            "ecart":           int(row.get("Écart", 0) or 0),
+            "statut":          str(row.get("Statut", "") or ""),
+        }
+        for _, row in result_df.iterrows()
+    ]
+    if docs:
+        col.insert_many(docs)
+    return len(docs)
+
+
+def _load_historique() -> pd.DataFrame:
+    try:
+        col = _get_historique_col()
+        docs = list(col.find({}, {"_id": 0}))
+        if not docs:
+            return pd.DataFrame()
+        df = pd.DataFrame(docs)
+        df["date_debut"] = pd.to_datetime(df["date_debut"], errors="coerce")
+        df["date_fin"]   = pd.to_datetime(df["date_fin"],   errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"Erreur chargement historique : {e}")
+        return pd.DataFrame()
+
+
+def _render_graphiques_historique(hist_df: pd.DataFrame):
+    try:
+        import plotly.express as px
+    except ImportError:
+        st.warning("Installez plotly (`pip install plotly`) pour afficher les graphiques.")
+        return
+
+    actif = hist_df[hist_df["picklist"] > 0].copy()
+    if actif.empty:
+        st.info("Pas de données exploitables.")
+        return
+
+    actif["conforme"] = actif["statut"] == "Conforme"
+
+    # ── 1. Conformité par réapprovisionneur ──────────────────
+    st.markdown("#### 🏆 Taux de conformité par réapprovisionneur")
+    by_appro = (
+        actif.groupby("approvisionneur")
+        .agg(conformes=("conforme", "sum"), total=("conforme", "count"))
+        .reset_index()
+    )
+    by_appro["pct"] = (by_appro["conformes"] / by_appro["total"] * 100).round(1)
+    by_appro = by_appro.sort_values("pct", ascending=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        fig = px.bar(
+            by_appro, x="pct", y="approvisionneur", orientation="h",
+            text="pct", color="pct",
+            color_continuous_scale=[[0, "#c0392b"], [0.5, "#f39c12"], [1, "#27ae60"]],
+            range_color=[0, 100],
+            labels={"pct": "Conformité %", "approvisionneur": ""},
+        )
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig.update_layout(
+            showlegend=False, coloraxis_showscale=False,
+            margin=dict(l=0, r=60, t=10, b=10),
+            height=max(300, 32 * len(by_appro)),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        st.markdown("#### 📊 Distribution des statuts")
+        statut_counts = actif["statut"].value_counts().reset_index()
+        statut_counts.columns = ["Statut", "Count"]
+        COLOR_MAP_PIE = {
+            "Conforme":          "#27ae60",
+            "Insuffisant":       "#e74c3c",
+            "Non chargé":        "#c0392b",
+            "Surplus":           "#f39c12",
+            "Non prévu":         "#3498db",
+            "Quantité négative": "#00B0F0",
+        }
+        fig2 = px.pie(
+            statut_counts, values="Count", names="Statut",
+            color="Statut", color_discrete_map=COLOR_MAP_PIE, hole=0.4,
+        )
+        fig2.update_layout(margin=dict(l=0, r=0, t=10, b=10), height=350)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ── 2. Évolution temporelle ──────────────────────────────
+    st.markdown("#### 📈 Évolution de la conformité dans le temps")
+    by_period = (
+        actif.groupby(["date_debut", "approvisionneur"])
+        .agg(conformes=("conforme", "sum"), total=("conforme", "count"))
+        .reset_index()
+    )
+    by_period["pct"] = (by_period["conformes"] / by_period["total"] * 100).round(1)
+
+    appros_dispo = sorted(by_period["approvisionneur"].unique())
+    filtre_appros = st.multiselect(
+        "Filtrer réapprovisionneurs",
+        options=appros_dispo,
+        default=appros_dispo,
+        key="hist_appro_filter",
+        label_visibility="collapsed",
+    )
+    df_plot = by_period[by_period["approvisionneur"].isin(filtre_appros)] if filtre_appros else by_period
+
+    fig3 = px.line(
+        df_plot, x="date_debut", y="pct", color="approvisionneur",
+        markers=True,
+        labels={"pct": "Conformité %", "date_debut": "Période", "approvisionneur": "Réappro"},
+    )
+    fig3.add_hline(y=80, line_dash="dash", line_color="orange",
+                   annotation_text="Objectif 80%", annotation_position="bottom right")
+    fig3.add_hline(y=95, line_dash="dash", line_color="green",
+                   annotation_text="Excellence 95%", annotation_position="bottom right")
+    fig3.update_layout(
+        margin=dict(l=0, r=0, t=10, b=10), height=400,
+        yaxis=dict(range=[0, 105]),
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+    # ── 3. Heatmap non-chargés ───────────────────────────────
+    st.markdown("#### 🔥 Heatmap — Non chargés par réapprovisionneur et période")
+    nc = hist_df[hist_df["statut"] == "Non chargé"].copy()
+    if not nc.empty:
+        nc["periode_label"] = nc["date_debut"].dt.strftime("%d/%m/%Y")
+        pivot = (
+            nc.groupby(["approvisionneur", "periode_label"])
+            .size().reset_index(name="nb")
+            .pivot(index="approvisionneur", columns="periode_label", values="nb")
+            .fillna(0)
+        )
+        fig4 = px.imshow(
+            pivot, color_continuous_scale="Reds", aspect="auto",
+            labels={"color": "Non chargés"},
+        )
+        fig4.update_layout(
+            margin=dict(l=0, r=0, t=10, b=10),
+            height=max(250, 38 * len(pivot)),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+    else:
+        st.success("✅ Aucun produit non chargé dans l'historique.")
+
+    # ── 4. Top produits non chargés ─────────────────────────
+    col_nc, col_insuf = st.columns(2)
+    with col_nc:
+        st.markdown("#### 🚫 Top produits non chargés")
+        if not nc.empty:
+            top_nc = nc["libelle_produit"].value_counts().head(15).reset_index()
+            top_nc.columns = ["Produit", "Occurrences"]
+            fig5 = px.bar(
+                top_nc, x="Occurrences", y="Produit", orientation="h",
+                color="Occurrences", color_continuous_scale="Reds",
+            )
+            fig5.update_layout(
+                showlegend=False, coloraxis_showscale=False,
+                margin=dict(l=0, r=20, t=10, b=10), height=400,
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+
+    with col_insuf:
+        st.markdown("#### ❌ Évolution non-conformités dans le temps")
+        nc_time = (
+            hist_df[hist_df["statut"].isin(["Non chargé", "Insuffisant", "Surplus"])]
+            .groupby(["date_debut", "statut"])
+            .size().reset_index(name="nb")
+        )
+        if not nc_time.empty:
+            fig6 = px.bar(
+                nc_time, x="date_debut", y="nb", color="statut",
+                barmode="stack",
+                color_discrete_map={
+                    "Non chargé":  "#c0392b",
+                    "Insuffisant": "#e74c3c",
+                    "Surplus":     "#f39c12",
+                },
+                labels={"nb": "Nb lignes", "date_debut": "Période", "statut": "Statut"},
+            )
+            fig6.update_layout(margin=dict(l=0, r=0, t=10, b=10), height=400)
+            st.plotly_chart(fig6, use_container_width=True)
+
+    # ── 5. Tableau récap compétences ─────────────────────────
+    st.markdown("#### 📋 Tableau de suivi des compétences")
+    competences = (
+        actif.groupby("approvisionneur")
+        .agg(
+            Périodes=("date_debut", "nunique"),
+            Total_lignes=("conforme", "count"),
+            Conformes=("conforme", "sum"),
+            Non_charges=("statut", lambda x: (x == "Non chargé").sum()),
+            Insuffisants=("statut", lambda x: (x == "Insuffisant").sum()),
+            Surplus=("statut", lambda x: (x == "Surplus").sum()),
+        )
+        .reset_index()
+    )
+    competences["Taux conformité"] = (
+        competences["Conformes"] / competences["Total_lignes"] * 100
+    ).round(1).astype(str) + " %"
+    competences = competences.rename(columns={
+        "approvisionneur": "Réapprovisionneur",
+        "Total_lignes": "Total lignes",
+        "Non_charges": "Non chargés",
+    })
+    competences = competences.sort_values("Taux conformité", ascending=True)
+
+    def _style_competences(row):
+        try:
+            pct_val = float(str(row["Taux conformité"]).replace("%", "").strip())
+        except Exception:
+            pct_val = 0
+        bg = _couleur_conformite(int(pct_val))
+        color = "color:white;" if pct_val < 35 else "color:#1a1a1a;"
+        return [f"background-color:{bg};{color}"] * len(row)
+
+    st.dataframe(
+        competences.style.apply(_style_competences, axis=1),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _render_periode_section():
+    st.divider()
+    st.markdown("## 📅 Analyse sur période & Suivi des compétences")
+    st.caption(
+        "Importez plusieurs picklists et un fichier ADV couvrant une période définie. "
+        "Les données sont sauvegardées en base pour le suivi long terme des réapprovisionneurs."
+    )
+
+    # ── Paramètres période ─────────────────────────────────
+    col_dates, col_label = st.columns([2, 2])
+    with col_dates:
+        dates = st.date_input(
+            "Période analysée",
+            value=(datetime.date.today() - datetime.timedelta(days=7), datetime.date.today()),
+            format="DD/MM/YYYY",
+            key="periode_dates",
+        )
+    with col_label:
+        label_periode = st.text_input(
+            "Nom / label",
+            placeholder="ex : Semaine 16 — Avril 2026",
+            key="periode_label",
+        )
+
+    if not isinstance(dates, tuple) or len(dates) != 2:
+        st.warning("Sélectionnez une plage de dates (début → fin).")
+        return
+    date_debut, date_fin = dates
+    label_final = label_periode.strip() or f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
+
+    # ── Uploads ────────────────────────────────────────────
+    col_pick, col_adv = st.columns(2)
+    with col_pick:
+        st.markdown("### 📋 Picklist(s)")
+        st.caption("Un ou plusieurs fichiers CSV picklist (un par réappro ou par jour)")
+        pick_files = st.file_uploader(
+            "Picklists",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="periode_pick_upload",
+            label_visibility="collapsed",
+        )
+    with col_adv:
+        st.markdown("### 🚚 Fichier ADV")
+        st.caption("Export ERP (même format que chargement) couvrant toute la période")
+        adv_file = st.file_uploader(
+            "ADV",
+            type=["csv"],
+            key="periode_adv_upload",
+            label_visibility="collapsed",
+        )
+
+    if not pick_files or not adv_file:
+        st.info("Déposez au moins une picklist et le fichier ADV pour lancer l'analyse.")
+    else:
+        col_btn, _ = st.columns([2, 6])
+        with col_btn:
+            analyser_btn = st.button(
+                "🔍 Analyser la période",
+                type="primary",
+                use_container_width=True,
+                key="periode_analyser_btn",
+            )
+
+        if analyser_btn:
+            try:
+                picks = [parse_picklist(pf.read()) for pf in pick_files]
+                picklist_df = pd.concat(picks, ignore_index=True)
+                chargement_df = parse_chargement(adv_file.read())
+                result = analyser(picklist_df, chargement_df)
+                st.session_state["periode_result"] = result
+                st.session_state["periode_meta"] = {
+                    "date_debut":  date_debut,
+                    "date_fin":    date_fin,
+                    "label":       label_final,
+                }
+            except Exception as e:
+                st.error(f"❌ Erreur lors de l'analyse : {e}")
+
+        result = st.session_state.get("periode_result")
+        meta   = st.session_state.get("periode_meta", {})
+
+        if result is not None:
+            st.divider()
+            st.markdown(f"### 📊 Résultats — {meta.get('label', '')}")
+
+            # KPIs
+            a_charger = result[result["Picklist"] > 0]
+            total     = len(a_charger)
+            conformes = (a_charger["Statut"] == "Conforme").sum()
+            pct_g     = round(conformes / total * 100) if total else 0
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Conformité globale", f"{pct_g} %")
+            k2.metric("✅ Conformes", f"{conformes} / {total}")
+            k3.metric("🚫 Non chargés", (a_charger["Statut"] == "Non chargé").sum())
+            k4.metric("❌ Insuffisants", (a_charger["Statut"] == "Insuffisant").sum())
+            k5.metric("⚠️ Surplus", (a_charger["Statut"] == "Surplus").sum())
+
+            st.markdown(_LEGENDE, unsafe_allow_html=True)
+
+            # Par réapprovisionneur
+            if "Approvisionneur" in result.columns:
+                st.markdown("#### 👥 Par réapprovisionneur")
+                rows_appro = []
+                for appro, grp in result[result["Picklist"] > 0].groupby("Approvisionneur"):
+                    s = _stats_machine(grp)
+                    rows_appro.append({
+                        "Réapprovisionneur": appro,
+                        "Conformes":         f"{s['conformes']} / {s['total']}",
+                        "Non chargés":       s["non_charges"],
+                        "Insuffisants":      s["insuffisants"],
+                        "Surplus":           s["surplus"],
+                        "Conformité %":      f"{s['pct']} %",
+                    })
+                if rows_appro:
+                    df_appro = pd.DataFrame(rows_appro)
+
+                    def _style_appro(row):
+                        try:
+                            pct_v = int(str(row["Conformité %"]).replace("%", "").strip())
+                        except Exception:
+                            pct_v = 0
+                        bg    = _couleur_conformite(pct_v)
+                        color = "color:white;" if pct_v < 35 else "color:#1a1a1a;"
+                        return [f"background-color:{bg};{color}"] * len(row)
+
+                    st.dataframe(
+                        df_appro.style.apply(_style_appro, axis=1),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # Sauvegarde
+            st.divider()
+            col_sv, _ = st.columns([2.5, 6])
+            with col_sv:
+                if st.button(
+                    "💾 Sauvegarder dans l'historique",
+                    key="periode_save_btn",
+                    use_container_width=True,
+                ):
+                    try:
+                        n = _save_periode(result, meta["date_debut"], meta["date_fin"], meta["label"])
+                        st.success(f"✅ {n} lignes sauvegardées (période : {meta['label']}).")
+                    except Exception as e:
+                        st.error(f"❌ Erreur sauvegarde : {e}")
+
+    # ── Graphiques historiques ─────────────────────────────
+    st.divider()
+    st.markdown("## 📈 Suivi historique des compétences")
+
+    col_rf, _ = st.columns([1.5, 6])
+    with col_rf:
+        if st.button("🔄 Rafraîchir", key="hist_refresh"):
+            st.rerun()
+
+    hist_df = _load_historique()
+    if hist_df.empty:
+        st.info("Aucune donnée historique. Analysez et sauvegardez des périodes pour voir les graphiques.")
+        return
+
+    periodes = sorted(hist_df["label"].unique())
+    st.caption(
+        f"**{len(hist_df):,}** lignes · **{len(periodes)}** période(s) · "
+        f"**{hist_df['approvisionneur'].nunique()}** réapprovisionneurs"
+    )
+
+    with st.expander("🔎 Filtres historique", expanded=False):
+        col_fp, col_fa = st.columns(2)
+        with col_fp:
+            filtre_periodes = st.multiselect(
+                "Périodes",
+                options=periodes,
+                default=periodes,
+                key="hist_filtre_periodes",
+            )
+        with col_fa:
+            appros_hist = sorted(hist_df["approvisionneur"].dropna().unique())
+            filtre_appros_hist = st.multiselect(
+                "Réapprovisionneurs",
+                options=appros_hist,
+                default=appros_hist,
+                key="hist_filtre_appros",
+            )
+        if filtre_periodes:
+            hist_df = hist_df[hist_df["label"].isin(filtre_periodes)]
+        if filtre_appros_hist:
+            hist_df = hist_df[hist_df["approvisionneur"].isin(filtre_appros_hist)]
+
+    _render_graphiques_historique(hist_df)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RENDER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -723,3 +1167,5 @@ def render():
         else:
             st.markdown(f"### {titre}")
             _afficher_resultats(picklist_df, chargement_df)
+
+    _render_periode_section()
