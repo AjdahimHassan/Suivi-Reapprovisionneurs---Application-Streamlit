@@ -1071,12 +1071,16 @@ def render():
                         machines_traitees    = {d["machine"] for d in salles_traitees_docs}
                         machines_actives     = [m for m in machines if m not in machines_traitees]
 
-                        # ── Barre de recherche ───────────────────────────────
-                        search = st.text_input(
-                            "Rechercher",
-                            placeholder="Code machine (ex: 1036M1) ou réappro (ex: Jean Dupont)…",
-                            key="search_machine_reappro",
-                        ).strip().lower()
+                        # ── Barre de recherche + tri ─────────────────────────
+                        col_search, col_sort = st.columns([5, 2])
+                        with col_search:
+                            search = st.text_input(
+                                "Rechercher",
+                                placeholder="Code machine (ex: 1036M1) ou réappro (ex: Jean Dupont)…",
+                                key="search_machine_reappro",
+                            ).strip().lower()
+                        with col_sort:
+                            trier_anomalies = st.toggle("Trier par anomalies ↓", key="sort_by_anomalies")
 
                         # Mapping machine → réappro pour la recherche
                         reappro_par_machine = {}
@@ -1085,15 +1089,24 @@ def render():
                             code_cl = sous["Code_client"].iloc[0] if not sous.empty else ""
                             reappro_par_machine[m] = reappro_map.get(str(code_cl).strip().upper(), "").lower()
 
+                        nb_anomalies_par_machine = {
+                            m: len(anomalies_df[anomalies_df["Machine"] == m])
+                            for m in machines_actives
+                        }
+
+                        def _sort_key(m):
+                            return -nb_anomalies_par_machine.get(m, 0) if trier_anomalies else str(m).lower()
+
                         if search:
-                            machines_filtrees = [
-                                m for m in sorted(machines_actives)
-                                if search in str(m).lower() or search in reappro_par_machine.get(m, "")
-                            ]
+                            machines_filtrees = sorted(
+                                [m for m in machines_actives
+                                 if search in str(m).lower() or search in reappro_par_machine.get(m, "")],
+                                key=_sort_key,
+                            )
                             if not machines_filtrees:
                                 st.info("Aucun résultat pour cette recherche.")
                         else:
-                            machines_filtrees = sorted(machines_actives)
+                            machines_filtrees = sorted(machines_actives, key=_sort_key)
 
                         for machine in machines_filtrees:
                             sous_df = anomalies_df[anomalies_df["Machine"] == machine]
