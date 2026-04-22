@@ -24,6 +24,62 @@ from mongo_storage import _get_client
 # ────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=300)
+def _load_plannings_from_mongo() -> dict:
+    """Retourne {employe: {jour: [client, ...]}} depuis la collection plannings."""
+    try:
+        client = _get_client()
+        db_name = st.secrets["mongo"]["db_name"]
+        col = client[db_name]["plannings"]
+        docs = list(col.find({}, {"_id": 0, "employe": 1, "planning": 1}))
+        return {doc["employe"]: doc["planning"] for doc in docs}
+    except Exception:
+        return {}
+
+
+def _find_planning_for_appro(approvisionneur: str, plannings: dict) -> dict | None:
+    if not approvisionneur:
+        return None
+    if approvisionneur in plannings:
+        return plannings[approvisionneur]
+    appro_lower = approvisionneur.strip().lower()
+    for employe, planning in plannings.items():
+        if employe.strip().lower() == appro_lower:
+            return planning
+    return None
+
+
+def _get_next_passage_date(salle: str, approvisionneur: str, plannings: dict) -> str | None:
+    """Retourne 'DD/MM' du prochain passage prévu pour cette salle selon le planning."""
+    planning = _find_planning_for_appro(approvisionneur, plannings)
+    if not planning:
+        return None
+
+    JOUR_TO_WEEKDAY = {"Lundi": 0, "Mardi": 1, "Mercredi": 2, "Jeudi": 3, "Vendredi": 4}
+    scheduled_weekdays = set()
+    for jour, salles_list in planning.items():
+        weekday = JOUR_TO_WEEKDAY.get(jour)
+        if weekday is None:
+            continue
+        for s in salles_list:
+            raw = s[0] if isinstance(s, list) else s
+            # Le planning stocke "CODE - Nom client" ; on compare sur le nom seul
+            client_name = raw.split(" - ", 1)[1].strip() if " - " in raw else raw.strip()
+            if client_name == salle:
+                scheduled_weekdays.add(weekday)
+                break
+
+    if not scheduled_weekdays:
+        return None
+
+    today = datetime.date.today()
+    for delta in range(1, 8):
+        candidate = today + datetime.timedelta(days=delta)
+        if candidate.weekday() in scheduled_weekdays:
+            return candidate.strftime("%d/%m")
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
 def _load_salles_from_mongo() -> pd.DataFrame:
     """
     Retourne un DataFrame {Client, Code, Approvisionneur} depuis la collection 'machines'.
@@ -65,6 +121,16 @@ def _load_incidents() -> dict:
         return {"actif": actifs, "resolu": resolus}
     except Exception:
         return {"actif": [], "resolu": []}
+
+
+def _load_known_salles(type_: str) -> set:
+    """Retourne les salles qui ont déjà eu un incident (actif ou résolu) pour ce type."""
+    try:
+        col = _get_incidents_col()
+        docs = list(col.find({"type": type_}, {"salle": 1, "_id": 0}))
+        return {doc["salle"] for doc in docs}
+    except Exception:
+        return set()
 
 
 def _save_commentaires(rows: list[dict], type_: str):
@@ -284,50 +350,161 @@ def _build_rapport_excel(df_audit: pd.DataFrame, df_ventes: pd.DataFrame) -> byt
 # HELPERS UI
 # ────────────────────────────────────────────────────────
 
-def _render_table_with_comments(df: pd.DataFrame, type_: str, key_prefix: str):
+def _render_table_with_comments(
+    df: pd.DataFrame, type_: str, key_prefix: str, plannings: dict | None = None
+):
     """
-    Affiche un data_editor avec colonne Commentaire éditable.
-    Retourne le DataFrame édité.
+    data_editor propre + barre d'actions rapides (multiselect → Passage / WA) en dessous.
     """
-    # Colonnes à verrouiller selon le type
-    locked = [c for c in df.columns if c != "Commentaire"]
+    if plannings is None:
+        plannings = {}
+
+    date_col  = "Dernière apparition" if type_ == "no_audit" else "Dernière vente"
+    jours_col = "Jours depuis audit"  if type_ == "no_audit" else "Jours sans vente"
+    working_key = f"{key_prefix}_working_df"
+    version_key = f"{key_prefix}_version"
+
+    if working_key not in st.session_state:
+        st.session_state[working_key] = df.copy()
+        st.session_state[version_key] = 0
+
+    working_df = st.session_state[working_key]
+    known_salles = _load_known_salles(type_)
+
+    # Ajoute colonne Tag pour affichage (non stockée dans working_df)
+    display_df = working_df.copy()
+    display_df.insert(
+        0, "Tag",
+        display_df["Salle"].apply(lambda s: "🔵 Connu" if s in known_salles else "🟢 Nouveau")
+    )
+
+    # ── Table ─────────────────────────────────────────────
+    locked = [c for c in display_df.columns if c != "Commentaire"]
     col_cfg = {c: st.column_config.Column(disabled=True) for c in locked}
     col_cfg["Commentaire"] = st.column_config.TextColumn(
-        "Commentaire",
-        help="Saisissez la raison du problème",
-        max_chars=300,
+        "Commentaire", help="Saisissez la raison du problème", max_chars=300
     )
-    # Colonnes de jours : entier ou None
-    for c in ["Jours depuis audit", "Jours sans vente"]:
-        if c in df.columns:
-            col_cfg[c] = st.column_config.NumberColumn(c, disabled=True, format="%d j")
+    col_cfg["Tag"] = st.column_config.TextColumn("Tag", disabled=True, width="small")
+    if jours_col in display_df.columns:
+        col_cfg[jours_col] = st.column_config.NumberColumn(jours_col, disabled=True, format="%d j")
 
-    edited = st.data_editor(
-        df,
+    edited_display = st.data_editor(
+        display_df,
         use_container_width=True,
         hide_index=True,
-        height=min(700, 38 + len(df) * 35),
+        height=min(700, 38 + len(display_df) * 35),
         column_config=col_cfg,
-        key=f"{key_prefix}_editor",
+        key=f"{key_prefix}_editor_{st.session_state[version_key]}",
     )
+    # On retire la colonne Tag pour garder working_df propre
+    edited = edited_display.drop(columns=["Tag"], errors="ignore")
 
-    c1, _ = st.columns([1.2, 6])
-    with c1:
-        if st.button("💾 Sauvegarder commentaires", key=f"{key_prefix}_save"):
-            # Inclure la date métier selon le type pour la persister en base
-            date_col = "Dernière apparition" if type_ == "no_audit" else "Dernière vente"
-            cols_to_save = ["Salle", "Commentaire"]
-            if date_col in edited.columns:
-                cols_to_save.append(date_col)
-            rows = (
-                edited[cols_to_save]
-                .rename(columns={date_col: "since_date"})
-                .to_dict("records")
-            )
-            _save_commentaires(rows, type_)
+    # ── Actions rapides ───────────────────────────────────
+    st.markdown("**Actions rapides sur les commentaires :**")
+
+    new_salles = [s for s in working_df["Salle"].tolist() if s not in known_salles]
+    sel_key = f"{key_prefix}_action_sel"
+    col_newbtn, _ = st.columns([2, 5])
+    with col_newbtn:
+        if st.button(
+            "🟢 Sélectionner toutes les nouvelles",
+            key=f"{key_prefix}_btn_select_new",
+            use_container_width=True,
+            disabled=not new_salles,
+        ):
+            st.session_state[sel_key] = new_salles
+            st.rerun()
+
+    col_sel, col_p, col_wa, col_save = st.columns([3.5, 1.2, 0.9, 1.3])
+
+    with col_sel:
+        tag_map = {s: ("🔵" if s in known_salles else "🟢") for s in working_df["Salle"].tolist()}
+        selected_salles = st.multiselect(
+            "Salles",
+            options=working_df["Salle"].tolist(),
+            format_func=lambda s: f"{tag_map.get(s, '')} {s}",
+            placeholder="Sélectionner des salles…",
+            label_visibility="collapsed",
+            key=sel_key,
+        )
+
+    with col_p:
+        if st.button(
+            "📅 Passage",
+            key=f"{key_prefix}_btn_passage",
+            use_container_width=True,
+            disabled=not selected_salles,
+        ):
+            new_df = edited.copy()
+            for i, row in new_df.iterrows():
+                if row["Salle"] in selected_salles:
+                    next_date = _get_next_passage_date(
+                        row["Salle"], row.get("Approvisionneur", ""), plannings
+                    )
+                    if next_date:
+                        new_df.at[i, "Commentaire"] = f"Passage le {next_date}"
+            st.session_state[working_key] = new_df
+            st.session_state[version_key] += 1
+            st.rerun()
+
+    with col_wa:
+        if st.button(
+            "💬 WA",
+            key=f"{key_prefix}_btn_wa",
+            use_container_width=True,
+            disabled=not selected_salles,
+        ):
+            new_df = edited.copy()
+            for i, row in new_df.iterrows():
+                if row["Salle"] in selected_salles:
+                    new_df.at[i, "Commentaire"] = "À voir sur WhatsApp"
+            st.session_state[working_key] = new_df
+            st.session_state[version_key] += 1
+            st.rerun()
+
+    with col_save:
+        if st.button("💾 Sauvegarder", key=f"{key_prefix}_save", use_container_width=True):
+            rows_to_save = [
+                {
+                    "Salle":       row["Salle"],
+                    "Commentaire": row.get("Commentaire", ""),
+                    "since_date":  row.get(date_col, ""),
+                }
+                for _, row in edited.iterrows()
+            ]
+            _save_commentaires(rows_to_save, type_)
+            st.session_state[working_key] = edited.copy()
             st.toast("✅ Commentaires sauvegardés.")
 
-    return edited
+    # ── Message WhatsApp ──────────────────────────────────
+    msg_state_key = f"{key_prefix}_wa_messages"
+    col_msg, _ = st.columns([2, 5])
+    with col_msg:
+        if st.button(
+            "📲 Générer message WhatsApp",
+            key=f"{key_prefix}_btn_msg_wa",
+            use_container_width=True,
+            disabled=not selected_salles,
+        ):
+            probleme = "pas de remontée de télémétrie" if type_ == "no_audit" else "pas de ventes"
+            messages = []
+            for _, row in edited.iterrows():
+                if row["Salle"] in selected_salles:
+                    since_raw = row.get(date_col, "—") or "—"
+                    since = since_raw.split(" ")[0] if since_raw != "—" else "—"
+                    messages.append(
+                        f"Bonjour @ stp j'ai un souci avec la salle {row['Salle']}, "
+                        f"{probleme} depuis le {since}"
+                    )
+            st.session_state[msg_state_key] = "\n\n".join(messages)
+
+    if st.session_state.get(msg_state_key):
+        st.text_area(
+            "💬 Message(s) à copier-coller sur WhatsApp",
+            value=st.session_state[msg_state_key],
+            height=min(300, 80 + st.session_state[msg_state_key].count("\n\n") * 80),
+            key=f"{key_prefix}_wa_textarea",
+        )
 
 
 def _render_delete_section(df: pd.DataFrame, key_prefix: str):
@@ -392,6 +569,8 @@ def render():
         st.error("❌ Aucune salle trouvée en base. Importez d'abord le parc machines.")
         return
 
+    plannings = _load_plannings_from_mongo()
+
     st.success(
         f"✅ Télémétrie chargée — **{len(telemetry):,}** lignes | "
         f"**{telemetry['Salle'].nunique()}** salles distinctes"
@@ -414,6 +593,8 @@ def render():
             calc_audit = st.button("🔍 Calculer", key="btn_no_audit", use_container_width=True)
 
         if calc_audit:
+            st.session_state.pop("no_audit_working_df", None)
+            st.session_state.pop("no_audit_version", None)
             df_audit = _compute_no_audit(salles_df, telemetry)
             df_audit = _inject_commentaires(df_audit, "no_audit")
             st.session_state["no_audit_result"] = df_audit
@@ -425,7 +606,7 @@ def render():
         if df_audit is not None:
             st.caption(f"**{len(df_audit)}** salle(s) absente(s) hier ({yesterday_str})")
             if not df_audit.empty:
-                _render_table_with_comments(df_audit, "no_audit", "no_audit")
+                _render_table_with_comments(df_audit, "no_audit", "no_audit", plannings)
                 _render_delete_section(df_audit, "audit")
             else:
                 st.success("✅ Toutes les salles sont apparues dans la télémétrie hier.")
@@ -447,6 +628,8 @@ def render():
         seuil = 1.99 if seuil_actif else 0.0
 
         if calc_ventes:
+            st.session_state.pop("sans_ventes_working_df", None)
+            st.session_state.pop("sans_ventes_version", None)
             df_ventes = _compute_sans_ventes(salles_df, telemetry, seuil)
             df_ventes = _inject_commentaires(df_ventes, "sans_ventes")
             st.session_state["sans_ventes_result"] = df_ventes
@@ -461,7 +644,7 @@ def render():
                 f"**{len(df_ventes)}** salle(s) auditée(s) hier sans vente{label_seuil}"
             )
             if not df_ventes.empty:
-                _render_table_with_comments(df_ventes, "sans_ventes", "sans_ventes")
+                _render_table_with_comments(df_ventes, "sans_ventes", "sans_ventes", plannings)
                 _render_delete_section(df_ventes, "ventes")
             else:
                 st.success("✅ Toutes les salles auditées hier ont enregistré des ventes.")
