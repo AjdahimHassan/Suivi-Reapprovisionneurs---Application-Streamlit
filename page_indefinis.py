@@ -1180,12 +1180,18 @@ def render():
 
                                     def _is_ligne_ko(code_produit, pu_val):
                                         code = str(code_produit).upper()
-                                        if code not in prix_ko_ttc or pu_val is None:
+                                        if pu_val is None:
                                             return False
-                                        return any(
-                                            abs(pu_val - p) < 0.06
-                                            for p in prix_ko_ttc[code]
-                                        )
+                                        # 1. Détecté par l'ERP (premier fichier)
+                                        if code in prix_ko_ttc and any(
+                                            abs(pu_val - p) < 0.06 for p in prix_ko_ttc[code]
+                                        ):
+                                            return True
+                                        # 2. Vérification directe bibliothèque (produits absents de l'ERP)
+                                        ttc_list = lib_ttc.get(code, [])
+                                        if ttc_list and all(abs(pu_val - p) > 0.06 for p in ttc_list):
+                                            return True
+                                        return False
 
                                     # Colonnes : CODE_PRODUIT | LDP | PU | Prix attendu (TTC)
                                     cols_base = [c for c in ("CODE_PRODUIT", "LDP", "PU") if c in df_ventes_m.columns]
