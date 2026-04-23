@@ -364,8 +364,13 @@ def _render_table_with_comments(
     working_key = f"{key_prefix}_working_df"
     version_key = f"{key_prefix}_version"
 
+    def _sort(frame: pd.DataFrame) -> pd.DataFrame:
+        if jours_col in frame.columns:
+            return frame.sort_values(jours_col, ascending=False, na_position="last").reset_index(drop=True)
+        return frame
+
     if working_key not in st.session_state:
-        st.session_state[working_key] = df.copy()
+        st.session_state[working_key] = _sort(df.copy())
         st.session_state[version_key] = 0
 
     working_df = st.session_state[working_key]
@@ -443,7 +448,7 @@ def _render_table_with_comments(
                     )
                     if next_date:
                         new_df.at[i, "Commentaire"] = f"Passage le {next_date}"
-            st.session_state[working_key] = new_df
+            st.session_state[working_key] = _sort(new_df)
             st.session_state[version_key] += 1
             st.rerun()
 
@@ -458,7 +463,7 @@ def _render_table_with_comments(
             for i, row in new_df.iterrows():
                 if row["Salle"] in selected_salles:
                     new_df.at[i, "Commentaire"] = "À voir sur WhatsApp"
-            st.session_state[working_key] = new_df
+            st.session_state[working_key] = _sort(new_df)
             st.session_state[version_key] += 1
             st.rerun()
 
@@ -503,7 +508,6 @@ def _render_table_with_comments(
             "💬 Message(s) à copier-coller sur WhatsApp",
             value=st.session_state[msg_state_key],
             height=min(300, 80 + st.session_state[msg_state_key].count("\n\n") * 80),
-            key=f"{key_prefix}_wa_textarea",
         )
 
 
