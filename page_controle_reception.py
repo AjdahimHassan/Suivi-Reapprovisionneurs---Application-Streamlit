@@ -184,7 +184,7 @@ def parser_nutramino(texte):
     lignes = []
     # Format facture Glanbia : CODE DESC QTE (CAS|BOX) POIDS KG PU_COLIS TOTAL ...
     pattern = re.compile(
-        r'^\d{7}\s+(.+?)\s+(\d+)\s+(?:CAS|BOX)\s+[\d.]+\s+KG\s+([\d.]+)',
+        r'^\d{7}\s+(.+?)\s+(\d+)\s+(?:CAS|BOX)\s+[\d,.]+\s+KG\s+([\d.]+)',
         re.MULTILINE | re.IGNORECASE
     )
     totaux = {}   # desig -> {'qte': total, 'pu': pu_unitaire}
@@ -391,11 +391,14 @@ TABLE_CORRESPONDANCE = [
     ('ON VAN SHAKE 330ML',                          'NMO NGO SHKE VANILLA'),
     ('NMO NGO SHAKE VAN 330ML',                     'NMO NGO SHKE VANILLA'),
     ('NMO PRO WAFER CHOC EN/RO/FR/NL/DE 39G',       'NMO WAFER PROTEIN CHOCOLAT'),
+    ('NMO PRO WAFER HAZEL EN/RO/FR/NL/DE 39G',      'NMO WAFER PROTEIN HAZELNUT'),
     ('NMO PRO WAFER VANILLA EN/RO/FR/NL/DE 39G',    'NMO WAFER PROTEIN VANILLE'),
     ('ON STRAW SHAKE 330ML EN/FR/NL/ES/IT',         'NMO NGO SHKE STRAWBERRY'),
     ('NMO NGO SHKE STRAW 330ML 7LA-2 NEW',          'NMO NGO SHKE STRAWBERRY'),
     ('NMO XL SHAKE STRAWB 475ML 7LA',               'NMO XL STRAWBERRY 475ML'),
+    ('NMO XL SHAKE CHOC 475ML 7LA',                 'NMO XL CHOCOLATE 475ML'),
     ('ON HFSS CHOC CARAMEL BAR 60G',                'ON BARRE CHOCOLAT CARAMEL'),
+    ('ON HFSS WHITE CHOC PNUT BAR 68G',             'ON WHITE CHOCO PEANUT'),
 ]
 
 
