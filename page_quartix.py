@@ -1961,6 +1961,144 @@ def _vehicle_label(plate: str, vehicles_db: dict) -> str:
     return f"{plate}  —  {prenom}" if prenom else plate
 
 
+def _build_hebdo_excel(
+    date_min,
+    date_max,
+    cutoff,
+    late_trips: dict,
+    weekend_trips: dict,
+    vehicles_db: dict,
+) -> bytes:
+    """Génère un rapport Excel de l'analyse hebdomadaire en mémoire et retourne les bytes."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+
+    HDR_FILL   = PatternFill("solid", fgColor="1B3D6F")
+    HDR_FONT   = Font(color="FFFFFF", bold=True, size=11)
+    WARN_FILL  = PatternFill("solid", fgColor="FDECEA")
+    WKND_FILL  = PatternFill("solid", fgColor="FFF3E0")
+    OK_FILL    = PatternFill("solid", fgColor="E8F5E9")
+    THIN       = Side(style="thin", color="CCCCCC")
+    BORDER     = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CENTER     = Alignment(horizontal="center", vertical="center")
+    WRAP       = Alignment(wrap_text=True, vertical="center")
+
+    def _style_header_row(ws, row_idx, ncols):
+        for c in range(1, ncols + 1):
+            cell = ws.cell(row=row_idx, column=c)
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+            cell.alignment = CENTER
+            cell.border = BORDER
+
+    def _auto_width(ws):
+        for col in ws.columns:
+            max_len = max((len(str(c.value or "")) for c in col), default=8)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 40)
+
+    # ── Feuille Résumé ──────────────────────────────────────────────────────
+    ws_sum = wb.active
+    ws_sum.title = "Résumé"
+
+    ws_sum["A1"] = "Rapport Hebdomadaire QUARTIX"
+    ws_sum["A1"].font = Font(bold=True, size=14, color="1B3D6F")
+    ws_sum.merge_cells("A1:E1")
+    ws_sum["A1"].alignment = CENTER
+
+    ws_sum["A2"] = f"Période : {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}"
+    ws_sum["A2"].font = Font(italic=True, size=11)
+    ws_sum.merge_cells("A2:E2")
+
+    ws_sum["A3"] = f"Heure limite tournée : {cutoff.strftime('%H:%M')}"
+    ws_sum["A3"].font = Font(italic=True, size=11)
+    ws_sum.merge_cells("A3:E3")
+
+    headers_sum = ["Véhicule", "Réappro", "Trajets hors horaires", "Activité weekend", "Statut"]
+    for ci, h in enumerate(headers_sum, 1):
+        ws_sum.cell(row=5, column=ci, value=h)
+    _style_header_row(ws_sum, 5, len(headers_sum))
+
+    all_plates = sorted(set(list(late_trips.keys()) + list(weekend_trips.keys()) +
+                            [p for p in vehicles_db]))
+    row = 6
+    for plate in all_plates:
+        prenom     = vehicles_db.get(plate, {}).get("prenom", "").strip()
+        nb_late    = len(late_trips.get(plate, []))
+        nb_wknd    = len(weekend_trips.get(plate, []))
+        if nb_late == 0 and nb_wknd == 0:
+            statut = "✅ RAS"
+            fill   = OK_FILL
+        else:
+            parts  = []
+            if nb_late:  parts.append("hors horaires")
+            if nb_wknd:  parts.append("weekend")
+            statut = "⚠️ " + " + ".join(parts)
+            fill   = WARN_FILL
+        for ci, val in enumerate([plate, prenom, nb_late or "", nb_wknd or "", statut], 1):
+            c = ws_sum.cell(row=row, column=ci, value=val)
+            c.fill = fill
+            c.border = BORDER
+            c.alignment = CENTER
+        row += 1
+
+    _auto_width(ws_sum)
+
+    # ── Feuille Trajets hors horaires ───────────────────────────────────────
+    ws_late = wb.create_sheet("Trajets hors horaires")
+    headers_late = ["Véhicule", "Réappro", "Date", "Jour", "Heure départ", "Heure arrivée",
+                    "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
+    for ci, h in enumerate(headers_late, 1):
+        ws_late.cell(row=1, column=ci, value=h)
+    _style_header_row(ws_late, 1, len(headers_late))
+
+    row = 2
+    for plate, trips in late_trips.items():
+        prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+        for t in trips:
+            vals = [
+                plate, prenom,
+                t["date"].strftime("%d/%m/%Y"), t["jour"],
+                t["heure_dep"], t["heure_arr"],
+                t["lieu_dep"], t["lieu_arr"],
+                t["distance_km"],
+            ]
+            for ci, val in enumerate(vals, 1):
+                c = ws_late.cell(row=row, column=ci, value=val)
+                c.fill = WARN_FILL
+                c.border = BORDER
+                c.alignment = CENTER if ci not in (7, 8) else WRAP
+            row += 1
+    _auto_width(ws_late)
+
+    # ── Feuille Activité weekend ────────────────────────────────────────────
+    ws_wknd = wb.create_sheet("Activité weekend")
+    headers_wknd = ["Véhicule", "Réappro", "Date", "Jour", "Heure départ", "Distance (km)"]
+    for ci, h in enumerate(headers_wknd, 1):
+        ws_wknd.cell(row=1, column=ci, value=h)
+    _style_header_row(ws_wknd, 1, len(headers_wknd))
+
+    row = 2
+    for plate, trips in weekend_trips.items():
+        prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+        for t in trips:
+            vals = [plate, prenom, t["date"].strftime("%d/%m/%Y"), t["jour"],
+                    t["heure_dep"], t["distance_km"]]
+            for ci, val in enumerate(vals, 1):
+                c = ws_wknd.cell(row=row, column=ci, value=val)
+                c.fill = WKND_FILL
+                c.border = BORDER
+                c.alignment = CENTER
+            row += 1
+    _auto_width(ws_wknd)
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _build_hebdo_mail(
     resp_nom: str,
     date_min,
@@ -2031,63 +2169,60 @@ def _render_hebdo_vehicle_editor(vehicle_sheets: list[str], vehicles_db: dict) -
     with st.expander("⚙️ Informations conducteurs & zones (édition)", expanded=False):
 
         # ── Sous-section : import depuis le guide Excel ────
-        with st.expander("📥 Importer depuis le guide Excel (Reappro_Guide_Plaque)", expanded=False):
-            guide_file = st.file_uploader(
-                "Fichier guide plaques (.xlsx)",
-                type=["xls", "xlsx"],
-                key="hebdo_guide_uploader",
-            )
-            if guide_file and st.button("⬇️ Importer", key="hebdo_guide_import"):
-                try:
-                    df_guide = pd.read_excel(guide_file)
-                    # Colonnes attendues (insensible à la casse)
-                    df_guide.columns = [c.strip() for c in df_guide.columns]
-                    col_map = {c.lower(): c for c in df_guide.columns}
+        st.markdown("**📥 Importer depuis le guide Excel (Reappro_Guide_Plaque)**")
+        guide_file = st.file_uploader(
+            "Fichier guide plaques (.xlsx)",
+            type=["xls", "xlsx"],
+            key="hebdo_guide_uploader",
+        )
+        if guide_file and st.button("⬇️ Importer", key="hebdo_guide_import"):
+            try:
+                df_guide = pd.read_excel(guide_file)
+                df_guide.columns = [c.strip() for c in df_guide.columns]
+                col_map = {c.lower(): c for c in df_guide.columns}
 
-                    plate_col  = col_map.get("plaque")
-                    prenom_col = col_map.get("prenom")
-                    zone_col   = col_map.get("zone") or col_map.get("zone géographique")
-                    resp_col   = col_map.get("responsable")
+                plate_col  = col_map.get("plaque")
+                prenom_col = col_map.get("prenom")
+                zone_col   = col_map.get("zone") or col_map.get("zone géographique")
+                resp_col   = col_map.get("responsable")
 
-                    if not plate_col:
-                        st.error("Colonne 'Plaque' introuvable dans le guide.")
-                    else:
-                        # Index normalisé pour la correspondance
-                        guide_index: dict[str, dict] = {}
-                        for _, row in df_guide.iterrows():
-                            raw = str(row[plate_col]).strip()
-                            if raw and raw.lower() != "nan":
-                                guide_index[_normalize_plate(raw)] = {
-                                    "prenom":      str(row[prenom_col]).strip() if prenom_col and pd.notna(row.get(prenom_col)) else "",
-                                    "zone":        str(row[zone_col]).strip()   if zone_col   and pd.notna(row.get(zone_col))   else "",
-                                    "responsable": str(row[resp_col]).strip()   if resp_col   and pd.notna(row.get(resp_col))   else "",
-                                }
+                if not plate_col:
+                    st.error("Colonne 'Plaque' introuvable dans le guide.")
+                else:
+                    guide_index: dict[str, dict] = {}
+                    for _, row in df_guide.iterrows():
+                        raw = str(row[plate_col]).strip()
+                        if raw and raw.lower() != "nan":
+                            guide_index[_normalize_plate(raw)] = {
+                                "prenom":      str(row[prenom_col]).strip() if prenom_col and pd.notna(row.get(prenom_col)) else "",
+                                "zone":        str(row[zone_col]).strip()   if zone_col   and pd.notna(row.get(zone_col))   else "",
+                                "responsable": str(row[resp_col]).strip()   if resp_col   and pd.notna(row.get(resp_col))   else "",
+                            }
 
-                        matched, unmatched = 0, []
-                        for plate in vehicle_sheets:
-                            info = guide_index.get(_normalize_plate(plate))
-                            if info:
-                                upsert_quartix_vehicle_info(
-                                    plate=plate,
-                                    prenom=info["prenom"],
-                                    zone=info["zone"],
-                                    responsable=info["responsable"],
-                                )
-                                matched += 1
-                            else:
-                                unmatched.append(plate)
+                    matched, unmatched = 0, []
+                    for plate in vehicle_sheets:
+                        info = guide_index.get(_normalize_plate(plate))
+                        if info:
+                            upsert_quartix_vehicle_info(
+                                plate=plate,
+                                prenom=info["prenom"],
+                                zone=info["zone"],
+                                responsable=info["responsable"],
+                            )
+                            matched += 1
+                        else:
+                            unmatched.append(plate)
 
-                        st.success(f"✅ {matched} véhicule(s) mis à jour.")
-                        if unmatched:
-                            st.warning(f"Plaques non trouvées dans le guide : {', '.join(unmatched)}")
-                        # Recharge la BDD après import
-                        try:
-                            vehicles_db = load_all_quartix_vehicles()
-                        except Exception:
-                            pass
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Erreur lecture guide : {e}")
+                    st.success(f"✅ {matched} véhicule(s) mis à jour.")
+                    if unmatched:
+                        st.warning(f"Plaques non trouvées dans le guide : {', '.join(unmatched)}")
+                    try:
+                        vehicles_db = load_all_quartix_vehicles()
+                    except Exception:
+                        pass
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Erreur lecture guide : {e}")
 
         # ── Tableau éditable ───────────────────────────────
         st.markdown("**Modifiez directement les informations puis cliquez Sauvegarder.**")
@@ -2333,7 +2468,28 @@ def _render_tab_hebdo() -> None:
                     ]
                     st.dataframe(pd.DataFrame(wk_rows), use_container_width=True, hide_index=True)
 
-    # ── 7. Génération mail ────────────────────────────────
+    # ── 7. Export Excel ───────────────────────────────────
+    st.divider()
+    st.markdown("### 📊 Rapport Excel")
+    excel_bytes = _build_hebdo_excel(
+        date_min      = date_min,
+        date_max      = date_max,
+        cutoff        = cutoff,
+        late_trips    = late_trips,
+        weekend_trips = weekend_trips,
+        vehicles_db   = vehicles_db,
+    )
+    fname = f"rapport_hebdo_quartix_{date_min.strftime('%Y%m%d')}_{date_max.strftime('%Y%m%d')}.xlsx"
+    st.download_button(
+        label     = "⬇️ Télécharger le rapport Excel",
+        data      = excel_bytes,
+        file_name = fname,
+        mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type      = "primary",
+        key       = "hebdo_dl_excel",
+    )
+
+    # ── 8. Génération mail ────────────────────────────────
     st.divider()
     st.markdown("### 📧 Générer un mail de signalement")
 
