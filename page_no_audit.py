@@ -687,9 +687,8 @@ def _render_bottom_sections():
     if actifs:
         with st.expander(f"📋 Commentaires actifs ({len(actifs)})", expanded=True):
             rows = []
+            type_raw_map = []
             for inc in actifs:
-                # "Depuis" = date métier (dernière apparition / dernière vente)
-                # fallback sur created_at pour les anciens incidents sans since_date
                 since = inc.get("since_date") or (
                     inc.get("created_at").strftime("%d/%m/%Y")
                     if inc.get("created_at") else "—"
@@ -700,19 +699,45 @@ def _render_bottom_sections():
                     "Commentaire": inc.get("commentaire", ""),
                     "Depuis":      since or "—",
                 })
+                type_raw_map.append(inc.get("type", ""))
             df_actifs = pd.DataFrame(rows)
-            st.dataframe(df_actifs, use_container_width=True, hide_index=True)
 
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df_actifs.to_excel(writer, sheet_name="Commentaires actifs", index=False)
-            buf.seek(0)
-            st.download_button(
-                label="⬇️ Exporter Excel",
-                data=buf.getvalue(),
-                file_name=f"commentaires_actifs_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            locked = ["Salle", "Type", "Depuis"]
+            col_cfg = {c: st.column_config.Column(disabled=True) for c in locked}
+            col_cfg["Commentaire"] = st.column_config.TextColumn(
+                "Commentaire", max_chars=300
             )
+            edited_actifs = st.data_editor(
+                df_actifs,
+                use_container_width=True,
+                hide_index=True,
+                column_config=col_cfg,
+                key="actifs_editor",
+            )
+
+            col_save_actifs, col_dl_actifs = st.columns([1, 2])
+            with col_save_actifs:
+                if st.button("💾 Sauvegarder", key="btn_save_actifs", use_container_width=True):
+                    col_db = _get_incidents_col()
+                    for i, row in edited_actifs.iterrows():
+                        col_db.update_one(
+                            {"salle": row["Salle"], "type": type_raw_map[i], "status": "actif"},
+                            {"$set": {"commentaire": (row["Commentaire"] or "").strip()}},
+                        )
+                    st.toast("✅ Commentaires mis à jour.")
+
+            with col_dl_actifs:
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    edited_actifs.to_excel(writer, sheet_name="Commentaires actifs", index=False)
+                buf.seek(0)
+                st.download_button(
+                    label="⬇️ Exporter Excel",
+                    data=buf.getvalue(),
+                    file_name=f"commentaires_actifs_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
     # ── Historique résolus ────────────────────────────────
     resolus = incidents["resolu"]
