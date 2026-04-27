@@ -382,17 +382,23 @@ def _find_depot_passages(
     df_vehicle: pd.DataFrame,
     cache: dict,
     depot_coords: tuple,
+    min_gap_hours: float = 0.0,
 ) -> list[dict]:
     """
-    Retourne la liste de tous les passages détectés au dépôt sur l'ensemble
-    du fichier, triés par date/heure.
-    Chaque passage : {date, period, arrive_time, depart_time, duration_min, address}
+    Retourne au plus 2 passages dépôt par jour, classés par séquence :
+      - "matin"      = 1er passage avec durée >= MIN_STOP_MIN (passage avant tournée)
+      - "après-midi" = passage suivant (au moins min_gap_hours après le matin) avec
+                       durée >= MIN_STOP_MIN ; si aucun n'atteint MIN_STOP_MIN, on
+                       prend le premier passage suivant disponible quelle que soit sa durée.
     """
-    passages: list[dict] = []
+    result: list[dict] = []
 
     for date, grp in df_vehicle.groupby(df_vehicle["_dep"].dt.date):
         grp = grp.sort_values("_dep").reset_index(drop=True)
-        n = len(grp)
+        n   = len(grp)
+
+        # ── 1. Collecte brute de tous les passages dépôt de la journée ────────
+        day_visits: list[dict] = []
 
         for i in range(n):
             row      = grp.iloc[i]
@@ -408,64 +414,80 @@ def _find_depot_passages(
                 depart_time = next_row["_dep"] if next_row is not None and pd.notna(next_row["_dep"]) else None
                 duration_min = (
                     max(0.0, (depart_time - arrive_time).total_seconds() / 60)
-                    if depart_time is not None
-                    else 0.0
+                    if depart_time is not None else 0.0
                 )
-                period = "matin" if arrive_time.hour < 12 else "après-midi"
-                # i+1 = nombre de trajets effectués pour arriver au dépôt (inclut le trajet courant)
-                # n-1-i = nombre de trajets effectués après avoir quitté le dépôt
-                passages.append({
-                    "date":          date,
-                    "period":        period,
-                    "arrive_time":   arrive_time,
-                    "depart_time":   depart_time,
-                    "duration_min":  duration_min,
-                    "address":       arr_addr,
-                    "trips_before":  i + 1,
-                    "trips_after":   max(0, n - 1 - i),
+                day_visits.append({
+                    "date":         date,
+                    "arrive_time":  arrive_time,
+                    "depart_time":  depart_time,
+                    "duration_min": duration_min,
+                    "address":      arr_addr,
+                    "trips_before": i + 1,
+                    "trips_after":  max(0, n - 1 - i),
                 })
 
-            # Cas B — départ depuis le dépôt (sans Cas A déjà couvert)
+            # Cas B — départ depuis le dépôt
             elif _near_depot(dep_addr, cache, depot_coords):
                 depart_time = row["_dep"]
                 if pd.isna(depart_time):
                     continue
                 if i == 0:
-                    # Premier trajet du jour : le véhicule était garé au dépôt depuis la veille
-                    # On ne connaît pas l'heure d'arrivée → on utilise l'heure de départ comme référence
                     arrive_time  = depart_time
-                    duration_min = 0.0  # durée inconnue (nuit précédente)
+                    duration_min = 0.0
                 else:
                     prev_arr = grp.iloc[i - 1]["_arr"]
                     if pd.isna(prev_arr):
                         continue
                     arrive_time  = prev_arr
                     duration_min = max(0.0, (depart_time - prev_arr).total_seconds() / 60)
-                    if duration_min < MIN_STOP_MIN:
-                        continue
-                period = "matin" if arrive_time.hour < 12 else "après-midi"
-                # i = trajets effectués avant de repasser au dépôt (0..i-1)
-                # n-i = trajets effectués après le départ du dépôt (i..n-1, inclut ce trajet)
-                passages.append({
-                    "date":          date,
-                    "period":        period,
-                    "arrive_time":   arrive_time,
-                    "depart_time":   depart_time,
-                    "duration_min":  duration_min,
-                    "address":       dep_addr,
-                    "trips_before":  i,
-                    "trips_after":   n - i,
+                day_visits.append({
+                    "date":         date,
+                    "arrive_time":  arrive_time,
+                    "depart_time":  depart_time,
+                    "duration_min": duration_min,
+                    "address":      dep_addr,
+                    "trips_before": i,
+                    "trips_after":  n - i,
                 })
 
-    # Déduplication sur (date, arrive_time) — garder la durée la plus longue
-    seen: dict[tuple, int] = {}
-    for idx, p in enumerate(passages):
-        key = (p["date"], p["arrive_time"])
-        if key not in seen or p["duration_min"] > passages[seen[key]]["duration_min"]:
-            seen[key] = idx
-    passages = [passages[i] for i in sorted(seen.values())]
+        # ── 2. Déduplication sur arrive_time — garder la durée la plus longue ─
+        seen: dict = {}
+        for idx, v in enumerate(day_visits):
+            key = v["arrive_time"]
+            if key not in seen or v["duration_min"] > day_visits[seen[key]]["duration_min"]:
+                seen[key] = idx
+        day_visits = sorted(
+            [day_visits[i] for i in seen.values()],
+            key=lambda v: v["arrive_time"],
+        )
 
-    return sorted(passages, key=lambda p: (p["date"], p["arrive_time"]))
+        # ── 3. Classification par séquence ────────────────────────────────────
+        # "matin" = 1er passage avec durée >= MIN_STOP_MIN
+        matin_idx = next(
+            (i for i, v in enumerate(day_visits) if v["duration_min"] >= MIN_STOP_MIN),
+            None,
+        )
+        if matin_idx is None:
+            continue  # aucun passage assez long → journée ignorée
+
+        result.append({**day_visits[matin_idx], "period": "matin"})
+
+        # "après-midi" = passage suivant (respectant le délai min) avec durée >= MIN_STOP_MIN,
+        # sinon le 1er passage suivant disponible (durée quelconque)
+        matin_time = day_visits[matin_idx]["arrive_time"]
+        import datetime as _dt
+        min_gap_td = _dt.timedelta(hours=min_gap_hours)
+        remaining  = [
+            v for v in day_visits[matin_idx + 1:]
+            if v["arrive_time"] >= matin_time + min_gap_td
+        ]
+        apmidi = next((v for v in remaining if v["duration_min"] >= MIN_STOP_MIN), None)
+        if apmidi is None and remaining:
+            apmidi = remaining[0]
+        if apmidi is not None:
+            result.append({**apmidi, "period": "après-midi"})
+
+    return sorted(result, key=lambda p: (p["date"], p["arrive_time"]))
 
 
 # ── Onglet 1 : Carte & Trajets (code existant) ────────────────────────────────
@@ -1089,13 +1111,13 @@ def _build_export_excel(
     df_raw: "pd.DataFrame | None" = None,
     late_hour: int = 17,
 ) -> bytes:
-    """Génère un classeur Excel (.xlsx) professionnel avec le récapitulatif des passages dépôt."""
+    """Génère un classeur Excel simple avec le récapitulatif des passages dépôt."""
     import io as _io_mod
     from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, GradientFill
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    # ── Pré-calcul des alertes par jour ──────────────────────────────────────
+    # ── Alertes par jour (weekend / heure tardive) ───────────────────────────
     alert_map: dict = {}
     if df_raw is not None:
         for d in available_days:
@@ -1109,336 +1131,118 @@ def _build_export_excel(
     else:
         alert_map = {d: "" for d in available_days}
 
-    # ── Palette ──────────────────────────────────────────────────────────────
-    # Identité
-    C_NAVY       = "0D1B2A"   # titre principal
-    C_STEEL      = "1B3A57"   # sous-titres / en-têtes colonne
-    C_MATIN_H    = "1A4971"   # en-tête groupe matin
-    C_APMIDI_H   = "14534A"   # en-tête groupe après-midi
-    C_ALERT_H    = "7B1C1C"   # en-tête colonne observations
-    C_INFO_BG    = "EDF2F7"   # fond bandeau infos
-    C_INFO_TXT   = "2D3748"   # texte bandeau infos
-    # Données — matin
-    C_MATIN_OK   = "BEE3F8"   # passage matin trouvé
-    C_MATIN_NO   = "EBF8FF"   # pas de passage matin (très pâle)
-    # Données — après-midi
-    C_APMIDI_OK  = "B2F5EA"   # passage AM trouvé
-    C_APMIDI_NO  = "E6FFFA"   # pas de passage AM
-    # Données — date/jour
-    C_DATE_ODD   = "FFFFFF"
-    C_DATE_EVEN  = "F0F4F8"
-    # Alertes
-    C_ALERT_BG   = "C53030"   # fond ligne alerte
-    C_ALERT_TXT  = "FFFFFF"
-    # Légende (bas de page)
-    C_LEG_MATIN  = "2B6CB0"
-    C_LEG_APMIDI = "276749"
-    C_LEG_ALERT  = "C53030"
-    # Texte
-    C_TXT        = "1A202C"
-    C_TXT_MUTED  = "718096"
-    C_WHITE      = "FFFFFF"
+    plate    = result.get("plate", "")
+    passages = result.get("passages", [])
 
-    def fill(hex_color):
-        return PatternFill("solid", fgColor=hex_color)
+    # ── Helpers styles ────────────────────────────────────────────────────────
+    HDR_FILL = PatternFill("solid", fgColor="1B3D6F")
+    HDR_FONT = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    DAT_FONT = Font(name="Calibri", size=10, color="000000")
+    THIN     = Side(style="thin", color="CCCCCC")
+    BORDER   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CENTER   = Alignment(horizontal="center", vertical="center")
+    LEFT     = Alignment(horizontal="left",   vertical="center")
 
-    def border(color="CBD5E0", thick_left=False):
-        s = Side(style="thin", color=color)
-        l = Side(style="medium", color="718096") if thick_left else s
-        return Border(left=l, right=s, top=s, bottom=s)
+    def _hdr(ws, row, col, value, align=CENTER):
+        c = ws.cell(row=row, column=col, value=value)
+        c.fill = HDR_FILL; c.font = HDR_FONT; c.alignment = align; c.border = BORDER
 
-    def font(bold=False, size=10, color=C_TXT, italic=False):
-        return Font(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+    def _dat(ws, row, col, value, align=CENTER):
+        c = ws.cell(row=row, column=col, value=value)
+        c.font = DAT_FONT; c.alignment = align; c.border = BORDER
 
-    center  = Alignment(horizontal="center", vertical="center", wrap_text=False)
-    left    = Alignment(horizontal="left",   vertical="center", wrap_text=False)
-    left_w  = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    def _auto_width(ws, min_w=8, max_w=50):
+        for col in ws.columns:
+            best = max((len(str(c.value or "")) for c in col), default=min_w)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(best + 3, max_w)
 
-    # ── Workbook ─────────────────────────────────────────────────────────────
+    def _dur(p):
+        if p is None:
+            return "—"
+        dep = p.get("depart_time")
+        return "?" if (dep is None or pd.isna(dep)) else int(p["duration_min"])
+
+    def _trips(p, key):
+        if p is None:
+            return "—"
+        v = p.get(key)
+        return int(v) if v is not None else "—"
+
+    # ── Workbook ──────────────────────────────────────────────────────────────
     wb = Workbook()
+
+    # ── Feuille 1 : Récapitulatif par jour ───────────────────────────────────
     ws = wb.active
     ws.title = "Récapitulatif"
 
-    plate      = result.get("plate", "")
-    depot_addr = result.get("depot_addr", "")
-    passages   = result.get("passages", [])
-    nb_days    = result.get("nb_days", len(available_days))
-    depot_coords = result.get("depot_coords")
-    coords_str   = f"{depot_coords[0]:.5f}, {depot_coords[1]:.5f}" if depot_coords else "—"
-
-    N_COLS = 11  # A..K
-    last_col = get_column_letter(N_COLS)
-
-    # ── Largeurs colonnes ─────────────────────────────────────────────────────
-    col_widths = {
-        "A": 13, "B": 13,                          # date, jour
-        "C": 11, "D": 13, "E": 14, "F": 14,        # matin
-        "G": 11, "H": 13, "I": 14, "J": 14,        # après-midi
-        "K": 30,                                    # observations
-    }
-    for col_letter, w in col_widths.items():
-        ws.column_dimensions[col_letter].width = w
-
-    # ── Ligne 1 : titre ───────────────────────────────────────────────────────
-    ws.merge_cells(f"A1:{last_col}1")
-    c = ws["A1"]
-    c.value     = f"  ANALYSE DES PASSAGES DÉPÔT   ·   {plate}"
-    c.font      = font(bold=True, size=15, color=C_WHITE)
-    c.fill      = fill(C_NAVY)
-    c.alignment = left
-    ws.row_dimensions[1].height = 36
-
-    # ── Ligne 2 : sous-titre dépôt ────────────────────────────────────────────
-    ws.merge_cells(f"A2:{last_col}2")
-    c = ws["A2"]
-    c.value     = f"  Dépôt : {depot_addr}   ·   GPS : {coords_str}   ·   Tolérance {DEPOT_RADIUS_M} m"
-    c.font      = font(size=9, color=C_WHITE, italic=True)
-    c.fill      = fill(C_STEEL)
-    c.alignment = left
-    ws.row_dimensions[2].height = 18
-
-    # ── Ligne 3 : bandeau stats ───────────────────────────────────────────────
-    ws.merge_cells(f"A3:{last_col}3")
-    c = ws["A3"]
-    date_range = (f"{available_days[0].strftime('%d/%m/%Y')} → {available_days[-1].strftime('%d/%m/%Y')}"
-                  if available_days else "—")
-    nb_alert = sum(1 for v in alert_map.values() if v)
-    c.value = (
-        f"  Période : {date_range}   ·   Jours analysés : {nb_days}"
-        f"   ·   Passages détectés : {len(passages)}"
-        f"   ·   Alertes : {nb_alert} jour(s)"
-    )
-    c.font      = font(size=9, color=C_INFO_TXT, italic=True)
-    c.fill      = fill(C_INFO_BG)
-    c.alignment = left
-    ws.row_dimensions[3].height = 17
-
-    # ── Ligne 4 : en-têtes de groupes ─────────────────────────────────────────
-    ws.row_dimensions[4].height = 20
-
-    for col in ["A", "B"]:
-        c = ws[f"{col}4"]
-        c.fill = fill(C_STEEL)
-
-    ws.merge_cells("C4:F4")
-    c = ws["C4"]
-    c.value     = "🌅  MATIN"
-    c.font      = font(bold=True, size=9, color=C_WHITE)
-    c.fill      = fill(C_MATIN_H)
-    c.alignment = center
-    for col in ["D", "E", "F"]:
-        ws[f"{col}4"].fill = fill(C_MATIN_H)
-
-    ws.merge_cells("G4:J4")
-    c = ws["G4"]
-    c.value     = "🌆  APRÈS-MIDI"
-    c.font      = font(bold=True, size=9, color=C_WHITE)
-    c.fill      = fill(C_APMIDI_H)
-    c.alignment = center
-    for col in ["H", "I", "J"]:
-        ws[f"{col}4"].fill = fill(C_APMIDI_H)
-
-    c = ws["K4"]
-    c.value     = "⚠️  ALERTES"
-    c.font      = font(bold=True, size=9, color=C_WHITE)
-    c.fill      = fill(C_ALERT_H)
-    c.alignment = center
-
-    # ── Ligne 5 : en-têtes colonnes ───────────────────────────────────────────
-    col_headers = [
-        ("A", "Date",           C_STEEL,   left),
-        ("B", "Jour",           C_STEEL,   left),
-        ("C", "Arrivée",        C_MATIN_H, center),
-        ("D", "Durée (min)",    C_MATIN_H, center),
-        ("E", "Trajets avant",  C_MATIN_H, center),
-        ("F", "Trajets après",  C_MATIN_H, center),
-        ("G", "Arrivée",        C_APMIDI_H,center),
-        ("H", "Durée (min)",    C_APMIDI_H,center),
-        ("I", "Trajets avant",  C_APMIDI_H,center),
-        ("J", "Trajets après",  C_APMIDI_H,center),
-        ("K", "Observations",   C_ALERT_H, left),
+    headers = [
+        "Date", "Jour",
+        "Avant tournée — Arrivée", "Avant tournée — Durée (min)", "Avant tournée — Trajets avant", "Avant tournée — Trajets après",
+        "Après tournée — Arrivée", "Après tournée — Durée (min)", "Après tournée — Trajets avant", "Après tournée — Trajets après",
+        "Observations",
     ]
-    for col_letter, label, bg, aln in col_headers:
-        c = ws[f"{col_letter}5"]
-        c.value     = label
-        c.font      = font(bold=True, size=9, color=C_WHITE)
-        c.fill      = fill(bg)
-        c.alignment = aln
-        c.border    = border()
-    ws.row_dimensions[5].height = 28
+    for ci, h in enumerate(headers, 1):
+        _hdr(ws, 1, ci, h)
+    ws.freeze_panes = "A2"
 
-    ws.freeze_panes = "A6"
-
-    # ── Données ───────────────────────────────────────────────────────────────
-    def _val_time(p):
-        return p["arrive_time"].strftime("%H:%M") if p else "—"
-    def _val_dur(p):
-        return int(p["duration_min"]) if p and p["duration_min"] >= 1 else ("—" if not p else 0)
-    def _val_tb(p):
-        return int(p["trips_before"]) if p and p.get("trips_before") is not None else "—"
-    def _val_ta(p):
-        return int(p["trips_after"]) if p and p.get("trips_after") is not None else "—"
-
-    for row_idx, d in enumerate(available_days, start=6):
+    for ri, d in enumerate(available_days, 2):
         m   = day_summary[d]["matin"]
         apm = day_summary[d]["après-midi"]
-        obs = alert_map.get(d, "")
-        is_alert  = bool(obs)
-        is_even   = (row_idx % 2 == 0)
-
-        row_data = [
+        row = [
             d.strftime("%d/%m/%Y"),
             d.strftime("%A").capitalize(),
-            _val_time(m),   _val_dur(m),   _val_tb(m),   _val_ta(m),
-            _val_time(apm), _val_dur(apm), _val_tb(apm), _val_ta(apm),
-            obs,
+            m["arrive_time"].strftime("%H:%M") if m else "—",
+            _dur(m),
+            _trips(m,   "trips_before"),
+            _trips(m,   "trips_after"),
+            apm["arrive_time"].strftime("%H:%M") if apm else "—",
+            _dur(apm),
+            _trips(apm, "trips_before"),
+            _trips(apm, "trips_after"),
+            alert_map.get(d, ""),
         ]
+        aligns = [LEFT, LEFT, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER, LEFT]
+        for ci, (val, aln) in enumerate(zip(row, aligns), 1):
+            _dat(ws, ri, ci, val, align=aln)
 
-        # Couleurs par segment selon statut passage
-        date_bg   = C_DATE_EVEN if is_even else C_DATE_ODD
-        matin_bg  = C_MATIN_OK  if m   else C_MATIN_NO
-        apmidi_bg = C_APMIDI_OK if apm else C_APMIDI_NO
+    _auto_width(ws)
 
-        col_fills = [
-            date_bg, date_bg,
-            matin_bg, matin_bg, matin_bg, matin_bg,
-            apmidi_bg, apmidi_bg, apmidi_bg, apmidi_bg,
-            C_DATE_ODD,
-        ]
-        col_aligns = [
-            left, left,
-            center, center, center, center,
-            center, center, center, center,
-            left_w,
-        ]
-        # Bordure épaisse à gauche des groupes matin (C) et après-midi (G) et observations (K)
-        thick_left_cols = {3, 7, 11}
-
-        for col_idx, (value, bg, aln) in enumerate(zip(row_data, col_fills, col_aligns), start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.alignment = aln
-            cell.border    = border(thick_left=(col_idx in thick_left_cols))
-            if is_alert:
-                cell.fill = fill(C_ALERT_BG)
-                cell.font = font(bold=True, size=10, color=C_ALERT_TXT)
-            else:
-                cell.fill = fill(bg)
-                cell.font = font(
-                    bold=(col_idx <= 2),
-                    size=10,
-                    color=C_TXT if col_idx != 11 else C_ALERT_H if obs else C_TXT_MUTED,
-                )
-
-        ws.row_dimensions[row_idx].height = 19
-
-    # ── Ligne légende ─────────────────────────────────────────────────────────
-    legend_row = 6 + len(available_days) + 1
-    ws.row_dimensions[legend_row].height = 8  # spacer
-
-    legend_row += 1
-    items = [
-        (C_MATIN_OK,  "Passage matin détecté"),
-        (C_MATIN_NO,  "Pas de passage matin"),
-        (C_APMIDI_OK, "Passage après-midi détecté"),
-        (C_APMIDI_NO, "Pas de passage après-midi"),
-        (C_ALERT_BG,  f"Weekend ou trajet après {late_hour}h"),
-    ]
-    for i, (color, label) in enumerate(items):
-        col_a = 1 + i * 2
-        col_b = col_a + 1
-        c_swatch = ws.cell(row=legend_row, column=col_a, value=" ")
-        c_swatch.fill = fill(color)
-        c_swatch.border = border()
-        c_label = ws.cell(row=legend_row, column=col_b, value=label)
-        c_label.font = font(size=8, color=C_TXT_MUTED, italic=True)
-        c_label.alignment = left
-    ws.row_dimensions[legend_row].height = 16
-
-    # ── Onglet 2 : Détail passages ────────────────────────────────────────────
+    # ── Feuille 2 : Détail de chaque passage ─────────────────────────────────
     ws2 = wb.create_sheet("Détail passages")
 
-    W2 = [13, 13, 14, 12, 12, 12, 14, 14, 46]
-    HDR2 = [
-        ("Date",          C_STEEL,    left),
-        ("Jour",          C_STEEL,    left),
-        ("Période",       C_STEEL,    center),
-        ("Arrivée dépôt", C_MATIN_H,  center),
-        ("Départ dépôt",  C_MATIN_H,  center),
-        ("Durée (min)",   C_MATIN_H,  center),
-        ("Trajets avant", C_APMIDI_H, center),
-        ("Trajets après", C_APMIDI_H, center),
-        ("Adresse",       C_STEEL,    left),
+    headers2 = [
+        "Date", "Jour", "Période",
+        "Arrivée dépôt", "Départ dépôt", "Durée (min)",
+        "Trajets avant", "Trajets après",
+        "Adresse",
     ]
+    for ci, h in enumerate(headers2, 1):
+        _hdr(ws2, 1, ci, h, align=CENTER if ci != 9 else LEFT)
+    ws2.freeze_panes = "A2"
 
-    # Titre onglet 2
-    ws2.merge_cells(f"A1:I1")
-    c = ws2["A1"]
-    c.value     = f"  DÉTAIL DES PASSAGES   ·   {plate}   ·   {depot_addr}"
-    c.font      = font(bold=True, size=13, color=C_WHITE)
-    c.fill      = fill(C_NAVY)
-    c.alignment = left
-    ws2.row_dimensions[1].height = 32
-
-    for col_idx, ((label, bg, aln), w) in enumerate(zip(HDR2, W2), start=1):
-        c = ws2.cell(row=2, column=col_idx, value=label)
-        c.font      = font(bold=True, size=9, color=C_WHITE)
-        c.fill      = fill(bg)
-        c.alignment = aln
-        c.border    = border(thick_left=(col_idx in {4, 7, 9}))
-        ws2.column_dimensions[get_column_letter(col_idx)].width = w
-    ws2.row_dimensions[2].height = 28
-    ws2.freeze_panes = "A3"
-
-    PERIOD_STYLE = {
-        "matin":      (C_MATIN_OK,  C_MATIN_H,  "🌅 Matin"),
-        "après-midi": (C_APMIDI_OK, C_APMIDI_H, "🌆 Après-midi"),
-    }
-
-    for row_idx, p in enumerate(passages, start=3):
+    for ri, p in enumerate(passages, 2):
         dep_t  = p["depart_time"]
-        period = p["period"]
-        row_bg, period_color, period_label = PERIOD_STYLE.get(
-            period, (C_DATE_ODD, C_STEEL, period)
-        )
-        is_even2 = (row_idx % 2 == 0)
-        row_bg2  = row_bg if not is_even2 else _darken_hex(row_bg)
-
-        row_data2 = [
+        no_dep = dep_t is None or pd.isna(dep_t)
+        row2   = [
             p["date"].strftime("%d/%m/%Y"),
             p["date"].strftime("%A").capitalize(),
-            period_label,
+            "Avant tournée" if p["period"] == "matin" else "Après tournée",
             p["arrive_time"].strftime("%H:%M"),
-            dep_t.strftime("%H:%M") if dep_t and pd.notna(dep_t) else "—",
-            int(p["duration_min"]) if p["duration_min"] >= 1 else 0,
+            "—" if no_dep else dep_t.strftime("%H:%M"),
+            "?" if no_dep else int(p["duration_min"]),
             int(p.get("trips_before", 0)) if p.get("trips_before") is not None else "—",
             int(p.get("trips_after",  0)) if p.get("trips_after")  is not None else "—",
             p["address"],
         ]
-        col_aligns2 = [left, left, center, center, center, center, center, center, left_w]
+        aligns2 = [LEFT, LEFT, CENTER, CENTER, CENTER, CENTER, CENTER, CENTER, LEFT]
+        for ci, (val, aln) in enumerate(zip(row2, aligns2), 1):
+            _dat(ws2, ri, ci, val, align=aln)
 
-        for col_idx, (value, aln) in enumerate(zip(row_data2, col_aligns2), start=1):
-            cell = ws2.cell(row=row_idx, column=col_idx, value=value)
-            cell.fill      = fill(row_bg2)
-            cell.border    = border(thick_left=(col_idx in {4, 7, 9}))
-            cell.alignment = aln
-            cell.font      = font(
-                bold=(col_idx in {1, 3}),
-                size=10,
-                color=period_color if col_idx == 3 else C_TXT,
-            )
-        ws2.row_dimensions[row_idx].height = 18
+    _auto_width(ws2)
 
     buf = _io_mod.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-
-
-def _darken_hex(hex_color: str, factor: float = 0.93) -> str:
-    """Assombrit légèrement une couleur hex pour les lignes paires."""
-    r = int(hex_color[0:2], 16)
-    g = int(hex_color[2:4], 16)
-    b = int(hex_color[4:6], 16)
-    return f"{int(r*factor):02X}{int(g*factor):02X}{int(b*factor):02X}"
 
 
 def _render_export_button(
@@ -1447,29 +1251,36 @@ def _render_export_button(
     day_summary: dict,
     df_raw: "pd.DataFrame | None" = None,
 ) -> None:
-    """Affiche les options d'export + bouton de téléchargement."""
-    col_btn, col_hour, col_info = st.columns([2, 2, 3])
+    """Bouton export Excel + contrôle du délai minimum entre les deux passages dépôt."""
+    col_gap, col_export = st.columns([3, 4])
 
-    with col_hour:
-        late_hour = st.number_input(
-            "⏰ Alerte trajets après (h)",
-            min_value=0, max_value=23, value=17, step=1,
-            key="q_export_late_hour",
-            help="Les jours où le véhicule a effectué un trajet après cette heure seront signalés en rouge dans l'export.",
+    with col_gap:
+        new_gap = st.number_input(
+            "⏱️ Délai min entre les 2 passages (heures)",
+            min_value=0.0, max_value=12.0,
+            value=float(st.session_state.get("q_min_gap_hours", result.get("min_gap_hours", 0.0))),
+            step=0.5,
+            key="q_min_gap_hours",
+            help="Le passage 'après tournée' ne sera retenu que s'il survient au moins X heures après le passage 'avant tournée'.",
         )
+        if new_gap != result.get("min_gap_hours", 0.0):
+            depot_coords = result.get("depot_coords")
+            if depot_coords and df_raw is not None:
+                _cache = load_geocode_cache()
+                passages = _find_depot_passages(df_raw, _cache, tuple(depot_coords), min_gap_hours=new_gap)
+                st.session_state["q_passages_result"]["passages"]      = passages
+                st.session_state["q_passages_result"]["min_gap_hours"] = new_gap
+                st.rerun()
 
-    plate = result.get("plate", "export")
-    try:
-        xlsx_bytes = _build_export_excel(
-            result, available_days, day_summary,
-            df_raw=df_raw, late_hour=int(late_hour),
-        )
-        filename = (
-            f"passages_depot_{plate}_"
-            f"{available_days[0].strftime('%Y%m%d')}_"
-            f"{available_days[-1].strftime('%Y%m%d')}.xlsx"
-        )
-        with col_btn:
+    with col_export:
+        plate = result.get("plate", "export")
+        try:
+            xlsx_bytes = _build_export_excel(result, available_days, day_summary, df_raw=df_raw)
+            filename = (
+                f"passages_depot_{plate}_"
+                f"{available_days[0].strftime('%Y%m%d')}_"
+                f"{available_days[-1].strftime('%Y%m%d')}.xlsx"
+            )
             st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
             st.download_button(
                 label="⬇️ Exporter en Excel",
@@ -1480,14 +1291,8 @@ def _render_export_button(
                 use_container_width=True,
             )
             st.markdown("</div>", unsafe_allow_html=True)
-        with col_info:
-            st.markdown(
-                "<div style='margin-top:32px;font-size:12px;color:#888'>"
-                "🔴 Rouge = weekend ou trajet tardif</div>",
-                unsafe_allow_html=True,
-            )
-    except Exception as e:
-        st.warning(f"Export indisponible : {e}")
+        except Exception as e:
+            st.warning(f"Export indisponible : {e}")
 
 def _render_passages_result(
     result: dict,
@@ -1573,9 +1378,11 @@ def _render_passages_result(
     def _fmt(p: dict | None) -> str:
         if p is None:
             return "—"
-        t = p["arrive_time"].strftime("%H:%M")
-        dur = p["duration_min"]
-        return f"{t}  ({int(dur)} min)" if dur >= 1 else t
+        t   = p["arrive_time"].strftime("%H:%M")
+        dep = p.get("depart_time")
+        if dep is None or pd.isna(dep):
+            return f"{t}  (? min)"
+        return f"{t}  ({int(p['duration_min'])} min)"
 
     def _fmt_trips(p: dict | None, key: str) -> str:
         if p is None:
@@ -1631,7 +1438,10 @@ def _render_passages_result(
             det["Période"]         = det["period"].apply(lambda p: "Matin" if p == "matin" else "Après-midi")
             det["Arrivée"]         = det["arrive_time"].dt.strftime("%H:%M")
             det["Départ dépôt"]    = det["depart_time"].apply(lambda t: t.strftime("%H:%M") if pd.notna(t) else "—")
-            det["Durée (min)"]     = det["duration_min"].apply(lambda m: f"{m:.0f}")
+            det["Durée (min)"]     = det.apply(
+                lambda r: "?" if (r["depart_time"] is None or pd.isna(r["depart_time"])) else f"{int(r['duration_min'])}",
+                axis=1,
+            )
             det["Trajets avant"]   = det.apply(lambda r: str(int(r["trips_before"])) if "trips_before" in r and pd.notna(r["trips_before"]) else "—", axis=1)
             det["Trajets après"]   = det.apply(lambda r: str(int(r["trips_after"])) if "trips_after" in r and pd.notna(r["trips_after"]) else "—", axis=1)
             det["Adresse"]         = det["address"]
@@ -1703,7 +1513,10 @@ def _render_passages_result(
                         cache = load_geocode_cache()
                         depot_coords = result.get("depot_coords")
                         if depot_coords and df_raw is not None:
-                            passages = _find_depot_passages(df_raw, cache, tuple(depot_coords))
+                            passages = _find_depot_passages(
+                                df_raw, cache, tuple(depot_coords),
+                                min_gap_hours=result.get("min_gap_hours", 0.0),
+                            )
                             all_addrs = (
                                 set(df_raw["Lieu de départ"].dropna().astype(str))
                                 | set(df_raw["Lieu d'arrivée"].dropna().astype(str))
@@ -1714,14 +1527,78 @@ def _render_passages_result(
                             st.session_state.pop("q_manual_rerun_ready", None)
                             st.rerun()
 
+    # Adresses géocodées — affichage + correction
+    if df_raw is not None:
+        _cache_disp = load_geocode_cache()
+        _all_addrs_disp = sorted(
+            set(df_raw["Lieu de départ"].dropna().astype(str).unique())
+            | set(df_raw["Lieu d'arrivée"].dropna().astype(str).unique())
+        )
+        _found_disp = [(a, _cache_disp[a]) for a in _all_addrs_disp if _cache_disp.get(a)]
+        if _found_disp:
+            with st.expander(
+                f"✅ {len(_found_disp)} adresse(s) géocodée(s) — cliquez pour vérifier et corriger",
+                expanded=False,
+            ):
+                st.caption(
+                    "Vérifiez que chaque point est bien positionné sur Google Maps. "
+                    "Si les coordonnées sont fausses, saisissez les bonnes (lat, lon) et cliquez ✅."
+                )
+                for _addr, _coords in _found_disp:
+                    _lat, _lon = _coords
+                    _maps_url = f"https://www.google.com/maps?q={_lat},{_lon}"
+                    _fix_key  = f"q_found_fix_{hash(_addr)}"
+                    if _fix_key not in st.session_state:
+                        st.session_state[_fix_key] = f"{_lat:.5f}, {_lon:.5f}"
+                    _col_addr, _col_inp, _col_btn = st.columns([4, 3, 1])
+                    with _col_addr:
+                        st.markdown(f"`{_addr}`  \n[📍 Voir sur Google Maps]({_maps_url})")
+                    with _col_inp:
+                        st.text_input(
+                            "Coordonnées GPS",
+                            key=_fix_key,
+                            label_visibility="collapsed",
+                            placeholder="lat, lon",
+                        )
+                    with _col_btn:
+                        st.markdown("<div style='margin-top:4px'>", unsafe_allow_html=True)
+                        if st.button(
+                            "✅",
+                            key=f"q_found_save_{hash(_addr)}",
+                            use_container_width=True,
+                            help="Sauvegarder les coordonnées corrigées",
+                        ):
+                            _raw = st.session_state[_fix_key].strip()
+                            _m = re.match(
+                                r"^\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*$", _raw
+                            )
+                            if _m:
+                                _new_coords = (float(_m.group(1)), float(_m.group(2)))
+                                save_geocode_entry(_addr, _new_coords)
+                                st.success(f"✅ {_addr[:40]} → {_new_coords[0]:.5f}, {_new_coords[1]:.5f}")
+                                st.rerun()
+                            else:
+                                with st.spinner("Géocodage…"):
+                                    _new_coords = _geocode_single_fr(_raw)
+                                if _new_coords:
+                                    save_geocode_entry(_addr, _new_coords)
+                                    st.success(f"✅ {_addr[:40]} → {_new_coords[0]:.5f}, {_new_coords[1]:.5f}")
+                                    st.rerun()
+                                else:
+                                    st.error("Coordonnées invalides ou adresse introuvable.")
+                        st.markdown("</div>", unsafe_allow_html=True)
+
     # Méthodologie
     with st.expander("ℹ️ Méthodologie de détection des passages", expanded=False):
         st.markdown(f"""
-Un **passage au dépôt** est comptabilisé quand l'adresse d'**arrivée** ou de **départ**
+Un **passage au dépôt** est détecté quand l'adresse d'**arrivée** ou de **départ**
 est à moins de **{DEPOT_RADIUS_M} m** du dépôt renseigné.
 
-- ☀️ **Matin** : heure d'arrivée avant 12h00
-- 🌆 **Après-midi** : heure d'arrivée à partir de 12h00
+La classification se fait par **ordre chronologique**, pas par heure de la journée :
+
+- 🚀 **Avant tournée** : premier passage de la journée avec une durée d'arrêt ≥ {MIN_STOP_MIN} min
+- 🏁 **Après tournée** : passage suivant avec une durée ≥ {MIN_STOP_MIN} min.
+  Si aucun n'atteint {MIN_STOP_MIN} min, le premier passage trouvé après la tournée est quand même affiché avec sa durée réelle (ou **?** si le départ n'est pas enregistré).
 
 Géocodage : **API adresse.data.gouv.fr** (gouvernement français) — gratuite, sans clé, optimisée France.
         """)
@@ -1876,6 +1753,8 @@ def _render_tab_passages() -> None:
                             use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
+    min_gap_hours = st.session_state.get("q_min_gap_hours", 0.0)
+
     # ── Lancement de l'analyse ────────────────────────────
     if run_btn:
         depot_addr_clean = depot_input.strip()
@@ -1914,7 +1793,7 @@ def _render_tab_passages() -> None:
         failed_addrs = sorted(a for a in all_addrs if not cache.get(a))
 
         with st.spinner("Analyse des passages…"):
-            passages = _find_depot_passages(df_raw, cache, tuple(depot_coords))
+            passages = _find_depot_passages(df_raw, cache, tuple(depot_coords), min_gap_hours=min_gap_hours)
 
         st.session_state["q_passages_result"] = {
             "plate":          selected_plate,
@@ -1924,6 +1803,7 @@ def _render_tab_passages() -> None:
             "nb_days":        nb_days_file,
             "available_days": [d.isoformat() for d in available_days],
             "failed_addrs":   failed_addrs,
+            "min_gap_hours":  min_gap_hours,
         }
 
     # ── Affichage des résultats ───────────────────────────
