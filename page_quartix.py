@@ -964,10 +964,49 @@ def _render_tab_carte() -> None:
                 st.markdown("</div>", unsafe_allow_html=True)
 
     if found_addrs:
-        with st.expander(f"✅ {len(found_addrs)} adresse(s) reconnue(s)", expanded=False):
+        with st.expander(f"✅ {len(found_addrs)} adresse(s) géocodée(s) — cliquez pour vérifier et corriger", expanded=False):
+            st.caption(
+                "Vérifiez que chaque point est bien positionné sur Google Maps. "
+                "Si les coordonnées sont fausses, saisissez les bonnes (lat, lon) et cliquez ✅."
+            )
             for a in found_addrs:
                 coords = cache[a]
-                st.caption(f"✅ {a}  —  `{coords[0]:.5f}, {coords[1]:.5f}`")
+                lat, lon = coords
+                maps_url = f"https://www.google.com/maps?q={lat},{lon}"
+                fix_key  = f"q_carte_fix_{hash(a)}"
+                if fix_key not in st.session_state:
+                    st.session_state[fix_key] = f"{lat:.5f}, {lon:.5f}"
+                col_addr, col_inp, col_btn = st.columns([4, 3, 1])
+                with col_addr:
+                    st.markdown(f"`{a}`  \n[📍 Voir sur Google Maps]({maps_url})")
+                with col_inp:
+                    st.text_input(
+                        "Coordonnées GPS",
+                        key=fix_key,
+                        label_visibility="collapsed",
+                        placeholder="lat, lon",
+                    )
+                with col_btn:
+                    st.markdown("<div style='margin-top:4px'>", unsafe_allow_html=True)
+                    if st.button("✅", key=f"q_carte_save_{hash(a)}", use_container_width=True,
+                                 help="Sauvegarder les coordonnées corrigées"):
+                        raw = st.session_state[fix_key].strip()
+                        m = re.match(r"^\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*$", raw)
+                        if m:
+                            new_coords = (float(m.group(1)), float(m.group(2)))
+                            save_geocode_entry(a, new_coords)
+                            st.success(f"✅ {a[:40]} → {new_coords[0]:.5f}, {new_coords[1]:.5f}")
+                            st.rerun()
+                        else:
+                            with st.spinner("Géocodage…"):
+                                new_coords = _geocode_single_fr(raw)
+                            if new_coords:
+                                save_geocode_entry(a, new_coords)
+                                st.success(f"✅ {a[:40]} → {new_coords[0]:.5f}, {new_coords[1]:.5f}")
+                                st.rerun()
+                            else:
+                                st.error("Coordonnées invalides ou adresse introuvable.")
+                    st.markdown("</div>", unsafe_allow_html=True)
 
     # ── 9. Tableau détail ─────────────────────────────────
     st.divider()
