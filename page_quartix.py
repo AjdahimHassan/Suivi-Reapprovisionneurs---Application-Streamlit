@@ -2026,17 +2026,19 @@ def _build_hebdo_mail(
     late_trips: dict,
     weekend_trips: dict,
     vehicles_db: dict,
+    zone_filter: str | None = None,
 ) -> str:
     date_str_min = date_min.strftime("%d/%m/%Y")
     date_str_max = date_max.strftime("%d/%m/%Y")
     cutoff_str   = cutoff.strftime("%H:%M")
 
+    zone_suffix = f" — Zone {zone_filter}" if zone_filter else ""
     lines = [
-        f"Objet : Rapport hebdomadaire des trajets — semaine du {date_str_min} au {date_str_max}",
+        f"Objet : Rapport hebdomadaire des trajets — semaine du {date_str_min} au {date_str_max}{zone_suffix}",
         "",
         "Bonjour,",
         "",
-        f"Suite à l'analyse des données Quartix pour la semaine du {date_str_min} au {date_str_max},",
+        f"Suite à l'analyse des données Quartix pour la semaine du {date_str_min} au {date_str_max}{zone_suffix},",
     ]
 
     if not late_trips and not weekend_trips:
@@ -2412,17 +2414,50 @@ def _render_tab_hebdo() -> None:
     st.divider()
     st.markdown("### 📧 Générer un mail de signalement")
 
-    # Génère (ou régénère) le mail à chaque clic, même si un mail existait déjà
-    if st.button("📝 Générer le mail", type="primary", key="hebdo_gen_mail"):
-        st.session_state["hebdo_mail_text"] = _build_hebdo_mail(
-            resp_nom      = "",
-            date_min      = date_min,
-            date_max      = date_max,
-            cutoff        = cutoff,
-            late_trips    = late_trips,
-            weekend_trips = weekend_trips,
-            vehicles_db   = vehicles_db,
+    # Compute available zones from vehicles that have anomalies
+    all_plates_with_anomalies = set(late_trips) | set(weekend_trips)
+    available_zones = sorted({
+        z for plate in all_plates_with_anomalies
+        if (z := vehicles_db.get(plate, {}).get("zone", "").strip())
+    })
+
+    col_zone, col_btn = st.columns([3, 2])
+    with col_zone:
+        zone_options = ["Toutes les zones"] + available_zones
+        selected_zone_label = st.selectbox(
+            "🗺️ Filtrer par zone",
+            zone_options,
+            key="hebdo_mail_zone",
+            disabled=not available_zones,
+            help="Génère un mail uniquement pour les véhicules de la zone sélectionnée."
+                 if available_zones else "Aucune zone renseignée dans les informations conducteurs.",
         )
+    selected_zone = None if selected_zone_label == "Toutes les zones" else selected_zone_label
+
+    # Filter trips by zone if a specific zone is selected
+    def _filter_by_zone(trips_dict: dict, zone: str | None) -> dict:
+        if zone is None:
+            return trips_dict
+        return {
+            plate: trips for plate, trips in trips_dict.items()
+            if vehicles_db.get(plate, {}).get("zone", "").strip() == zone
+        }
+
+    with col_btn:
+        st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
+        # Génère (ou régénère) le mail à chaque clic, même si un mail existait déjà
+        if st.button("📝 Générer le mail", type="primary", key="hebdo_gen_mail", use_container_width=True):
+            st.session_state["hebdo_mail_text"] = _build_hebdo_mail(
+                resp_nom      = "",
+                date_min      = date_min,
+                date_max      = date_max,
+                cutoff        = cutoff,
+                late_trips    = _filter_by_zone(late_trips, selected_zone),
+                weekend_trips = _filter_by_zone(weekend_trips, selected_zone),
+                vehicles_db   = vehicles_db,
+                zone_filter   = selected_zone,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.get("hebdo_mail_text"):
         st.text_area("📋 Texte du mail (copiez-collez dans votre messagerie)",
