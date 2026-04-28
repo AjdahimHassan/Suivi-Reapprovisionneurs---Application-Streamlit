@@ -18,6 +18,7 @@ import page_controle_reception
 import page_indefinis
 import page_quartix
 import page_picklist
+import page_rapport_employe
 from mongo_storage import load_plannings_from_mongo
 from chargement_parser import parse_chargement_csv, croiser_planning_chargement
 from excel_export import generer_excel
@@ -254,8 +255,8 @@ with _theme_col:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Barre de navigation — 10 boutons
-nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9, nav_c10 = st.columns(10)
+# Barre de navigation — 11 boutons
+nav_c1, nav_c2, nav_c3, nav_c4, nav_c5, nav_c6, nav_c7, nav_c8, nav_c9, nav_c10, nav_c11 = st.columns(11)
 with nav_c1:
     if st.button(
         "🖥️ Machines",
@@ -345,6 +346,15 @@ with nav_c10:
         type="primary" if st.session_state.page == "picklist" else "secondary",
     ):
         st.session_state.page = "picklist"
+        st.rerun()
+with nav_c11:
+    if st.button(
+        "👤 Rapport",
+        key="nav_rapport_employe",
+        use_container_width=True,
+        type="primary" if st.session_state.page == "rapport_employe" else "secondary",
+    ):
+        st.session_state.page = "rapport_employe"
         st.rerun()
 
 st.divider()
@@ -835,3 +845,11 @@ elif st.session_state.page == "quartix":
 elif st.session_state.page == "picklist":
 
     page_picklist.render()
+
+
+# ════════════════════════════════════════════════════════
+# PAGE : RAPPORT EMPLOYÉ
+# ════════════════════════════════════════════════════════
+elif st.session_state.page == "rapport_employe":
+
+    page_rapport_employe.render()
