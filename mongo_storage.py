@@ -493,4 +493,64 @@ def devalider_salle(machine: str) -> bool:
         return True
     except Exception:
         return False
-        return 0
+
+
+# ── Rapport Employé — sauvegardes ────────────────────────────────────────────
+
+def _get_rapport_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["rapport_employe_saves"]
+
+
+def save_rapport_employe(name: str, employe: str, payload: dict) -> bool:
+    """
+    Sauvegarde un rapport employé sous un nom donné.
+    `payload` doit être JSON-sérialisable (DataFrames convertis en records avant l'appel).
+    """
+    try:
+        _get_rapport_col().replace_one(
+            {"_id": name},
+            {
+                "_id":        name,
+                "employe":    employe,
+                "saved_at":   datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "payload":    payload,
+            },
+            upsert=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def list_rapport_employe_saves() -> list[dict]:
+    """Retourne la liste des sauvegardes triées par date desc. Chaque entrée : {name, employe, saved_at}."""
+    try:
+        docs = _get_rapport_col().find({}, {"_id": 1, "employe": 1, "saved_at": 1})
+        return sorted(
+            [{"name": d["_id"], "employe": d.get("employe", ""), "saved_at": d.get("saved_at", "")}
+             for d in docs],
+            key=lambda x: x["saved_at"],
+            reverse=True,
+        )
+    except Exception:
+        return []
+
+
+def load_rapport_employe_save(name: str) -> dict | None:
+    """Charge une sauvegarde par son nom. Retourne le payload ou None."""
+    try:
+        doc = _get_rapport_col().find_one({"_id": name})
+        return doc.get("payload") if doc else None
+    except Exception:
+        return None
+
+
+def delete_rapport_employe_save(name: str) -> bool:
+    """Supprime une sauvegarde."""
+    try:
+        _get_rapport_col().delete_one({"_id": name})
+        return True
+    except Exception:
+        return False

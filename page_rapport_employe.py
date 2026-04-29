@@ -19,7 +19,14 @@ import pandas as pd
 import streamlit as st
 
 from planning_parser import JOURS
-from mongo_storage import load_plannings_from_mongo, load_all_quartix_vehicles
+from mongo_storage import (
+    load_plannings_from_mongo,
+    load_all_quartix_vehicles,
+    save_rapport_employe,
+    list_rapport_employe_saves,
+    load_rapport_employe_save,
+    delete_rapport_employe_save,
+)
 from chargement_parser import croiser_planning_chargement
 from page_picklist import (
     parse_picklist,
@@ -29,6 +36,7 @@ from page_picklist import (
     _COULEURS,
     _styler,
 )
+from pdf_rapport import generate_pdf_report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1321,6 +1329,19 @@ def _render_quartix(prenom_hint: str) -> None:
     nb_wkend  = len(weekend_trips)
     nb_ok     = total_trajets - nb_late - nb_wkend
 
+    # Cache for export
+    st.session_state["re_qtx_summary"] = {
+        "total_trajets": total_trajets,
+        "total_km":      total_km,
+        "nb_late":       nb_late,
+        "nb_wkend":      nb_wkend,
+        "cutoff":        cutoff.strftime("%H:%M"),
+        "date_min":      date_min.strftime("%d/%m/%Y"),
+        "date_max":      date_max.strftime("%d/%m/%Y"),
+        "late_trips":    late_trips,
+        "weekend_trips": weekend_trips,
+    }
+
     # ── KPI cards ─────────────────────────────────────────────────────────────
     kpi_html = lambda cls, label, value, foot: (
         f'<div class="re-kpi {cls}">'
@@ -1387,16 +1408,17 @@ def _render_quartix(prenom_hint: str) -> None:
 # EXPORT — HTML + PDF
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ALL_SECTIONS = ["chargement", "non_faites", "picklist", "pointage"]
+_ALL_SECTIONS = ["chargement", "non_faites", "picklist", "pointage", "quartix"]
 _SECTION_LABELS = {
     "chargement": "Chargement hebdomadaire",
     "non_faites": "Salles non faites & justifications",
     "picklist":   "Conformité picklist",
     "pointage":   "Pointage",
+    "quartix":    "Véhicule & tournée — Quartix",
 }
 
 
-def _export_data(employe, weekly, meta, pick_result, ptg_summary, justifications):
+def _export_data(employe, weekly, meta, pick_result, ptg_summary, justifications, qtx_summary=None):
     """Pre-compute all export data shared between HTML and PDF builders."""
     prenom   = meta.get("prenom", employe)
     zone     = meta.get("zone", "")
@@ -1453,6 +1475,109 @@ def _export_data(employe, weekly, meta, pick_result, ptg_summary, justifications
         "weekly": weekly, "nf_list": nf_list,
         "pick_stats": pick_stats, "pick_machines": pick_machines,
         "ptg": ptg_summary,
+        "qtx": qtx_summary,
+    }
+
+
+def _prepare_pdf_data(employe: str, d: dict, sections: set) -> dict:
+    """Convert internal export_d dict to the format expected by generate_pdf_report."""
+    # ── meta ─────────────────────────────────────────────────────────────────
+    meta = {
+        "code":     employe,
+        "zone":     d.get("zone", ""),
+        "semaine":  str(d.get("iso_week", "")),
+        "annee":    str(d.get("iso_year", "")),
+        "date_gen": d.get("gen_date", datetime.date.today().strftime("%d/%m/%Y")),
+    }
+
+    # ── chargement ────────────────────────────────────────────────────────────
+    chargement = None
+    if "chargement" in sections:
+        jours = []
+        for jour, data in d.get("weekly", {}).items():
+            prevues    = len(data.get("salles_prevues", []))
+            faites     = len(data.get("salles_faites", []))
+            non_faites = len(data.get("salles_non_faites", []))
+            jours.append({"nom": jour, "prevues": prevues, "faites": faites, "non_faites": non_faites})
+        chargement = {
+            "taux":       d.get("taux", 0),
+            "planifiees": d.get("total_prevu", 0),
+            "faites":     d.get("total_fait", 0),
+            "non_faites": d.get("total_nf", 0),
+            "jokers":     d.get("nb_joker", 0),
+            "jours":      jours,
+        }
+
+    # ── non faites ────────────────────────────────────────────────────────────
+    non_faites_list = []
+    if "non_faites" in sections:
+        for r in d.get("nf_list", []):
+            jour_full = r.get("jour", "")
+            non_faites_list.append({
+                "jour_court": jour_full[:3] if jour_full else "",
+                "client":     r.get("machine", ""),
+                "justifie":   r.get("statut", "Non justifié") != "Non justifié",
+                "motif":      r.get("motif", ""),
+            })
+
+    # ── picklist ──────────────────────────────────────────────────────────────
+    picklist = None
+    if "picklist" in sections and d.get("pick_stats"):
+        ps = d["pick_stats"]
+        machines = [
+            {"client": m.get("nom", m.get("code", "")), "taux": m.get("pct", 0)}
+            for m in d.get("pick_machines", [])
+        ]
+        picklist = {
+            "taux":        ps.get("pct", 0),
+            "conformes":   ps.get("conf", 0),
+            "total":       ps.get("total", 0),
+            "non_charges": ps.get("nc", 0),
+            "insuffisants":ps.get("insuf", 0),
+            "surplus":     ps.get("surplus", 0),
+            "machines":    machines,
+        }
+
+    # ── pointage ─────────────────────────────────────────────────────────────
+    pointage = None
+    if "pointage" in sections and d.get("ptg"):
+        p = d["ptg"]
+        pointage = {
+            "jours_analyses": p.get("nb_jours", 0),
+            "presences":      p.get("nb_presents", 0),
+            "conges":         p.get("nb_conges", 0),
+            "absences":       p.get("nb_autres_abs", 0),
+            "sans_badge":     p.get("nb_sans_badge", 0),
+        }
+
+    # ── quartix ───────────────────────────────────────────────────────────────
+    quartix = None
+    if "quartix" in sections and d.get("qtx"):
+        q = d["qtx"]
+        d_min = str(q.get("date_min", ""))
+        d_max = str(q.get("date_max", ""))
+        # Shorten "01/04/2026" → "01/04"
+        periode = f"{d_min[:5]}→{d_max[:5]}" if d_min and d_max else ""
+        km_raw  = q.get("total_km", 0)
+        try:
+            km_val = round(float(km_raw), 1)
+        except (TypeError, ValueError):
+            km_val = 0.0
+        quartix = {
+            "periode":      periode,
+            "trajets":      q.get("total_trajets", 0),
+            "distance_km":  km_val,
+            "hors_horaires":q.get("nb_late", 0),
+            "weekend":      q.get("nb_wkend", 0),
+        }
+
+    return {
+        "meta":       meta,
+        "chargement": chargement,
+        "non_faites": non_faites_list,
+        "picklist":   picklist,
+        "pointage":   pointage,
+        "quartix":    quartix,
     }
 
 
@@ -1543,6 +1668,42 @@ def _build_rapport_html(employe: str, d: dict, sections: set) -> str:
   </div>
 </div>"""
 
+    qtx_html = ""
+    if "quartix" in sections and d["qtx"]:
+        q = d["qtx"]
+        ok_color = "#16a34a" if q["nb_late"] == 0 and q["nb_wkend"] == 0 else "#dc2626"
+        late_rows = "".join(
+            f"<tr><td>{t['jour']} {t['date'] if isinstance(t['date'], str) else t['date'].strftime('%d/%m/%Y')}</td>"
+            f"<td style='color:#d97706;font-weight:600;'>{t['heure_dep']} → {t['heure_arr']}</td>"
+            f"<td style='color:#555;font-size:11px;'>{t['lieu_dep']} → {t['lieu_arr']}</td>"
+            f"<td>{t['distance_km']:.1f} km</td></tr>"
+            for t in q["late_trips"]
+        )
+        wknd_rows = "".join(
+            f"<tr><td>{t['jour']} {t['date'] if isinstance(t['date'], str) else t['date'].strftime('%d/%m/%Y')}</td>"
+            f"<td style='color:#dc2626;font-weight:600;'>{t['heure_dep']}</td>"
+            f"<td>{t['distance_km']:.1f} km</td></tr>"
+            for t in q["weekend_trips"]
+        )
+        late_table = f"""<table><thead><tr><th>Date</th><th>Horaires</th><th>Trajet</th><th>Distance</th></tr></thead>
+          <tbody>{late_rows}</tbody></table>""" if late_rows else ""
+        wknd_table = f"""<table><thead><tr><th>Date</th><th>Heure départ</th><th>Distance</th></tr></thead>
+          <tbody>{wknd_rows}</tbody></table>""" if wknd_rows else ""
+        qtx_html = f"""
+<div class="section">
+  <h2>Véhicule &amp; tournée — Quartix</h2>
+  <div class="kpi-row">
+    <div class="kpi"><div class="kl">Période</div><div class="kv" style="font-size:14px;">{q['date_min']} → {q['date_max']}</div></div>
+    <div class="kpi"><div class="kl">Trajets analysés</div><div class="kv">{q['total_trajets']}</div></div>
+    <div class="kpi"><div class="kl">Distance totale</div><div class="kv">{q['total_km']:.0f} km</div></div>
+    <div class="kpi"><div class="kl">Hors horaires</div><div class="kv" style="color:{'#dc2626' if q['nb_late'] else '#16a34a'};">{q['nb_late']}</div></div>
+    <div class="kpi"><div class="kl">Weekend</div><div class="kv" style="color:{'#dc2626' if q['nb_wkend'] else '#16a34a'};">{q['nb_wkend']}</div></div>
+  </div>
+  {'<p style="font-size:12px;font-weight:700;margin-bottom:6px;">⚠️ Trajets hors horaires (après ' + q['cutoff'] + ')</p>' + late_table if late_rows else ''}
+  {'<p style="font-size:12px;font-weight:700;margin:12px 0 6px;">🗓️ Activité weekend</p>' + wknd_table if wknd_rows else ''}
+  {'<p style="color:#16a34a;font-weight:600;font-size:13px;">✅ Aucune anomalie détectée</p>' if not late_rows and not wknd_rows else ''}
+</div>"""
+
     return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <title>Rapport {d['prenom']} ({employe}) — {d['semaine']}</title>
 <style>
@@ -1572,7 +1733,7 @@ def _build_rapport_html(employe: str, d: dict, sections: set) -> str:
   </div>
   <div class="header-right">Généré le {d['gen_date']}</div>
 </div>
-{charg_html}{nf_html}{pick_html}{ptg_html}
+{charg_html}{nf_html}{pick_html}{ptg_html}{qtx_html}
 </body></html>"""
 
 
@@ -1587,18 +1748,18 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
     PAD    = 18 * mm
     CW     = W - 2 * PAD
 
-    # Palette matching the page
-    C_BG     = rl_colors.HexColor("#0F1923")
-    C_CARD   = rl_colors.HexColor("#1A2535")
-    C_BORDER = rl_colors.HexColor("#2A4A6B")
+    # Light-theme palette
+    C_BG     = rl_colors.HexColor("#FFFFFF")
+    C_CARD   = rl_colors.HexColor("#F0F4FA")
+    C_BORDER = rl_colors.HexColor("#D0DFF0")
     C_HDR    = rl_colors.HexColor("#1B3D6F")
-    C_TXT    = rl_colors.HexColor("#E8EEF7")
-    C_MUTED  = rl_colors.HexColor("#8FA8C8")
-    C_GREEN  = rl_colors.HexColor("#52b788")
-    C_ORANGE = rl_colors.HexColor("#E8922A")
-    C_RED    = rl_colors.HexColor("#ef5350")
-    C_PURPLE = rl_colors.HexColor("#CE93D8")
-    C_ACCENT = rl_colors.HexColor("#4A90D9")
+    C_TXT    = rl_colors.HexColor("#1A1A2E")
+    C_MUTED  = rl_colors.HexColor("#5A7190")
+    C_GREEN  = rl_colors.HexColor("#16a34a")
+    C_ORANGE = rl_colors.HexColor("#d97706")
+    C_RED    = rl_colors.HexColor("#dc2626")
+    C_PURPLE = rl_colors.HexColor("#7C3AED")
+    C_ACCENT = rl_colors.HexColor("#1B3D6F")
 
     buf = _io.BytesIO()
     c   = rl_canvas.Canvas(buf, pagesize=A4)
@@ -1631,7 +1792,7 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
     def _kpi_row(kpis):
         n      = len(kpis)
         card_w = (CW - (n - 1) * 2.5 * mm) / n
-        card_h = 17 * mm
+        card_h = 18 * mm
         _need(card_h + 5 * mm)
         x = PAD
         for label, value, vc in kpis:
@@ -1639,12 +1800,16 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
             c.setStrokeColor(C_BORDER)
             c.setLineWidth(0.4)
             c.roundRect(x, y[0] - card_h, card_w, card_h, 2.5 * mm, fill=1, stroke=1)
+            # Label
             c.setFillColor(C_MUTED)
             c.setFont("Helvetica-Bold", 6.5)
-            c.drawCentredString(x + card_w / 2, y[0] - 5 * mm, label.upper()[:22])
+            c.drawCentredString(x + card_w / 2, y[0] - 5.5 * mm, label.upper()[:22])
+            # Value — auto-scale font to fit
+            val_str = str(value)
+            val_fs  = 17 if len(val_str) <= 5 else (14 if len(val_str) <= 9 else (10 if len(val_str) <= 14 else 8))
             c.setFillColor(vc or C_TXT)
-            c.setFont("Helvetica-Bold", 17)
-            c.drawCentredString(x + card_w / 2, y[0] - 13 * mm, str(value))
+            c.setFont("Helvetica-Bold", val_fs)
+            c.drawCentredString(x + card_w / 2, y[0] - 14 * mm, val_str)
             x += card_w + 2.5 * mm
         y[0] -= card_h + 4 * mm
 
@@ -1655,10 +1820,10 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
         rh = 6.5 * mm
         hh = 7.5 * mm
         _need(hh + rh)
-        # Header
+        # Header — white text on dark blue background
         c.setFillColor(C_HDR)
         c.rect(PAD, y[0] - hh, CW, hh, fill=1, stroke=0)
-        c.setFillColor(C_TXT)
+        c.setFillColor(rl_colors.white)
         c.setFont("Helvetica-Bold", 7.5)
         cx = PAD
         for i, h in enumerate(headers):
@@ -1668,16 +1833,20 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
         # Rows
         for ri, row in enumerate(rows):
             _need(rh)
-            bg = rl_colors.HexColor("#1A2535") if ri % 2 == 0 else rl_colors.HexColor("#162030")
+            bg = rl_colors.HexColor("#F0F4FA") if ri % 2 == 0 else rl_colors.HexColor("#FFFFFF")
             c.setFillColor(bg)
             c.rect(PAD, y[0] - rh, CW, rh, fill=1, stroke=0)
+            # subtle row separator
+            c.setStrokeColor(C_BORDER)
+            c.setLineWidth(0.2)
+            c.line(PAD, y[0] - rh, W - PAD, y[0] - rh)
             cx = PAD
             c.setFont("Helvetica", 7.5)
             for i, cell in enumerate(row):
                 text  = cell[0] if isinstance(cell, tuple) else str(cell)
                 color = cell[1] if isinstance(cell, tuple) else C_TXT
                 c.setFillColor(color)
-                c.drawString(cx + 2 * mm, y[0] - 4.5 * mm, str(text)[:35])
+                c.drawString(cx + 2 * mm, y[0] - 4.5 * mm, str(text)[:38])
                 cx += col_w[i]
             y[0] -= rh
         y[0] -= 4 * mm
@@ -1691,7 +1860,7 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
     c.setFillColor(rl_colors.HexColor("#2A5A9F"))
     c.rect(0, H - hdr_h, 4 * mm, hdr_h, fill=1, stroke=0)
 
-    c.setFillColor(C_TXT)
+    c.setFillColor(rl_colors.white)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(PAD, H - 13 * mm, d["prenom"])
     c.setFont("Helvetica", 20)
@@ -1702,7 +1871,7 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
     if d["zone"]:  sub_parts.append(f"Zone {d['zone']}")
     if d["resp"]:  sub_parts.append(f"Resp. {d['resp']}")
     sub_parts.append(f"Généré le {d['gen_date']}")
-    c.setFillColor(C_MUTED)
+    c.setFillColor(rl_colors.HexColor("#A8C8E8"))
     c.setFont("Helvetica", 9)
     c.drawString(PAD, H - 22 * mm, "  ·  ".join(sub_parts))
 
@@ -1785,6 +1954,48 @@ def _build_rapport_pdf(employe: str, d: dict, sections: set) -> bytes:
             ("Sans badge",     p["nb_sans_badge"],   C_ORANGE if p["nb_sans_badge"]  else C_GREEN),
         ])
 
+    # ── Quartix ───────────────────────────────────────────────────────────────
+    if "quartix" in sections and d["qtx"]:
+        q = d["qtx"]
+        _section_title("Véhicule & tournée — Quartix")
+        # Shorten period to dd/mm for readability in card
+        p_from = q["date_min"][:5] if len(q["date_min"]) >= 5 else q["date_min"]
+        p_to   = q["date_max"][:5] if len(q["date_max"]) >= 5 else q["date_max"]
+        _kpi_row([
+            ("Période",         f"{p_from}→{p_to}",                 C_TXT),
+            ("Trajets",         q["total_trajets"],                  C_TXT),
+            ("Distance totale", f"{q['total_km']:.0f} km",           C_TXT),
+            ("Hors horaires",   q["nb_late"],  C_RED    if q["nb_late"]  else C_GREEN),
+            ("Weekend",         q["nb_wkend"], C_RED    if q["nb_wkend"] else C_GREEN),
+        ])
+        if q["late_trips"]:
+            _table(
+                ["Date", f"Horaires (>{q['cutoff']})", "Trajet", "Distance"],
+                [
+                    [
+                        f"{t['jour']} {t['date'] if isinstance(t['date'], str) else t['date'].strftime('%d/%m/%Y')}",
+                        (f"{t['heure_dep']} → {t['heure_arr']}", C_ORANGE),
+                        f"{t['lieu_dep'][:20]}…→{t['lieu_arr'][:15]}",
+                        f"{t['distance_km']:.1f} km",
+                    ]
+                    for t in q["late_trips"]
+                ],
+                [38*mm, 32*mm, 72*mm, 30*mm],
+            )
+        if q["weekend_trips"]:
+            _table(
+                ["Date", "Heure départ", "Distance"],
+                [
+                    [
+                        f"{t['jour']} {t['date'] if isinstance(t['date'], str) else t['date'].strftime('%d/%m/%Y')}",
+                        (t["heure_dep"], C_RED),
+                        f"{t['distance_km']:.1f} km",
+                    ]
+                    for t in q["weekend_trips"]
+                ],
+                [60*mm, 60*mm, 52*mm],
+            )
+
     c.save()
     return buf.getvalue()
 
@@ -1812,12 +2023,20 @@ def render() -> None:
         return
 
     # ── Sélecteur employé ──────────────────────────────────────────────────────
+    # If a save was just loaded, transfer the pending employee selection into
+    # the widget key NOW — before the selectbox is instantiated this run.
+    if "re_employe_pending" in st.session_state:
+        st.session_state["re_employe_sel"] = st.session_state.pop("re_employe_pending")
+
     col_emp, col_adv = st.columns([1, 2])
     with col_emp:
         employe_options = sorted(plannings.keys())
+        _default_emp = st.session_state.get("re_employe_sel", employe_options[0])
+        _default_idx = employe_options.index(_default_emp) if _default_emp in employe_options else 0
         employe_sel     = st.selectbox(
             "Réapprovisionneur",
             employe_options,
+            index=_default_idx,
             key="re_employe_sel",
         )
     with col_adv:
@@ -1831,33 +2050,9 @@ def render() -> None:
             st.session_state["re_adv_bytes"] = adv_file.getvalue()
 
     adv_bytes = st.session_state.get("re_adv_bytes")
+    run_key   = f"re_weekly_{employe_sel}"
 
-    # Si pas de fichier, on s'arrête ici après les placeholders vides
-    if adv_bytes is None:
-        st.info("📂 Déposez le fichier ADV pour lancer l'analyse.")
-        return
-
-    # ── Lancer l'analyse ───────────────────────────────────────────────────────
-    run_key = f"re_weekly_{employe_sel}"
-    if st.button("🚀 Analyser", type="primary", key="re_btn_analyser"):
-        with st.spinner("Analyse en cours..."):
-            try:
-                chargement = _parse_adv_as_chargement_dict(adv_bytes)
-                weekly     = _croiser_semaine(plannings, chargement, employe_sel)
-                st.session_state[run_key]         = weekly
-                st.session_state["re_pick_result"] = None  # invalidate picklist on re-run
-                st.toast(f"✅ Analyse terminée pour {employe_sel}")
-            except Exception as e:
-                st.error(f"❌ Erreur parsing ADV : {e}")
-                return
-        st.rerun()
-
-    weekly = st.session_state.get(run_key)
-    if weekly is None:
-        st.caption("Cliquez sur **Analyser** pour générer le rapport.")
-        return
-
-    # Metadata (Quartix vehicles) — optional
+    # Metadata (Quartix vehicles) — optional, loaded early for the save payload
     try:
         vehicles = load_all_quartix_vehicles()
         meta = next(
@@ -1866,6 +2061,161 @@ def render() -> None:
         )
     except Exception:
         meta = {}
+
+    # ── Sauvegarder / Charger (toujours visible) ──────────────────────────────
+    st.markdown('<div style="height:16px;"></div>', unsafe_allow_html=True)
+    st.divider()
+    _section_label("Sauvegarder & charger")
+
+    _col_save, _col_load = st.columns([1, 1], gap="large")
+    _weekly_saved = st.session_state.get(run_key)
+
+    # ── SAVE ──────────────────────────────────────────────────────────────────
+    with _col_save:
+        if _weekly_saved is None:
+            st.markdown(
+                '<div style="color:#8FA8C8;font-size:0.8rem;">'
+                "Analysez des données pour pouvoir les sauvegarder."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="color:#8FA8C8;font-size:0.8rem;margin-bottom:8px;">'
+                "Donnez un nom à cette sauvegarde pour la retrouver plus tard."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            _save_name = st.text_input(
+                "Nom de la sauvegarde",
+                value=f"{employe_sel} — {datetime.date.today().strftime('%d/%m/%Y')}",
+                placeholder="Ex : RIDF1 semaine 18",
+                key="re_save_name",
+                label_visibility="collapsed",
+            )
+            if st.button("💾 Sauvegarder", use_container_width=True, key="re_btn_save"):
+                if not _save_name.strip():
+                    st.warning("Entrez un nom avant de sauvegarder.")
+                else:
+                    def _serialize_weekly(w):
+                        out = {}
+                        for jour, _d in w.items():
+                            out[jour] = {
+                                "salles_prevues":    list(_d.get("salles_prevues", [])),
+                                "salles_faites":     list(_d.get("salles_faites", [])),
+                                "salles_non_faites": list(_d.get("salles_non_faites", [])),
+                                "tournee_decalee":   _d.get("tournee_decalee", False),
+                            }
+                        return out
+
+                    def _serialize_qtx(q):
+                        if not q:
+                            return None
+                        out = dict(q)
+                        for k in ("late_trips", "weekend_trips"):
+                            trips = []
+                            for t in q.get(k, []):
+                                t2 = dict(t)
+                                if hasattr(t2.get("date"), "strftime"):
+                                    t2["date"] = t2["date"].strftime("%d/%m/%Y")
+                                trips.append(t2)
+                            out[k] = trips
+                        return out
+
+                    _payload = {
+                        "employe":    employe_sel,
+                        "meta":       meta,
+                        "weekly":     _serialize_weekly(_weekly_saved),
+                        "pick_result": (
+                            st.session_state.get("re_pick_result").to_dict("records")
+                            if st.session_state.get("re_pick_result") is not None else None
+                        ),
+                        "ptg_summary":  st.session_state.get("re_ptg_summary"),
+                        "qtx_summary":  _serialize_qtx(st.session_state.get("re_qtx_summary")),
+                        "justifications": st.session_state.get("re_justifications", {}),
+                    }
+                    _ok = save_rapport_employe(_save_name.strip(), employe_sel, _payload)
+                    if _ok:
+                        st.toast(f"✅ Sauvegarde « {_save_name.strip()} » enregistrée.")
+                        st.rerun()
+                    else:
+                        st.error("❌ Erreur lors de la sauvegarde (MongoDB).")
+
+    # ── LOAD ──────────────────────────────────────────────────────────────────
+    with _col_load:
+        _saves = list_rapport_employe_saves()
+        if not _saves:
+            st.info("Aucune sauvegarde disponible.")
+        else:
+            st.markdown(
+                '<div style="color:#8FA8C8;font-size:0.8rem;margin-bottom:8px;">'
+                "Chargez une sauvegarde pour restaurer toutes les données d'une session précédente."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            _save_options = {
+                f"{s['name']}  ({s['employe']} · {s['saved_at']})": s["name"]
+                for s in _saves
+            }
+            _sel_save = st.selectbox(
+                "Sauvegarde",
+                list(_save_options.keys()),
+                key="re_load_sel",
+                label_visibility="collapsed",
+            )
+            _c_load, _c_del = st.columns([3, 1])
+            with _c_load:
+                if st.button("📂 Charger", use_container_width=True, key="re_btn_load", type="primary"):
+                    _raw = load_rapport_employe_save(_save_options[_sel_save])
+                    if _raw is None:
+                        st.error("❌ Impossible de charger cette sauvegarde.")
+                    else:
+                        _emp = _raw.get("employe", "")
+                        _rk  = f"re_weekly_{_emp}"
+                        st.session_state[_rk] = _raw.get("weekly", {})
+                        _pr = _raw.get("pick_result")
+                        st.session_state["re_pick_result"] = (
+                            pd.DataFrame(_pr) if _pr is not None else None
+                        )
+                        st.session_state["re_ptg_summary"]    = _raw.get("ptg_summary")
+                        st.session_state["re_qtx_summary"]    = _raw.get("qtx_summary")
+                        st.session_state["re_justifications"] = _raw.get("justifications", {})
+                        st.session_state["re_adv_bytes"]       = None
+                        st.session_state["re_employe_pending"] = _emp
+                        st.toast(f"✅ Sauvegarde « {_save_options[_sel_save]} » chargée.")
+                        st.rerun()
+            with _c_del:
+                if st.button("🗑", use_container_width=True, key="re_btn_del",
+                             help="Supprimer cette sauvegarde"):
+                    delete_rapport_employe_save(_save_options[_sel_save])
+                    st.toast("🗑 Sauvegarde supprimée.")
+                    st.rerun()
+
+    # ── Gate : ADV ou sauvegarde chargée obligatoire ───────────────────────────
+    weekly = st.session_state.get(run_key)
+    if adv_bytes is None and weekly is None:
+        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+        st.info("📂 Déposez le fichier ADV pour lancer l'analyse, ou chargez une sauvegarde ci-dessus.")
+        return
+
+    # ── Lancer l'analyse (seulement si fichier ADV disponible) ────────────────
+    if adv_bytes is not None:
+        if st.button("🚀 Analyser", type="primary", key="re_btn_analyser"):
+            with st.spinner("Analyse en cours..."):
+                try:
+                    chargement = _parse_adv_as_chargement_dict(adv_bytes)
+                    weekly     = _croiser_semaine(plannings, chargement, employe_sel)
+                    st.session_state[run_key]          = weekly
+                    st.session_state["re_pick_result"] = None
+                    st.toast(f"✅ Analyse terminée pour {employe_sel}")
+                except Exception as e:
+                    st.error(f"❌ Erreur parsing ADV : {e}")
+                    return
+            st.rerun()
+        weekly = st.session_state.get(run_key)
+        if weekly is None:
+            st.caption("Cliquez sur **Analyser** pour générer le rapport.")
+            return
 
     # ── Section A — Hero ───────────────────────────────────────────────────────
     _section_label("Identité & taux de complétion")
@@ -1932,32 +2282,95 @@ def render() -> None:
     _section_label("Véhicule & tournée — Quartix")
     _render_quartix(prenom_hint)
 
-    # ── Export PDF ─────────────────────────────────────────────────────────────
+    # ── Export ────────────────────────────────────────────────────────────────
     st.markdown('<div style="height:24px;"></div>', unsafe_allow_html=True)
     st.divider()
-    st.markdown(
-        '<div style="color:#8FA8C8;font-size:0.8rem;margin-bottom:8px;">'
-        "📄 Le fichier HTML s'ouvre dans le navigateur — faites <b>Ctrl+P → Enregistrer en PDF</b> "
-        "pour obtenir le PDF. Toutes les sections sont développées, aucun bouton n'est inclus."
-        "</div>",
-        unsafe_allow_html=True,
+    _section_label("Exporter le rapport")
+
+    # Section checkboxes
+    pick_result  = st.session_state.get("re_pick_result")
+    ptg_summary  = st.session_state.get("re_ptg_summary")
+    qtx_summary  = st.session_state.get("re_qtx_summary")
+    justifs      = st.session_state.get("re_justifications", {})
+    has_nf       = any(d["salles_non_faites"] for d in weekly.values())
+    has_pick     = pick_result is not None and not pick_result.empty
+    has_ptg      = ptg_summary is not None
+    has_qtx      = qtx_summary is not None
+
+    cb1, cb2, cb3, cb4, cb5 = st.columns(5)
+    with cb1:
+        inc_charg = st.checkbox("📦 Chargement", value=True,     key="re_exp_charg")
+    with cb2:
+        inc_nf    = st.checkbox("✕ Non faites",  value=has_nf,   disabled=not has_nf,   key="re_exp_nf")
+    with cb3:
+        inc_pick  = st.checkbox("🎯 Picklist",   value=has_pick, disabled=not has_pick, key="re_exp_pick")
+    with cb4:
+        inc_ptg   = st.checkbox("⏱ Pointage",   value=has_ptg,  disabled=not has_ptg,  key="re_exp_ptg")
+    with cb5:
+        inc_qtx   = st.checkbox("🗺️ Quartix",   value=has_qtx,  disabled=not has_qtx,  key="re_exp_qtx")
+
+    sections = set()
+    if inc_charg:          sections.add("chargement")
+    if inc_nf and has_nf:  sections.add("non_faites")
+    if inc_pick:           sections.add("picklist")
+    if inc_ptg:            sections.add("pointage")
+    if inc_qtx and has_qtx: sections.add("quartix")
+
+    # Pre-compute shared data once
+    export_d = _export_data(
+        employe        = employe_sel,
+        weekly         = weekly,
+        meta           = meta,
+        pick_result    = pick_result,
+        ptg_summary    = ptg_summary,
+        justifications = justifs,
+        qtx_summary    = qtx_summary,
     )
-    html_bytes = _build_rapport_html(
-        employe      = employe_sel,
-        weekly       = weekly,
-        meta         = meta,
-        pick_result  = st.session_state.get("re_pick_result"),
-        ptg_summary  = st.session_state.get("re_ptg_summary"),
-        justifications = st.session_state.get("re_justifications", {}),
-    ).encode("utf-8")
 
     iso_year, iso_week, _ = datetime.date.today().isocalendar()
-    st.download_button(
-        label            = f"📄 Exporter le rapport — {employe_sel} S{iso_week}",
-        data             = html_bytes,
-        file_name        = f"rapport_{employe_sel}_S{iso_week}_{iso_year}.html",
-        mime             = "text/html",
-        type             = "primary",
-        use_container_width = True,
-        key              = "re_export_pdf",
-    )
+    fname_base = f"rapport_{employe_sel}_S{iso_week}_{iso_year}"
+
+    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+    btn_html, btn_pdf = st.columns(2)
+
+    with btn_html:
+        st.markdown(
+            '<div style="color:#8FA8C8;font-size:0.75rem;margin-bottom:6px;">'
+            "Ouvrez le fichier HTML puis faites <b>Ctrl+P → Enregistrer en PDF</b> "
+            "pour un export détaillé multipage."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        html_bytes = _build_rapport_html(employe_sel, export_d, sections).encode("utf-8")
+        st.download_button(
+            label               = "🌐 Export HTML (détaillé)",
+            data                = html_bytes,
+            file_name           = f"{fname_base}.html",
+            mime                = "text/html",
+            use_container_width = True,
+            key                 = "re_export_html",
+        )
+
+    with btn_pdf:
+        st.markdown(
+            '<div style="color:#8FA8C8;font-size:0.75rem;margin-bottom:6px;">'
+            "PDF Distriprot — thème clair, design structuré, "
+            "prêt à imprimer ou partager."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        try:
+            pdf_data  = _prepare_pdf_data(employe_sel, export_d, sections)
+            pdf_bytes = generate_pdf_report(pdf_data)
+            st.download_button(
+                label               = "📄 Export PDF (synthèse)",
+                data                = pdf_bytes,
+                file_name           = f"{fname_base}.pdf",
+                mime                = "application/pdf",
+                type                = "primary",
+                use_container_width = True,
+                key                 = "re_export_pdf",
+            )
+        except Exception as _pdf_err:
+            st.error(f"❌ Erreur génération PDF : {_pdf_err}")
+
