@@ -122,29 +122,28 @@ def parser_heroic(texte):
 
 def parser_nxt(texte):
     """Parser NXT pour la comparaison par quantités (fallback)."""
-    lignes = []
     vus = set()
 
     p1 = re.compile(r'^(\d+)\s+Pce\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
+    p2 = re.compile(r'^(\d[\d ]+)\s+\w+\s+\S+\s+(.+?)\nPce', re.MULTILINE)
+
+    all_matches = []
     for m in p1.finditer(texte):
-        qte = int(m.group(1))
-        desig = m.group(2).strip()
+        all_matches.append((m.start(), int(m.group(1)), m.group(2).strip()))
+    for m in p2.finditer(texte):
+        try:
+            qte = int(m.group(1).replace(' ', ''))
+            desig = re.sub(r'\s+\d+ml$', '', m.group(2).strip()).strip()
+            all_matches.append((m.start(), qte, desig))
+        except Exception:
+            pass
+
+    all_matches.sort(key=lambda x: x[0])
+    lignes = []
+    for _, qte, desig in all_matches:
         if desig and qte > 0 and desig not in vus:
             vus.add(desig)
             lignes.append({'designation': desig, 'quantite_unites': qte})
-
-    p2 = re.compile(r'^(\d[\d ]+)\s+(33\d\d\w+)\s+\S+\s+(.+?)\nPce', re.MULTILINE)
-    for m in p2.finditer(texte):
-        qte_str = m.group(1).replace(' ', '').strip()
-        desig = m.group(3).strip()
-        desig = re.sub(r'\s+\d+ml$', '', desig).strip()
-        try:
-            qte = int(qte_str)
-            if qte > 0 and desig and desig not in vus:
-                vus.add(desig)
-                lignes.append({'designation': desig, 'quantite_unites': qte})
-        except Exception:
-            pass
 
     return lignes
 
@@ -235,27 +234,25 @@ def extraire_lignes_prix_nxt(texte):
     Extrait les lignes produit NXT avec désignation et total HT.
     Retourne liste de {designation, pu, total_ht, quantite}
     """
-    # lignes_desig contient des tuples (designation, quantite) capturés
-    # sur la même ligne de texte → appairage fiable, indépendant de l'ordre.
     lignes_desig = []
     vus = set()
 
     p1 = re.compile(r'^(\d+)\s+Pce\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
-    for m in p1.finditer(texte):
-        qte = int(m.group(1))
-        desig = m.group(2).strip()
-        if desig and desig not in vus and qte > 0:
-            vus.add(desig)
-            lignes_desig.append((desig, qte))
+    p2 = re.compile(r'^(\d[\d ]+)\s+\w+\s+\S+\s+(.+?)\nPce', re.MULTILINE)
 
-    p2 = re.compile(r'^(\d[\d ]+)\s+(33\d\d\w+)\s+\S+\s+(.+?)\nPce', re.MULTILINE)
+    all_matches = []
+    for m in p1.finditer(texte):
+        all_matches.append((m.start(), int(m.group(1)), m.group(2).strip()))
     for m in p2.finditer(texte):
-        desig = m.group(3).strip()
-        desig = re.sub(r'\s+\d+ml$', '', desig).strip()
         try:
-            qte = int(m.group(1).replace(' ', '').strip())
-        except ValueError:
-            continue
+            qte = int(m.group(1).replace(' ', ''))
+            desig = re.sub(r'\s+\d+ml$', '', m.group(2).strip()).strip()
+            all_matches.append((m.start(), qte, desig))
+        except Exception:
+            pass
+
+    all_matches.sort(key=lambda x: x[0])
+    for _, qte, desig in all_matches:
         if desig and desig not in vus and qte > 0:
             vus.add(desig)
             lignes_desig.append((desig, qte))
@@ -372,19 +369,19 @@ TABLE_CORRESPONDANCE = [
     ('BOITE 25CL RED BULL ZERO',         'RED BULL ZERO'),
     ('BOITE 25CL RED BULL',              'RED BULL'),
     # NXT LEVEL
-    ('RTD Boisson protéinée goût Fraise',   'Strawberry 330'),
+    ('RTD Boisson protéinée goût Fraise',   'STRAWBERRY 330'),
     ('RTD Boisson protéinée goût Chocolat', 'CHOCOLATE 500'),
     ('RTD Boisson protéinée goût Vanille',  'VANILLA 500'),
     ('RTD Protein Shake Vanilla',           'VANILLE 330'),
     ('RTD Protein Shake Chocolate',         'CHOCOLAT 330'),
-    ('RTD Protein Shake Chocolate',         'Strawberry 330'),
-    ('Pocket Protein Salty Peanut',         'Salty'),
-    ('Pocket Protein Caramel Cookie',       'Caramel Cookie'),
-    ('Barre protéinée goût Brownie',        'Brownie'),
+    ('RTD Protein Shake Chocolate',         'STRAWBERRY 330'),
+    ('Pocket Protein Salty Peanut',         'SALTY PEANUT'),
+    ('Pocket Protein Caramel Cookie',       'CARAMEL COOKIE'),
+    ('Barre protéinée goût Brownie',        'BROWNIE'),
     ('Bidon Orange',                        'SPORTBOTTLE'),
     ('Padlock Combination',                 'PADLOCK COMBI'),
     ('Padlock Key',                         'PADLOCK KEY'),
-    ('BF Towel Vending',                    'Towel'),
+    ('Towel Vending',                       'TOWEL'),
     ('Peanut Boost',                        'PEANUT BOOST'),
     ('Crispy Protein Raspberry Toffee',     'RASPBERRY TOFFEE'),
     # NUTRAMINO
