@@ -126,6 +126,7 @@ def parser_nxt(texte):
 
     p1 = re.compile(r'^(\d+)\s+Pce\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
     p2 = re.compile(r'^(\d[\d ]+)\s+\w+\s+\S+\s+(.+?)\nPce', re.MULTILINE)
+    p_zbx = re.compile(r'^(\d+)\s+ZBX\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
 
     all_matches = []
     for m in p1.finditer(texte):
@@ -137,6 +138,13 @@ def parser_nxt(texte):
             all_matches.append((m.start(), qte, desig))
         except Exception:
             pass
+    for m in p_zbx.finditer(texte):
+        qte_colis = int(m.group(1))
+        desig = m.group(2).strip()
+        qte_par_colis = next(
+            (qpc for kw, qpc in NXT_QTE_PAR_COLIS if kw.upper() in desig.upper()), 1
+        )
+        all_matches.append((m.start(), qte_colis * qte_par_colis, desig))
 
     all_matches.sort(key=lambda x: x[0])
     lignes = []
@@ -158,6 +166,11 @@ def parser_hipro(texte):
             lignes.append({'designation': desig, 'quantite_unites': qte})
     return lignes
 
+
+# Quantité d'unités par colis pour les produits NXT facturés en ZBX (cartons)
+NXT_QTE_PAR_COLIS = [
+    ('Peanut Boost',  12),  # 12 x 60g
+]
 
 # Quantité d'unités par colis pour les produits Glanbia/Nutramino (hardcodé)
 NUTRAMINO_QTE_PAR_COLIS = [
@@ -239,6 +252,7 @@ def extraire_lignes_prix_nxt(texte):
 
     p1 = re.compile(r'^(\d+)\s+Pce\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
     p2 = re.compile(r'^(\d[\d ]+)\s+\w+\s+\S+\s+(.+?)\nPce', re.MULTILINE)
+    p_zbx = re.compile(r'^(\d+)\s+ZBX\s+\S+\s+\S+\s+(.+?)(?:\n|B2B-FR)', re.MULTILINE)
 
     all_matches = []
     for m in p1.finditer(texte):
@@ -250,6 +264,13 @@ def extraire_lignes_prix_nxt(texte):
             all_matches.append((m.start(), qte, desig))
         except Exception:
             pass
+    for m in p_zbx.finditer(texte):
+        qte_colis = int(m.group(1))
+        desig = m.group(2).strip()
+        qte_par_colis = next(
+            (qpc for kw, qpc in NXT_QTE_PAR_COLIS if kw.upper() in desig.upper()), 1
+        )
+        all_matches.append((m.start(), qte_colis * qte_par_colis, desig))
 
     all_matches.sort(key=lambda x: x[0])
     for _, qte, desig in all_matches:
@@ -258,6 +279,7 @@ def extraire_lignes_prix_nxt(texte):
             lignes_desig.append((desig, qte))
 
     # prix_pattern : uniquement pour PU et total HT (appairage par index, ordre stable)
+    # Les lignes à pu=0 et total=0 sont des corrections (ex: 0 Pce) — on les exclut.
     prix_pattern = re.compile(
         r'Valeur nette 1\s+([\d,]+)EUR / 1 Pce\s+([\d\s,]+)\s+EUR'
     )
@@ -265,7 +287,8 @@ def extraire_lignes_prix_nxt(texte):
     for m in prix_pattern.finditer(texte):
         pu = float(m.group(1).replace(',', '.'))
         total = float(m.group(2).replace(' ', '').replace(',', '.'))
-        prix_lignes.append({'pu': pu, 'total_ht': total})
+        if pu > 0 or total > 0:
+            prix_lignes.append({'pu': pu, 'total_ht': total})
 
     result = []
     for i, (desig, qte) in enumerate(lignes_desig):
