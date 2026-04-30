@@ -633,9 +633,14 @@ elif st.session_state.page == "suivi":
 
     with tab_nf:
         nf_rows = []
+        nf_by_reappro = {}
         for reappro, data in sorted(results.items()):
-            for s in data["salles_non_faites"]:
+            salles_nf = data["salles_non_faites"]
+            if salles_nf:
+                nf_by_reappro[reappro] = salles_nf
+            for s in salles_nf:
                 nf_rows.append({"Réappro": reappro, "Client / Salle": s["client"], "Machine": s["machine"]})
+
         if nf_rows:
             df_nf = pd.DataFrame(nf_rows)
             st.dataframe(
@@ -643,6 +648,85 @@ elif st.session_state.page == "suivi":
                 use_container_width=True, hide_index=True,
                 height=min(700, 38 + len(df_nf) * 35),
             )
+
+            # ── Justifications par réappro / par salle ─────────────────────
+            from mongo_storage import save_justification_nf, load_justifications_nf
+            date_analyse = datetime.date.today().isoformat()
+
+            # Pré-remplissage depuis MongoDB : { (reappro, machine): texte }
+            existing_docs = load_justifications_nf(date_analyse)
+            prefill = {}
+            for doc in existing_docs:
+                for s in doc.get("salles", []):
+                    prefill[(doc["reappro"], s["machine"])] = s.get("justification", "")
+
+            _PRESETS_NF = [
+                ("AM",              "AM (arrêt maladie)"),
+                ("AT",              "AT (arrêt de travail)"),
+                ("AI",              "AI (absence injustifiée)"),
+                ("Véhicule garage", "Véhicule garage"),
+            ]
+
+            st.divider()
+            st.subheader("📝 Justifications des salles non faites")
+
+            for reappro, salles_nf in sorted(nf_by_reappro.items()):
+                nb = len(salles_nf)
+                with st.expander(
+                    f"👤 {reappro} — {nb} salle{'s' if nb > 1 else ''} non faite{'s' if nb > 1 else ''}",
+                    key=f"exp_nf__{reappro}",
+                ):
+                    hdr_salle, hdr_machine, hdr_justif = st.columns([3, 1, 4])
+                    hdr_salle.markdown("**Client / Salle**")
+                    hdr_machine.markdown("**Machine**")
+                    hdr_justif.markdown("**Justification**")
+                    st.divider()
+
+                    for s in salles_nf:
+                        col_salle, col_machine, col_justif = st.columns([3, 1, 4])
+                        col_salle.markdown(s["client"])
+                        col_machine.markdown(f"`{s['machine']}`")
+                        with col_justif:
+                            text_key = f"justif__{reappro}__{s['machine']}"
+                            st.text_input(
+                                "justification",
+                                value=prefill.get((reappro, s["machine"]), ""),
+                                placeholder="Saisir ou choisir un raccourci ci-dessous...",
+                                key=text_key,
+                                label_visibility="collapsed",
+                            )
+                            # Boutons raccourcis
+                            p_cols = st.columns(len(_PRESETS_NF))
+                            for pi, (label, valeur) in enumerate(_PRESETS_NF):
+                                if p_cols[pi].button(
+                                    label,
+                                    key=f"preset__{reappro}__{s['machine']}__{pi}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state[text_key] = valeur
+                                    st.rerun()
+
+                    if st.button("💾 Enregistrer", key=f"btn_justif__{reappro}", type="primary"):
+                        salles_payload = [
+                            {
+                                "client": s["client"],
+                                "machine": s["machine"],
+                                "justification": st.session_state.get(
+                                    f"justif__{reappro}__{s['machine']}", ""
+                                ),
+                            }
+                            for s in salles_nf
+                        ]
+                        ok = save_justification_nf(
+                            reappro=reappro,
+                            date_analyse=date_analyse,
+                            jour=jour,
+                            salles=salles_payload,
+                        )
+                        if ok:
+                            st.success(f"✅ Justifications enregistrées pour {reappro}.")
+                        else:
+                            st.error("Erreur lors de l'enregistrement. Vérifiez la connexion MongoDB.")
         else:
             st.success("🎉 Toutes les salles ont été faites !")
 

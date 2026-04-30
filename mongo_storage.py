@@ -554,3 +554,58 @@ def delete_rapport_employe_save(name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JUSTIFICATIONS NON FAITES — raisons pour les salles non réalisées
+#
+# Un document par (réappro, date_analyse) :
+# {
+#   "reappro":      "RIDF1",
+#   "date_analyse": "2026-04-30",
+#   "jour":         "Lundi",
+#   "salles":       [{"client": "...", "machine": "..."}, ...],
+#   "justification":"Absent pour maladie",
+#   "saved_at":     "2026-04-30T10:00:00"
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_justif_nf_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["justifications_nf"]
+
+
+def save_justification_nf(reappro: str, date_analyse: str, jour: str,
+                           salles: list) -> bool:
+    """
+    Upsert les justifications par salle pour un réappro et une date donnés.
+    salles : [{"client": "...", "machine": "...", "justification": "..."}, ...]
+    """
+    try:
+        _get_justif_nf_col().update_one(
+            {"reappro": reappro, "date_analyse": date_analyse},
+            {"$set": {
+                "reappro":      reappro,
+                "date_analyse": date_analyse,
+                "jour":         jour,
+                "salles":       salles,
+                "saved_at":     datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            }},
+            upsert=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def load_justifications_nf(date_analyse: str) -> list:
+    """Retourne toutes les justifications enregistrées pour une date d'analyse donnée."""
+    try:
+        docs = list(_get_justif_nf_col().find(
+            {"date_analyse": date_analyse},
+            {"_id": 0},
+        ).sort("reappro", 1))
+        return docs
+    except Exception:
+        return []
