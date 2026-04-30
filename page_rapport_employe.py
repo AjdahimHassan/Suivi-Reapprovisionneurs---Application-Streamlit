@@ -36,7 +36,8 @@ from page_picklist import (
     _COULEURS,
     _styler,
 )
-from pdf_rapport import generate_pdf_report
+from pdf_rapport   import generate_pdf_report
+from excel_rapport import generate_excel_report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2331,7 +2332,7 @@ def render() -> None:
     fname_base = f"rapport_{employe_sel}_S{iso_week}_{iso_year}"
 
     st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
-    btn_html, btn_pdf = st.columns(2)
+    btn_html, btn_pdf, btn_xlsx = st.columns(3)
 
     with btn_html:
         st.markdown(
@@ -2373,4 +2374,25 @@ def render() -> None:
             )
         except Exception as _pdf_err:
             st.error(f"❌ Erreur génération PDF : {_pdf_err}")
+
+    with btn_xlsx:
+        st.markdown(
+            '<div style="color:#8FA8C8;font-size:0.75rem;margin-bottom:6px;">'
+            "Excel multi-feuilles — une feuille par section, "
+            "toutes les données avec couleurs."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        try:
+            xlsx_bytes = generate_excel_report(employe_sel, export_d, sections)
+            st.download_button(
+                label               = "📊 Export Excel",
+                data                = xlsx_bytes,
+                file_name           = f"{fname_base}.xlsx",
+                mime                = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width = True,
+                key                 = "re_export_xlsx",
+            )
+        except Exception as _xlsx_err:
+            st.error(f"❌ Erreur génération Excel : {_xlsx_err}")
 
