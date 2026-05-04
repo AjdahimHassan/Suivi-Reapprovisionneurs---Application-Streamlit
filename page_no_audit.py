@@ -678,6 +678,136 @@ def render():
     _render_bottom_sections()
 
 
+def _build_sv_excel_by_zone(df_sv: pd.DataFrame) -> bytes:
+    """
+    Export Excel des incidents Sans Ventes actifs avec une feuille par zone (OUEST, IDF, …).
+    La zone est déduite via la collection 'reappros' (Approvisionneur → zone).
+    Dans chaque feuille de zone, les réappros sont séparés par une ligne de titre colorée.
+    Une feuille 'Toutes zones' récapitule tout.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    # ── Lookup salle → Approvisionneur ───────────────────────────────────────
+    reappro_map: dict[str, str] = {}
+    zone_map: dict[str, str] = {}
+    prenom_map: dict[str, str] = {}
+    try:
+        client  = _get_client()
+        db_name = st.secrets["mongo"]["db_name"]
+        machines_docs = list(
+            client[db_name]["machines"].find({}, {"_id": 0, "Client": 1, "Approvisionneur": 1})
+        )
+        reappro_map = {
+            str(d["Client"]).strip(): str(d["Approvisionneur"]).strip()
+            for d in machines_docs if d.get("Client") and d.get("Approvisionneur")
+        }
+        reappros_docs = list(
+            client[db_name]["reappros"].find({}, {"_id": 0, "code": 1, "zone": 1, "prenom": 1})
+        )
+        for d in reappros_docs:
+            code = str(d.get("code", "")).strip()
+            if not code:
+                continue
+            if d.get("zone"):
+                zone_map[code] = str(d["zone"]).strip()
+            if d.get("prenom"):
+                prenom_map[code] = str(d["prenom"]).strip()
+    except Exception:
+        pass
+
+    export_df = df_sv.copy()
+    export_df["Réappro"] = export_df["Salle"].map(reappro_map).fillna("—")
+    export_df["Zone"]    = export_df["Réappro"].map(zone_map).fillna("Non assigné")
+
+    want = ["Zone", "Salle", "Réappro", "Type", "Depuis", "Commentaire"]
+    cols = [c for c in want if c in export_df.columns]
+    export_df = export_df[cols].sort_values(
+        ["Zone", "Réappro", "Salle"],
+        ascending=[True, True, True],
+        na_position="last",
+    )
+
+    # ── Style constants ───────────────────────────────────────────────────────
+    HDR_FILL = PatternFill("solid", fgColor="1B3D6F")
+    HDR_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    SEP_FILL = PatternFill("solid", fgColor="2E75B6")
+    SEP_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    ALIGN_C  = Alignment(horizontal="center", vertical="center")
+    ALIGN_L  = Alignment(horizontal="left",   vertical="center")
+
+    WIDTH_HINTS = {
+        "Zone": 20, "Salle": 38, "Réappro": 12,
+        "Type": 12, "Depuis": 12, "Commentaire": 45,
+    }
+
+    def _write_header(ws, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            cell = ws.cell(1, ci, col)
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+            cell.alignment = ALIGN_C
+        ws.row_dimensions[1].height = 18
+
+    def _write_sep_row(ws, row_idx, reappro_code, display_cols):
+        prenom = prenom_map.get(reappro_code, "")
+        label = f"  {reappro_code}" + (f"  —  {prenom}" if prenom else "")
+        for ci in range(1, len(display_cols) + 1):
+            cell = ws.cell(row_idx, ci, label if ci == 1 else "")
+            cell.fill = SEP_FILL
+            cell.font = SEP_FONT
+            cell.alignment = ALIGN_L
+        ws.row_dimensions[row_idx].height = 16
+
+    def _write_data_row(ws, row_idx, row, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            val = row[col]
+            if val is None or (isinstance(val, float) and str(val) == "nan"):
+                val = ""
+            ws.cell(row_idx, ci, val).alignment = ALIGN_L
+
+    def _set_widths(ws, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            ws.column_dimensions[get_column_letter(ci)].width = WIDTH_HINTS.get(col, 16)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # Feuille "Toutes zones"
+    ws_all = wb.create_sheet("Toutes zones")
+    all_cols = list(export_df.columns)
+    _write_header(ws_all, all_cols)
+    for ri, (_, row) in enumerate(export_df.reset_index(drop=True).iterrows(), 2):
+        _write_data_row(ws_all, ri, row, all_cols)
+    _set_widths(ws_all, all_cols)
+    ws_all.freeze_panes = "A2"
+
+    # Une feuille par zone
+    zones = sorted(
+        export_df["Zone"].unique(),
+        key=lambda z: (z == "Non assigné", z.lower()),
+    )
+    for zone in zones:
+        zone_df = export_df[export_df["Zone"] == zone]
+        display_cols = [c for c in zone_df.columns if c != "Zone"]
+        ws = wb.create_sheet(str(zone)[:31])
+        _write_header(ws, display_cols)
+        cur = 2
+        for reappro_code, grp in zone_df.groupby("Réappro", sort=False):
+            _write_sep_row(ws, cur, str(reappro_code), display_cols)
+            cur += 1
+            for _, row in grp.iterrows():
+                _write_data_row(ws, cur, row, display_cols)
+                cur += 1
+        _set_widths(ws, display_cols)
+        ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _render_bottom_sections():
     """Sections en bas de page : commentaires actifs + historique résolu."""
     incidents = _load_incidents()
@@ -715,7 +845,7 @@ def _render_bottom_sections():
                 key="actifs_editor",
             )
 
-            col_save_actifs, col_dl_actifs = st.columns([1, 2])
+            col_save_actifs, col_dl_actifs, col_dl_sv_zone = st.columns([1, 2, 2])
             with col_save_actifs:
                 if st.button("💾 Sauvegarder", key="btn_save_actifs", use_container_width=True):
                     col_db = _get_incidents_col()
@@ -738,6 +868,33 @@ def _render_bottom_sections():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+
+            with col_dl_sv_zone:
+                df_zone_export = edited_actifs.copy()
+                # Pour les No Audit sans commentaire, noter "Sans télémétrie"
+                mask_na = (df_zone_export["Type"] == "No Audit") & (df_zone_export["Commentaire"].fillna("").str.strip() == "")
+                df_zone_export.loc[mask_na, "Commentaire"] = "Sans télémétrie"
+                # Dédoublonnage par Salle : garder le plus récent (Depuis le plus grand)
+                df_zone_export["_depuis_dt"] = pd.to_datetime(
+                    df_zone_export["Depuis"], format="%d/%m/%Y", errors="coerce"
+                )
+                df_zone_export = (
+                    df_zone_export
+                    .sort_values("_depuis_dt", ascending=False, na_position="last")
+                    .drop_duplicates(subset=["Salle"], keep="first")
+                    .drop(columns=["_depuis_dt"])
+                )
+                if not df_zone_export.empty:
+                    zone_bytes = _build_sv_excel_by_zone(df_zone_export)
+                    st.download_button(
+                        label="📥 Par zone (Sans Ventes + No Audit)",
+                        data=zone_bytes,
+                        file_name=f"incidents_par_zone_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                else:
+                    st.button("📥 Par zone (Sans Ventes + No Audit)", disabled=True, use_container_width=True)
 
     # ── Historique résolus ────────────────────────────────
     resolus = incidents["resolu"]

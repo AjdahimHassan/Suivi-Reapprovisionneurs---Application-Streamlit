@@ -4,6 +4,7 @@ Application Streamlit - Outil Réappro
   └── 🗂️  Planogrammes
 """
 
+import io
 import streamlit as st
 import pandas as pd
 import datetime
@@ -238,6 +239,591 @@ if "dark_mode" not in st.session_state:
 # NAVIGATION — barre en haut de la page principale
 # ────────────────────────────────────────────────────────
 import os as _os
+
+
+# ────────────────────────────────────────────────────────
+# HELPERS : MACHINES SANS CHARGEMENT (bas de page Tournées)
+# ────────────────────────────────────────────────────────
+
+def _parse_long_charg(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Parse a long-period chargement CSV.
+    Returns df with columns: Machine, Salle_csv, Date, is_fait.
+    Same format as the daily chargement CSV but covering a longer period.
+    """
+    df = None
+    for sep in [";", ",", "\t"]:
+        for enc in ["utf-8-sig", "utf-8", "latin-1"]:
+            try:
+                _df = pd.read_csv(
+                    io.BytesIO(file_bytes), sep=sep, dtype=str,
+                    encoding=enc, on_bad_lines="skip",
+                )
+                _df.columns = [
+                    c.strip().strip('"').replace("<br/>", " ") for c in _df.columns
+                ]
+                _df = _df.loc[:, _df.columns.str.strip() != ""]
+                if len(_df.columns) >= 4:
+                    lc = [c.lower() for c in _df.columns]
+                    if (
+                        any("machine" in c for c in lc)
+                        and any("statut" in c or "status" in c for c in lc)
+                        and any("date" in c for c in lc)
+                    ):
+                        df = _df
+                        break
+            except Exception:
+                continue
+        if df is not None:
+            break
+
+    if df is None:
+        raise ValueError(
+            "Format CSV non reconnu. Le fichier doit contenir les colonnes "
+            "Machine, Statut et Date."
+        )
+
+    col_machine = col_statut = col_date = col_valeur = col_client = None
+    for col in df.columns:
+        cl = col.lower().strip()
+        if "machine" in cl and col_machine is None:
+            col_machine = col
+        if ("statut" in cl or "status" in cl) and col_statut is None:
+            col_statut = col
+        if "date" in cl and col_date is None:
+            col_date = col
+        if (
+            ("val" in cl and "ref" in cl)
+            or cl in ("valeur", "montant", "prix", "amount", "value")
+        ) and col_valeur is None:
+            col_valeur = col
+        if (
+            "tiers" in cl or cl == "client" or "salle" in cl
+        ) and col_client is None:
+            col_client = col
+
+    if not all([col_machine, col_statut, col_date]):
+        raise ValueError(
+            f"Colonnes requises non trouvées (Machine, Statut, Date). "
+            f"Colonnes disponibles : {list(df.columns)}"
+        )
+
+    date_raw = df[col_date].astype(str).str.strip().str.strip('"')
+    dates = pd.to_datetime(date_raw, format="%d/%m/%Y %H:%M", errors="coerce")
+    mask = dates.isna()
+    if mask.any():
+        dates = dates.copy()
+        dates.loc[mask] = pd.to_datetime(date_raw[mask], dayfirst=True, errors="coerce")
+
+    out = pd.DataFrame()
+    out["Machine"]   = df[col_machine].astype(str).str.strip().str.strip('"')
+    out["Salle_csv"] = (
+        df[col_client].astype(str).str.strip().str.strip('"') if col_client else ""
+    )
+    out["Date"]      = dates
+    out["_statut"]   = (
+        df[col_statut].astype(str).str.strip().str.strip('"').str.capitalize()
+    )
+    if col_valeur:
+        out["_valeur"] = pd.to_numeric(
+            df[col_valeur]
+            .astype(str)
+            .str.strip()
+            .str.strip('"')
+            .str.replace(",", ".", regex=False),
+            errors="coerce",
+        ).fillna(0.0)
+    else:
+        out["_valeur"] = 1.0
+
+    out["is_fait"] = out["_statut"].isin(["Fait", "Annulé"]) & (out["_valeur"] != 0.0)
+    return out[["Machine", "Salle_csv", "Date", "is_fait"]].dropna(subset=["Date"])
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_salles_for_sc() -> pd.DataFrame:
+    """Load machines from MongoDB: Client, Code, Approvisionneur."""
+    from mongo_storage import _get_client as _get_mc
+    try:
+        client  = _get_mc()
+        db_name = st.secrets["mongo"]["db_name"]
+        docs = list(
+            client[db_name]["machines"].find(
+                {}, {"_id": 0, "Client": 1, "Code": 1, "Approvisionneur": 1}
+            )
+        )
+        df = pd.DataFrame(docs)
+        if df.empty:
+            return df
+        for c in ["Client", "Code", "Approvisionneur"]:
+            if c not in df.columns:
+                df[c] = ""
+        return df.fillna("").drop_duplicates(subset=["Code"])
+    except Exception:
+        return pd.DataFrame(columns=["Client", "Code", "Approvisionneur"])
+
+
+def _compute_sans_charg(
+    charg_df: pd.DataFrame,
+    salles_df: pd.DataFrame,
+    plannings: dict,
+    seuil_jours: int,
+) -> pd.DataFrame:
+    """
+    Find salles without a valid chargement for more than seuil_jours days.
+    Returns df: Salle, Code machine, Réappro, Dernier chargement, Jours sans chargement.
+    """
+    today = datetime.date.today()
+    ref   = datetime.datetime.combine(today, datetime.time())
+
+    # Build reverse map: machine_code → reappro name
+    machine_to_reappro: dict[str, str] = {}
+    for reappro, days in plannings.items():
+        for jour, salles in days.items():
+            for entry in salles:
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    machine_to_reappro[str(entry[1]).strip()] = reappro
+
+    fait_df    = charg_df[charg_df["is_fait"]]
+    last_charg = fait_df.groupby("Machine")["Date"].max()
+
+    rows = []
+    for _, row in salles_df.iterrows():
+        code  = str(row.get("Code", "")).strip()
+        salle = str(row.get("Client", "")).strip()
+        appro = str(row.get("Approvisionneur", "")).strip()
+        if not code:
+            continue
+
+        reappro = machine_to_reappro.get(code, appro)
+
+        if code in last_charg.index:
+            last  = last_charg[code]
+            jours = (ref - last).days
+            if jours <= seuil_jours:
+                continue
+            last_str = last.strftime("%d/%m/%Y")
+        else:
+            last     = None
+            jours    = None
+            last_str = "Jamais"
+
+        rows.append({
+            "Salle":                 salle,
+            "Code machine":          code,
+            "Réappro":               reappro,
+            "Dernier chargement":    last_str,
+            "Jours sans chargement": jours,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _build_sc_excel_by_zone(df: pd.DataFrame) -> bytes:
+    """
+    Export Excel des machines sans chargement avec une feuille par zone (OUEST, IDF, …).
+    La zone est déduite via la collection 'reappros' (code → zone).
+    Dans chaque feuille de zone, les réappros sont séparés par une ligne de titre colorée.
+    Une feuille 'Toutes zones' récapitule tout.
+    """
+    from mongo_storage import _get_client as _get_mc
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    # ── Mapping réappro code → zone (large) et prenom ────────────────────────
+    zone_map: dict[str, str] = {}
+    prenom_map: dict[str, str] = {}
+    try:
+        client  = _get_mc()
+        db_name = st.secrets["mongo"]["db_name"]
+        docs = list(
+            client[db_name]["reappros"].find(
+                {}, {"_id": 0, "code": 1, "zone": 1, "prenom": 1}
+            )
+        )
+        for d in docs:
+            code = str(d.get("code", "")).strip()
+            if not code:
+                continue
+            if d.get("zone"):
+                zone_map[code] = str(d["zone"]).strip()
+            if d.get("prenom"):
+                prenom_map[code] = str(d["prenom"]).strip()
+    except Exception:
+        pass
+
+    export_df = df.drop(columns=["Tag"], errors="ignore").copy()
+    export_df["Zone"] = export_df["Réappro"].map(zone_map).fillna("Non assigné")
+
+    want = [
+        "Zone", "Salle", "Code machine", "Réappro",
+        "Dernier chargement", "Jours sans chargement",
+        "Dernière vente", "Commentaire",
+    ]
+    cols = [c for c in want if c in export_df.columns]
+    export_df = export_df[cols].sort_values(
+        ["Zone", "Réappro", "Jours sans chargement"],
+        ascending=[True, True, False],
+        na_position="last",
+    )
+
+    # ── Style constants ───────────────────────────────────────────────────────
+    HDR_FILL = PatternFill("solid", fgColor="1B3D6F")
+    HDR_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    SEP_FILL = PatternFill("solid", fgColor="2E75B6")
+    SEP_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    ALIGN_C  = Alignment(horizontal="center", vertical="center")
+    ALIGN_L  = Alignment(horizontal="left",   vertical="center", wrap_text=False)
+
+    WIDTH_HINTS = {
+        "Zone": 20, "Salle": 38, "Code machine": 13,
+        "Réappro": 12, "Dernier chargement": 16,
+        "Jours sans chargement": 20, "Dernière vente": 15, "Commentaire": 40,
+    }
+
+    def _write_header(ws, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            cell = ws.cell(1, ci, col)
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+            cell.alignment = ALIGN_C
+        ws.row_dimensions[1].height = 18
+
+    def _write_sep_row(ws, row_idx, reappro_code, display_cols):
+        prenom = prenom_map.get(reappro_code, "")
+        label = f"  {reappro_code}" + (f"  —  {prenom}" if prenom else "")
+        n_cols = len(display_cols)
+        for ci in range(1, n_cols + 1):
+            cell = ws.cell(row_idx, ci, label if ci == 1 else "")
+            cell.fill = SEP_FILL
+            cell.font = SEP_FONT
+            cell.alignment = ALIGN_L
+        ws.row_dimensions[row_idx].height = 16
+
+    def _write_data_row(ws, row_idx, row, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            val = row[col]
+            if val is None or (isinstance(val, float) and str(val) == "nan"):
+                val = ""
+            c = ws.cell(row_idx, ci, val)
+            c.alignment = ALIGN_L
+
+    def _set_col_widths(ws, display_cols):
+        for ci, col in enumerate(display_cols, 1):
+            ws.column_dimensions[get_column_letter(ci)].width = WIDTH_HINTS.get(col, 16)
+
+    def _write_sheet_all(ws, frame: pd.DataFrame):
+        display_cols = list(frame.columns)
+        _write_header(ws, display_cols)
+        for ri, (_, row) in enumerate(frame.reset_index(drop=True).iterrows(), 2):
+            _write_data_row(ws, ri, row, display_cols)
+        _set_col_widths(ws, display_cols)
+
+    def _write_sheet_zone(ws, frame: pd.DataFrame):
+        display_cols = [c for c in frame.columns if c != "Zone"]
+        _write_header(ws, display_cols)
+        current_row = 2
+        for reappro_code, grp in frame.groupby("Réappro", sort=False):
+            _write_sep_row(ws, current_row, str(reappro_code), display_cols)
+            current_row += 1
+            for _, row in grp.iterrows():
+                _write_data_row(ws, current_row, row, display_cols)
+                current_row += 1
+        _set_col_widths(ws, display_cols)
+
+    # ── Build workbook ───────────────────────────────────────────────────────
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    ws_all = wb.create_sheet("Toutes zones")
+    _write_sheet_all(ws_all, export_df)
+    ws_all.freeze_panes = "A2"
+
+    zones = sorted(
+        export_df["Zone"].unique(),
+        key=lambda z: (z == "Non assigné", z.lower()),
+    )
+    for zone in zones:
+        zone_df = export_df[export_df["Zone"] == zone]
+        sheet_name = str(zone)[:31]
+        ws = wb.create_sheet(sheet_name)
+        _write_sheet_zone(ws, zone_df)
+        ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _render_machines_sans_chargement(plannings: dict):
+    """Section at the bottom of Tournées page: salles without chargement for > N days."""
+    st.divider()
+    st.markdown("### 🔴 Machines sans chargement")
+    st.caption(
+        "Salles n'ayant reçu aucun chargement valide depuis plus d'une semaine. "
+        "Déposez un export chargement CSV couvrant une longue période."
+    )
+
+    col_ul1, col_ul2, col_seuil = st.columns([3, 3, 1])
+    with col_ul1:
+        st.caption("📦 Export chargement (longue période)")
+        up = st.file_uploader(
+            "Export chargement longue période (CSV)",
+            type=["csv"],
+            key="sc_uploader",
+            label_visibility="collapsed",
+        )
+    with col_ul2:
+        st.caption("📉 Export télémétrie (même fichier que No Audit)")
+        up_telem = st.file_uploader(
+            "Export télémétrie (CSV)",
+            type=["csv"],
+            key="sc_telem_uploader",
+            label_visibility="collapsed",
+        )
+    with col_seuil:
+        seuil = st.number_input(
+            "Seuil jours", min_value=1, value=7, step=1, key="sc_seuil",
+            help="Nombre minimum de jours sans chargement pour apparaître dans la liste",
+            label_visibility="visible",
+        )
+
+    if up is not None:
+        st.session_state["sc_bytes"] = up.getvalue()
+    if up_telem is not None:
+        st.session_state["sc_telem_bytes"] = up_telem.getvalue()
+
+    col_btn, col_sort, _ = st.columns([1.2, 3, 2.8])
+    with col_btn:
+        calc = st.button(
+            "🔍 Analyser",
+            key="sc_calc",
+            disabled=(st.session_state.get("sc_bytes") is None),
+            use_container_width=True,
+        )
+    with col_sort:
+        sort_desc = st.radio(
+            "Tri urgence",
+            ["🔴 Plus urgent d'abord", "🟢 Moins urgent d'abord"],
+            key="sc_sort",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+    if calc and st.session_state.get("sc_bytes"):
+        with st.spinner("Analyse en cours…"):
+            try:
+                from page_no_audit import _parse_telemetry
+                df_raw    = _parse_long_charg(st.session_state["sc_bytes"])
+                salles_df = _load_salles_for_sc()
+                df_res    = _compute_sans_charg(df_raw, salles_df, plannings, int(seuil))
+
+                # Dernière vente depuis la télémétrie (optionnel)
+                if st.session_state.get("sc_telem_bytes"):
+                    telem_df   = _parse_telemetry(st.session_state["sc_telem_bytes"])
+                    last_vente = (
+                        telem_df[telem_df["Price"] > 0]
+                        .groupby("Salle")["Date"].max()
+                    )
+                    df_res["Dernière vente"] = df_res["Salle"].apply(
+                        lambda s: (
+                            last_vente[s].strftime("%d/%m/%Y")
+                            if s in last_vente.index and not pd.isna(last_vente[s])
+                            else "Jamais"
+                        )
+                    )
+
+                st.session_state["sc_result"]     = df_res
+                st.session_state["sc_seuil_used"] = int(seuil)
+                # Reset working df so comments are re-loaded from DB on next render
+                for _k in ("sc_working_df", "sc_version", "sc_last_sort"):
+                    st.session_state.pop(_k, None)
+            except Exception as e:
+                st.error(f"❌ Erreur : {e}")
+
+    df_sc = st.session_state.get("sc_result")
+    if df_sc is None:
+        if st.session_state.get("sc_bytes"):
+            st.info("Cliquez sur **Analyser** pour calculer.")
+        return
+
+    seuil_used = st.session_state.get("sc_seuil_used", int(seuil))
+
+    if df_sc.empty:
+        st.success(
+            f"✅ Aucune salle sans chargement depuis plus de {seuil_used} jours."
+        )
+        return
+
+    # ── Load incidents from MongoDB ─────────────────────────────────────────
+    def _load_sc_incidents() -> list:
+        from mongo_storage import _get_client as _get_mc
+        try:
+            client  = _get_mc()
+            db_name = st.secrets["mongo"]["db_name"]
+            return list(
+                client[db_name]["incidents"].find(
+                    {"status": "actif"},
+                    {"_id": 0, "salle": 1, "type": 1, "commentaire": 1, "since_date": 1},
+                )
+            )
+        except Exception:
+            return []
+
+    today     = datetime.date.today()
+    incidents = _load_sc_incidents()
+
+    sv_map: dict[str, str] = {}   # salle → since_date str  (sans_ventes)
+    na_map: dict[str, str] = {}   # salle → commentaire     (no_audit)
+    sc_saved: dict[str, str] = {} # salle → commentaire     (sans_chargement already saved)
+    for inc in incidents:
+        s = inc.get("salle", "")
+        t = inc.get("type", "")
+        if t == "sans_ventes":
+            sv_map[s] = inc.get("since_date", "")
+        elif t == "no_audit":
+            na_map[s] = inc.get("commentaire", "")
+        elif t == "sans_chargement":
+            sc_saved[s] = inc.get("commentaire", "")
+
+    def _prefill(salle: str) -> str:
+        # Priority 1: already saved comment for this section
+        if sc_saved.get(salle):
+            return sc_saved[salle]
+        # Priority 2: auto-label from sans_ventes incident
+        if salle in sv_map:
+            sd = sv_map[salle]
+            if sd:
+                try:
+                    sd_date = datetime.datetime.strptime(sd.split(" ")[0], "%d/%m/%Y").date()
+                    return f"Sans ventes depuis {(today - sd_date).days} j"
+                except Exception:
+                    pass
+            return "Sans ventes"
+        # Priority 3: existing no_audit comment
+        if na_map.get(salle):
+            return na_map[salle]
+        return ""
+
+    def _tag(salle: str) -> str:
+        if salle in sv_map:
+            return "🔴 Sans ventes"
+        if salle in na_map:
+            return "🟡 No audit"
+        return ""
+
+    # ── Session-state working df (preserves edits across reruns) ────────────
+    ascending      = "Moins" in sort_desc
+    sc_working_key = "sc_working_df"
+    sc_version_key = "sc_version"
+    sc_sort_key    = "sc_last_sort"
+
+    if sc_working_key not in st.session_state:
+        base = df_sc.copy()
+        base["Tag"]         = base["Salle"].apply(_tag)
+        base["Commentaire"] = base["Salle"].apply(_prefill)
+        base = base.sort_values(
+            "Jours sans chargement", ascending=ascending, na_position="last"
+        ).reset_index(drop=True)
+        st.session_state[sc_working_key] = base
+        st.session_state[sc_version_key] = 0
+        st.session_state[sc_sort_key]    = ascending
+    elif st.session_state.get(sc_sort_key) != ascending:
+        # Re-sort in-place, preserving any edited comments
+        wdf = st.session_state[sc_working_key].sort_values(
+            "Jours sans chargement", ascending=ascending, na_position="last"
+        ).reset_index(drop=True)
+        st.session_state[sc_working_key] = wdf
+        st.session_state[sc_version_key] = st.session_state.get(sc_version_key, 0) + 1
+        st.session_state[sc_sort_key]    = ascending
+
+    working_df = st.session_state[sc_working_key]
+
+    st.caption(
+        f"**{len(working_df)}** salle(s) sans chargement depuis > **{seuil_used}** jours"
+    )
+
+    # ── Data editor ──────────────────────────────────────────────────────────
+    col_order = [
+        "Tag", "Salle", "Code machine", "Réappro",
+        "Dernier chargement", "Jours sans chargement", "Dernière vente", "Commentaire",
+    ]
+    col_order = [c for c in col_order if c in working_df.columns]
+
+    col_cfg: dict = {
+        c: st.column_config.Column(disabled=True)
+        for c in col_order if c != "Commentaire"
+    }
+    col_cfg["Tag"] = st.column_config.TextColumn("Tag", disabled=True, width="small")
+    col_cfg["Jours sans chargement"] = st.column_config.NumberColumn(
+        "Jours sans chargement", format="%d j", disabled=True
+    )
+    col_cfg["Commentaire"] = st.column_config.TextColumn(
+        "Commentaire", help="Saisissez une note (sauvegardée en base)", max_chars=300
+    )
+
+    edited_df = st.data_editor(
+        working_df[col_order],
+        use_container_width=True,
+        hide_index=True,
+        height=min(700, 38 + len(working_df) * 35),
+        column_config=col_cfg,
+        key=f"sc_editor_{st.session_state[sc_version_key]}",
+    )
+
+    # ── Actions: save + export ───────────────────────────────────────────────
+    col_save, col_dl, _ = st.columns([1.5, 2, 3.5])
+
+    with col_save:
+        if st.button("💾 Sauvegarder", key="sc_save", use_container_width=True):
+            from mongo_storage import _get_client as _get_mc
+            try:
+                client  = _get_mc()
+                db_name = st.secrets["mongo"]["db_name"]
+                col_db  = client[db_name]["incidents"]
+                now     = datetime.datetime.utcnow()
+                saved_n = 0
+                for _, row in edited_df.iterrows():
+                    commentaire = (row.get("Commentaire") or "").strip()
+                    salle       = row["Salle"]
+                    since_date  = str(row.get("Dernier chargement", ""))
+                    if not commentaire:
+                        continue
+                    existing = col_db.find_one(
+                        {"salle": salle, "type": "sans_chargement", "status": "actif"}
+                    )
+                    if existing:
+                        col_db.update_one(
+                            {"_id": existing["_id"]},
+                            {"$set": {"commentaire": commentaire, "since_date": since_date}},
+                        )
+                    else:
+                        col_db.insert_one({
+                            "salle":       salle,
+                            "type":        "sans_chargement",
+                            "commentaire": commentaire,
+                            "since_date":  since_date,
+                            "created_at":  now,
+                            "resolved_at": None,
+                            "status":      "actif",
+                        })
+                    saved_n += 1
+                st.session_state[sc_working_key] = edited_df.copy()
+                st.toast(f"✅ {saved_n} commentaire(s) sauvegardé(s).")
+            except Exception as e:
+                st.error(f"❌ Erreur MongoDB : {e}")
+
+    with col_dl:
+        st.download_button(
+            "📥 Exporter Excel (par zone)",
+            data=_build_sc_excel_by_zone(edited_df),
+            file_name=f"machines_sans_chargement_{datetime.date.today():%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="sc_dl",
+            use_container_width=True,
+        )
+
 
 # Logo — ligne dédiée, aligné à gauche
 _logo_path = "assets/logo.png"
@@ -577,6 +1163,7 @@ elif st.session_state.page == "suivi":
         st.rerun()  # Force re-render : Export Excel voit maintenant st.session_state.results
 
     if not st.session_state.results:
+        _render_machines_sans_chargement(plannings)
         st.stop()
 
     results = st.session_state.results
@@ -674,7 +1261,6 @@ elif st.session_state.page == "suivi":
                 nb = len(salles_nf)
                 with st.expander(
                     f"👤 {reappro} — {nb} salle{'s' if nb > 1 else ''} non faite{'s' if nb > 1 else ''}",
-                    key=f"exp_nf__{reappro}",
                 ):
                     hdr_salle, hdr_machine, hdr_justif = st.columns([3, 1, 4])
                     hdr_salle.markdown("**Client / Salle**")
@@ -835,6 +1421,8 @@ elif st.session_state.page == "suivi":
                     use_container_width=True, hide_index=True,
                     height=min(700, 38 + len(df_d) * 35),
                 )
+
+    _render_machines_sans_chargement(plannings)
 
 
 

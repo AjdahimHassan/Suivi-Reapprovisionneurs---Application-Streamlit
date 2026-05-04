@@ -2082,7 +2082,9 @@ def _build_hebdo_mail(
     return "\n".join(lines)
 
 
-def _render_hebdo_vehicle_editor(vehicle_sheets: list[str], vehicles_db: dict) -> dict:
+def _render_hebdo_vehicle_editor(
+    vehicle_sheets: list[str], vehicles_db: dict, key_prefix: str = "hebdo"
+) -> dict:
     """
     Affiche une section éditable des informations conducteurs/zones.
     Retourne le vehicles_db mis à jour après une éventuelle sauvegarde.
@@ -2094,9 +2096,9 @@ def _render_hebdo_vehicle_editor(vehicle_sheets: list[str], vehicles_db: dict) -
         guide_file = st.file_uploader(
             "Fichier guide plaques (.xlsx)",
             type=["xls", "xlsx"],
-            key="hebdo_guide_uploader",
+            key=f"{key_prefix}_guide_uploader",
         )
-        if guide_file and st.button("⬇️ Importer", key="hebdo_guide_import"):
+        if guide_file and st.button("⬇️ Importer", key=f"{key_prefix}_guide_import"):
             try:
                 df_guide = pd.read_excel(guide_file)
                 df_guide.columns = [c.strip() for c in df_guide.columns]
@@ -2168,10 +2170,10 @@ def _render_hebdo_vehicle_editor(vehicle_sheets: list[str], vehicles_db: dict) -
             },
             hide_index=True,
             use_container_width=True,
-            key="hebdo_veh_editor",
+            key=f"{key_prefix}_veh_editor",
         )
 
-        if st.button("💾 Sauvegarder les modifications", type="primary", key="hebdo_veh_save"):
+        if st.button("💾 Sauvegarder les modifications", type="primary", key=f"{key_prefix}_veh_save"):
             for _, row in edited_df.iterrows():
                 upsert_quartix_vehicle_info(
                     plate=str(row["Plaque"]),
@@ -2464,6 +2466,362 @@ def _render_tab_hebdo() -> None:
                      value=st.session_state["hebdo_mail_text"], height=440, key="hebdo_mail_area")
 
 
+def _build_mensuel_excel_par_zone(
+    date_min,
+    date_max,
+    cutoff,
+    late_trips: dict,
+    vehicles_db: dict,
+    mode: str = "par_zone",
+) -> bytes:
+    """Génère un Excel mensuel : une feuille par zone (mode='par_zone') ou une seule feuille (mode='simple')."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    HDR_FILL   = PatternFill("solid", fgColor="1B3D6F")
+    HDR_FONT   = Font(color="FFFFFF", bold=True, size=11)
+    WARN_FILL  = PatternFill("solid", fgColor="FDECEA")
+    OK_FILL    = PatternFill("solid", fgColor="E8F5E9")
+    TITLE_FONT = Font(bold=True, size=13, color="1B3D6F")
+    THIN       = Side(style="thin", color="CCCCCC")
+    BORDER     = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CENTER     = Alignment(horizontal="center", vertical="center")
+    WRAP       = Alignment(wrap_text=True, vertical="center")
+
+    HEADERS = ["Réappro", "Plaque", "Date", "Jour", "Heure départ", "Heure arrivée",
+               "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
+    NCOLS   = len(HEADERS)
+
+    def _style_header_row(ws, row_idx: int) -> None:
+        for c in range(1, NCOLS + 1):
+            cell = ws.cell(row=row_idx, column=c)
+            cell.fill = HDR_FILL
+            cell.font = HDR_FONT
+            cell.alignment = CENTER
+            cell.border = BORDER
+
+    def _auto_width(ws) -> None:
+        for col in ws.columns:
+            max_len = max((len(str(c.value or "")) for c in col), default=8)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 48)
+
+    def _write_trip_row(ws, row_idx: int, plate: str, t: dict) -> None:
+        prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+        vals = [
+            prenom, plate,
+            t["date"].strftime("%d/%m/%Y"), t["jour"],
+            t["heure_dep"], t["heure_arr"],
+            t["lieu_dep"], t["lieu_arr"],
+            t["distance_km"],
+        ]
+        for ci, val in enumerate(vals, 1):
+            c = ws.cell(row=row_idx, column=ci, value=val)
+            c.fill = WARN_FILL
+            c.border = BORDER
+            c.alignment = CENTER if ci not in (7, 8) else WRAP
+
+    period_str = (
+        f"Période : {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}"
+        f" | Heure limite : {cutoff.strftime('%H:%M')}"
+    )
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    if mode == "simple":
+        ws = wb.create_sheet("Trajets hors horaires")
+        ws["A1"] = "Rapport Mensuel QUARTIX — Trajets hors horaires"
+        ws["A1"].font = TITLE_FONT
+        ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+        ws["A1"].alignment = CENTER
+        ws["A2"] = period_str
+        ws["A2"].font = Font(italic=True, size=10)
+        ws.merge_cells(f"A2:{get_column_letter(NCOLS)}2")
+        for ci, h in enumerate(HEADERS, 1):
+            ws.cell(row=4, column=ci, value=h)
+        _style_header_row(ws, 4)
+        row = 5
+        for plate, trips in sorted(late_trips.items()):
+            for t in trips:
+                _write_trip_row(ws, row, plate, t)
+                row += 1
+        if row == 5:
+            ws.cell(row=5, column=1, value="Aucun trajet hors horaires détecté")
+            ws.merge_cells(f"A5:{get_column_letter(NCOLS)}5")
+            ws["A5"].alignment = CENTER
+            ws["A5"].fill = OK_FILL
+        _auto_width(ws)
+    else:
+        zones: dict[str, list[str]] = {}
+        for plate in late_trips:
+            zone = vehicles_db.get(plate, {}).get("zone", "").strip() or "Sans zone"
+            zones.setdefault(zone, []).append(plate)
+
+        if not zones:
+            ws = wb.create_sheet("Aucune anomalie")
+            ws["A1"] = "Aucun trajet hors horaires détecté sur cette période."
+            ws["A1"].font = Font(italic=True, size=12)
+            ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+            ws["A1"].alignment = CENTER
+            ws["A1"].fill = OK_FILL
+        else:
+            for zone_name in sorted(zones.keys()):
+                sheet_name = zone_name[:31]
+                ws = wb.create_sheet(title=sheet_name)
+
+                ws["A1"] = f"Zone : {zone_name}"
+                ws["A1"].font = TITLE_FONT
+                ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+                ws["A1"].alignment = CENTER
+
+                ws["A2"] = period_str
+                ws["A2"].font = Font(italic=True, size=10)
+                ws.merge_cells(f"A2:{get_column_letter(NCOLS)}2")
+
+                for ci, h in enumerate(HEADERS, 1):
+                    ws.cell(row=4, column=ci, value=h)
+                _style_header_row(ws, 4)
+
+                row = 5
+                for plate in sorted(zones[zone_name]):
+                    for t in late_trips[plate]:
+                        _write_trip_row(ws, row, plate, t)
+                        row += 1
+
+                if row == 5:
+                    ws.cell(row=5, column=1, value="Aucun trajet hors horaires pour cette zone")
+                    ws.merge_cells(f"A5:{get_column_letter(NCOLS)}5")
+                    ws["A5"].alignment = CENTER
+                    ws["A5"].fill = OK_FILL
+
+                _auto_width(ws)
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _render_tab_mensuel() -> None:
+    from datetime import time as _dtime
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,{C_BLUE_DARK},{C_BLUE_LIGHT});"
+        f"padding:16px 20px;border-radius:10px;margin-bottom:20px'>"
+        f"<span style='color:white;font-size:17px;font-weight:700'>📆 Analyse Mensuelle</span>"
+        f"<p style='color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px'>"
+        f"Importez un rapport Quartix d'un mois complet pour détecter les trajets hors horaires "
+        f"et exporter un fichier Excel organisé par zone géographique.</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 1. Upload ──────────────────────────────────────────
+    col_up, _ = st.columns([2, 3])
+    with col_up:
+        uploaded = st.file_uploader(
+            "📂 Importer un rapport Quartix (mois complet)",
+            type=["xls", "xlsx"],
+            key="quartix_mensuel_uploader",
+        )
+
+    current_file_id = uploaded.name if uploaded else None
+    if current_file_id != st.session_state.get("mensuel_last_file_id"):
+        st.session_state["mensuel_last_file_id"] = current_file_id
+
+    if not uploaded:
+        st.markdown(
+            f"<div style='background:#f0f4fa;border-left:5px solid {C_BLUE_DARK};"
+            f"padding:16px 20px;border-radius:8px;margin-top:20px'>"
+            f"<b style='color:{C_BLUE_DARK}'>👆 Importez un fichier Excel QUARTIX (mois complet)</b>"
+            f"<p style='margin:6px 0 0;color:#555;font-size:14px'>"
+            f"Format standard QUARTIX multi-feuilles : feuille résumé + une feuille par véhicule. "
+            f"Couvre idéalement un mois calendaire complet.</p></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    try:
+        xls = pd.ExcelFile(uploaded)
+    except Exception as e:
+        st.error(f"Impossible de lire le fichier : {e}")
+        return
+
+    sheets = xls.sheet_names
+    if len(sheets) <= 1:
+        st.error("Fichier invalide : au moins 2 feuilles attendues (résumé + 1 feuille par véhicule).")
+        return
+
+    vehicle_sheets = sheets[1:]
+
+    # ── 2. Parsing de tous les véhicules ──────────────────
+    all_dfs: dict[str, pd.DataFrame] = {}
+    parse_errors: list[str] = []
+    for sheet in vehicle_sheets:
+        try:
+            df_raw = pd.read_excel(xls, sheet_name=sheet, header=4, usecols="B:N")
+            df_raw.columns = COLS
+            df_raw["_dep"] = pd.to_datetime(
+                df_raw["Départ"].astype(str).str.replace(r'\s+[A-Z]{2,5}$', '', regex=True),
+                errors="coerce",
+            )
+            df_raw["_arr"] = pd.to_datetime(
+                df_raw["Arrivée"].astype(str).str.replace(r'\s+[A-Z]{2,5}$', '', regex=True),
+                errors="coerce",
+            )
+            df_raw = df_raw.dropna(subset=["_dep"]).sort_values("_dep").reset_index(drop=True)
+            for col in ["Lieu de départ", "Lieu d'arrivée"]:
+                df_raw[col] = df_raw[col].astype(str).map(_clean_addr)
+            if not df_raw.empty:
+                all_dfs[sheet] = df_raw
+        except Exception as e:
+            parse_errors.append(f"{sheet} : {e}")
+
+    if parse_errors:
+        st.warning("Erreurs de lecture pour certaines feuilles : " + " | ".join(parse_errors))
+
+    if not all_dfs:
+        st.error("Aucune donnée valide trouvée dans le fichier.")
+        return
+
+    all_dep_series = pd.concat([df["_dep"] for df in all_dfs.values()])
+    date_min = all_dep_series.dt.date.min()
+    date_max = all_dep_series.dt.date.max()
+
+    # ── 3. Chargement BDD véhicules + éditeur ─────────────
+    try:
+        vehicles_db = load_all_quartix_vehicles()
+    except Exception:
+        vehicles_db = {}
+
+    vehicles_db = _render_hebdo_vehicle_editor(vehicle_sheets, vehicles_db, key_prefix="mensuel")
+
+    # ── 4. Paramètres analyse ─────────────────────────────
+    st.divider()
+    col_cut, col_info = st.columns([2, 3])
+    with col_cut:
+        cutoff = st.time_input(
+            "🕐 Heure limite de fin de tournée",
+            value=_dtime(18, 0),
+            key="mensuel_cutoff",
+            help="Tout trajet ≥ 1 km dont le départ ou l'arrivée dépasse cette heure sera signalé.",
+        )
+    with col_info:
+        nb_veh     = len(all_dfs)
+        nb_trajets = sum(len(df) for df in all_dfs.values())
+        st.markdown(
+            f"<div style='background:#f0f4fa;border-radius:8px;padding:10px 14px;"
+            f"margin-top:24px;font-size:13px;color:{C_BLUE_DARK}'>"
+            f"<b>Période :</b> {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}"
+            f"&nbsp;|&nbsp; <b>Véhicules :</b> {nb_veh}"
+            f"&nbsp;|&nbsp; <b>Trajets :</b> {nb_trajets}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── 5. Analyse hors horaires ──────────────────────────
+    late_trips: dict[str, list] = {}
+
+    for plate, df in all_dfs.items():
+        weekday_df = df[(df["_dep"].dt.weekday < 5) &
+                        (df["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM)].copy()
+        mask_late = weekday_df["_dep"].dt.time > cutoff
+        mask_arr  = weekday_df["_arr"].notna() & (weekday_df["_arr"].dt.time > cutoff)
+        late_df   = weekday_df[mask_late | mask_arr]
+        if not late_df.empty:
+            late_trips[plate] = [
+                {
+                    "date":        row["_dep"].date(),
+                    "jour":        _JOURS_FR[row["_dep"].weekday()],
+                    "heure_dep":   row["_dep"].strftime("%H:%M"),
+                    "heure_arr":   row["_arr"].strftime("%H:%M") if pd.notna(row["_arr"]) else "—",
+                    "lieu_dep":    str(row["Lieu de départ"]),
+                    "lieu_arr":    str(row["Lieu d'arrivée"]),
+                    "distance_km": _to_km(row["Distance totale"]),
+                }
+                for _, row in late_df.iterrows()
+            ]
+
+    # ── 6. Résultats ──────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔍 Résultats de l'analyse mensuelle")
+
+    if not late_trips:
+        st.success("✅ Aucun trajet hors horaires détecté sur l'ensemble du mois.")
+    else:
+        nb_total = sum(len(v) for v in late_trips.values())
+        st.info(
+            f"**{len(late_trips)} véhicule(s)** concernés — "
+            f"**{nb_total} trajet(s)** hors horaires détectés."
+        )
+
+        zones_map: dict[str, list[str]] = {}
+        for plate in late_trips:
+            zone = vehicles_db.get(plate, {}).get("zone", "").strip() or "Sans zone"
+            zones_map.setdefault(zone, []).append(plate)
+
+        for zone_name in sorted(zones_map.keys()):
+            st.markdown(f"#### 🗺️ Zone : {zone_name}")
+            for plate in sorted(zones_map[zone_name]):
+                prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+                label  = (
+                    f"🚗 {plate}" + (f"  —  {prenom}" if prenom else "")
+                    + f"  ⚠️ ({len(late_trips[plate])} trajet(s))"
+                )
+                with st.expander(label, expanded=False):
+                    rows = [
+                        {
+                            "Date":           t["date"].strftime("%d/%m/%Y"),
+                            "Jour":           t["jour"],
+                            "Heure départ":   t["heure_dep"],
+                            "Heure arrivée":  t["heure_arr"],
+                            "Lieu de départ": t["lieu_dep"],
+                            "Lieu d'arrivée": t["lieu_arr"],
+                            "Distance (km)":  t["distance_km"],
+                        }
+                        for t in late_trips[plate]
+                    ]
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # ── 7. Export Excel ───────────────────────────────────
+    st.divider()
+    st.markdown("### 📊 Export Excel mensuel")
+
+    col_mode, col_dl = st.columns([2, 3])
+    with col_mode:
+        export_mode = st.radio(
+            "Format d'export",
+            options=["Par zone (une feuille par zone)", "Simple (toutes zones confondues)"],
+            key="mensuel_export_mode",
+            horizontal=False,
+        )
+    mode_key = "par_zone" if export_mode.startswith("Par") else "simple"
+
+    excel_bytes = _build_mensuel_excel_par_zone(
+        date_min    = date_min,
+        date_max    = date_max,
+        cutoff      = cutoff,
+        late_trips  = late_trips,
+        vehicles_db = vehicles_db,
+        mode        = mode_key,
+    )
+    fname = (
+        f"rapport_mensuel_quartix_"
+        f"{date_min.strftime('%Y%m%d')}_{date_max.strftime('%Y%m%d')}.xlsx"
+    )
+    with col_dl:
+        st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
+        st.download_button(
+            label            = "⬇️ Télécharger le rapport Excel mensuel",
+            data             = excel_bytes,
+            file_name        = fname,
+            mime             = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type             = "primary",
+            key              = "mensuel_dl_excel",
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 # ── Point d'entrée de la page ─────────────────────────────────────────────────
 
 def render() -> None:
@@ -2480,4 +2838,8 @@ def render() -> None:
         _render_tab_passages()
 
     with tab_hebdo:
-        _render_tab_hebdo()
+        subtab_h, subtab_m = st.tabs(["📅 Hebdomadaire", "📆 Mensuel"])
+        with subtab_h:
+            _render_tab_hebdo()
+        with subtab_m:
+            _render_tab_mensuel()
