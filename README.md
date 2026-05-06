@@ -1,508 +1,595 @@
-# 📦 Distriprot Data — Application Streamlit
+# Distriprot Data — Outil Réappro
 
-Application web de gestion opérationnelle pour les équipes de réapprovisionnement de distributeurs automatiques.
-Développée avec **Streamlit**, connectée à **MongoDB Atlas** pour le stockage des données.
-
----
-
-## 🗺️ Pages de l'application
-
-L'application est composée de **10 modules** accessibles depuis la barre de navigation en haut de page.
-
-| # | Page | Icône | Description |
-|---|------|-------|-------------|
-| 1 | Machines | 🖥️ | Visualisation et gestion du parc de distributeurs en exploitation |
-| 2 | Tournées | 📦 | Analyse quotidienne des passages en salle (croisement planning × chargement) |
-| 3 | No Audit / Ventes | 📉 | Détection des salles sans audit ou sans ventes depuis X jours |
-| 4 | Planogrammes | 🗂️ | Gestion visuelle des plans de remplissage des machines |
-| 5 | Inventaires | 📊 | Contrôle des inventaires machines par réappro avec seuils par type |
-| 6 | Commandes | 🛒 | Extraction commandes depuis screenshot mail (Gemini) + injection Excel |
-| 7 | Indéfinis & Prix | ❓ | Détection lignes INDÉFINI + contrôle des prix de vente HT par machine |
-| 8 | CR | 📝 | Génération des comptes rendus hebdomadaires par zone géographique |
-| 9 | Quartix | 🗺️ | Visualisation des trajets réappros sur carte (Folium + QUARTIX) |
-| 10 | Picklist | 📋 | Comparaison picklist prévue vs chargement réel machine |
+Application Streamlit de suivi des réapprovisionneurs, gestion des planogrammes et analyse des tournées de machines à vending.
 
 ---
 
-## 📋 Détail des fonctionnalités
+## Table des matières
 
-### 🖥️ Machines
-
-Visualisation et gestion du parc de distributeurs automatiques.
-
-- Import du parc depuis un export CSV (écrase les données précédentes)
-- Stockage dans MongoDB (collection `machines`)
-- KPIs : nb machines, nb villes, nb approvisionneurs
-- Filtres par approvisionneur, ville, modèle + barre de recherche
-- Résumé d'import : nouvelles machines, supprimées, conservées
-- Données réutilisées par No Audit, Inventaires, CR
-
----
-
-### 📦 Tournées (Suivi Réapprovisionneurs)
-
-Module principal de suivi quotidien. Croise le planning de chaque réappro avec le fichier de chargement machine du jour.
-
-- ✅ **Salles faites** : passages validés (`Statut = "Fait"` ET `Val. Ref ≠ 0`)
-- ❌ **Salles non faites** : salles prévues mais non effectuées
-- 🔄 **Jokers** : détecte quand un réappro a fait la salle d'un collègue
-- 📅 **Tournées décalées** : réappro ayant effectué sa tournée un autre jour que prévu
-- 📊 **Export Excel** : fichier complet (récap global, non faites, jokers, décalées, détail par réappro)
-- ⚙️ **Gestion des plannings depuis l'UI** :
-  - 📥 Import / mise à jour de plannings CSV directement dans l'app
-  - 🗑️ Suppression de plannings directement dans l'app
+1. [Présentation générale](#présentation-générale)
+2. [Prérequis & lancement](#prérequis--lancement)
+3. [Structure de la base de données (MongoDB)](#structure-de-la-base-de-données-mongodb)
+4. [Onglets — guide d'utilisation](#onglets--guide-dutilisation)
+   - [Machines](#1--machines)
+   - [Tournées (Suivi)](#2--tournées-suivi)
+   - [No Audit / Sans Ventes](#3--no-audit--sans-ventes)
+   - [Planogrammes](#4--planogrammes)
+   - [Inventaires](#5--inventaires)
+   - [Commandes](#6--commandes)
+   - [Indéfinis](#7--indéfinis)
+   - [CR Hebdomadaire](#8--cr-hebdomadaire)
+   - [Quartix](#9--quartix)
+   - [Picklist](#10--picklist)
+   - [Rapport Employé](#11--rapport-employé)
+5. [Ce qui impacte quoi — dépendances entre onglets](#ce-qui-impacte-quoi--dépendances-entre-onglets)
 
 ---
 
-### 📉 No Audit / Ventes
+## Présentation générale
 
-Analyse de la télémétrie pour détecter les machines inactives.
+L'application centralise quatre grandes fonctions :
 
-- **Onglet No Audit** : salles absentes de la télémétrie depuis J-1 ou plus
-- **Onglet Sans Ventes** : salles auditées mais sans ventes (Price = 0, ou ≤ 1,99 € si option activée)
-- Commentaires persistants par salle (MongoDB collection `incidents`)
-- Auto-résolution des incidents quand la salle disparaît de la liste
-- Export Excel (deux feuilles : No Audit + Sans Ventes)
-- Historique des problèmes résolus
-
----
-
-### 🗂️ Planogrammes
-
-Gestionnaire visuel des plans de remplissage des machines.
-
-- Création, modification, duplication et suppression de planogrammes
-- Éditeur de grille visuel (slots, produits, couleurs, capacités)
-- Bibliothèque de produits partagée : CRUD complet, champs prix achat HT + TVA
-- Calcul automatique de la valeur totale du planogramme
-- Export PDF (orientation paysage, taille police adaptative jusqu'à 4pt)
-- Import/Export Excel (conservation du format)
-- Stockage MongoDB (collections `planogrammes` et `produits_lib`)
+| Domaine | Ce que ça couvre |
+|---------|-----------------|
+| **Suivi tournées** | Comparer le planning hebdomadaire prévu avec les chargements réels réalisés chaque jour |
+| **Qualité réseau** | Détecter les salles sans audits télémétriques, sans ventes, sans chargement prolongé |
+| **Planogrammes** | Créer, éditer, importer (PDF) et exporter les planogrammes produits des machines |
+| **Reporting** | Générer des rapports Excel/PDF par zone, par employé, par semaine |
 
 ---
 
-### 📊 Inventaires
+## Prérequis & lancement
 
-Analyse des inventaires machines uploadés au format CSV.
-
-- Détection automatique du type de machine :
-  - BF Simple / **BF Double** (détecté par présence de Volvic : VOLVICEXOTIC50CL / VOLVICFRAISE50CL)
-  - FP IDF / FP Province / WUF / Autre
-
-- Comparaison du montant HT inventorié aux seuils par type :
-
-  | Type machine | Min | Max |
-  |---|---|---|
-  | BF Simple | 380 € | 480 € |
-  | BF Double | 700 € | 957,50 € |
-  | FP IDF | 300 € | 409 € |
-  | FP Province | 300 € | 412 € |
-  | WUF / Autre | 280 € | 400 € |
-
-- Statuts : 🟢 OK / 🔴 Mal fait (< min) / 🟠 Au-dessus du max
-- Croisement avec planning MongoDB pour détecter les jokers d'inventaire
-- Détail des produits manquants (quantité = 0) par machine
-
----
-
-### 🛒 Commandes
-
-Suivi des commandes fournisseurs par extraction automatique depuis un screenshot de mail.
-
-- Upload d'une image ou saisie de texte de mail de commande
-- Extraction des quantités via l'**API Gemini** (vision)
-- 5 fournisseurs supportés : **LIDIS**, **HIPRO**, **HEROIC**, **NXT LEVEL**, **NUTRAMINO**
-- Correction manuelle avant injection (ajout/suppression de lignes)
-- Injection dans le fichier Excel de suivi stocké dans MongoDB (`suivi_excel`)
-- Gestion des formules et colonnes spécifiques par fournisseur
-- **Mode Contrôle** : comparaison facture PDF vs marchandises reçues CSV
-
----
-
-### ❓ Indéfinis & Contrôle des prix
-
-Module double pour diagnostiquer les problèmes de paramétrage machine et de tarification.
-
-#### Onglet 1 — Indéfinis
-
-Identification des spirales mal associées qui génèrent des ventes INDÉFINI.
-
-- Upload du fichier de ventes machine (export audit CSV) et du planogramme (CSV configuration)
-- Détection automatique de toutes les lignes `CODE_PRODUIT = INDÉFINI`
-- Pour chaque prix INDÉFINI : recherche dans le planogramme des produits au même prix sans vente (suspects) et avec vente (références)
-- 🔴 Suspects = spirales mal paramétées à corriger / 🟢 Références = paramétrage correct
-
-#### Onglet 2 — Contrôle des prix HT
-
-Vérification systématique des prix de vente réels contre les prix de référence bibliothèque.
-
-**Analyse ERP :**
-- Import du fichier Audit Télémétrie (CSV séparé par `;`)
-- Calcul du prix unitaire réel : `PU_HT = Montant HT ÷ Quantité`
-- Comparaison aux prix HT de la bibliothèque produits (tolérance ±0,05 €)
-- Gestion multi-prix : un produit peut avoir plusieurs prix valides (ex : Red Bull 2,84 € ou 3,03 € HT selon type de machine)
-- Détection des lignes `INDÉFINI` dans l'ERP comme anomalies à part entière
-- Exclusion automatique des salles déjà validées comme traitées
-
-**KPIs :** lignes analysées, % conformes, nb anomalies, salles concernées, codes non référencés
-
-**Coloration des écarts :**
-
-| Couleur | Écart |
-|---------|-------|
-| 🔴 Rouge | ≥ 0,50 € |
-| 🟠 Orange | ≥ 0,20 € |
-| 🟡 Jaune | < 0,20 € |
-
-**Export par réappro :** génère un Excel (feuille résumé + une feuille par réappro) depuis le planning MongoDB
-
-**Détail par machine :**
-- 🔍 Barre de recherche par code machine ou nom de réappro
-- 📂 Import du fichier de ventes machine (CSV audit IUC180) par machine
-- Tableau avec surlignage :
-  - 🔴 Rouge : prix incorrect ou produit INDÉFINI
-  - 🟡 Jaune : LDP (Ligne De Prix) en doublon sur la machine
-- 4ème colonne **"Prix attendu (TTC)"** tenant compte du type de machine :
-  - Machine `BF...` → prix TTC le plus bas de la bibliothèque
-  - Machine `FP...` → prix TTC le plus haut de la bibliothèque
-- Résumé textuel des anomalies : erreurs de prix, INDÉFINI, doublons LDP
-- Export **Excel** et **PNG** par machine (mise en forme identique au tableau)
-- Bouton **✅ Marquer comme traité** : valide la salle en base de données (MongoDB)
-
-**Onglet Salles traitées :**
-- Liste toutes les salles validées avec date, résumé des erreurs et détail des anomalies
-- Bouton **↩️ Dévalider** pour remettre une salle dans l'analyse
-- Les salles traitées n'apparaissent plus dans les nouvelles analyses ERP
-
----
-
-### 📝 CR — Compte Rendu Hebdomadaire
-
-Génération automatique des emails de compte rendu par zone géographique.
-
-- Sources : collections MongoDB `reappros` (zones ↔ réappros), `machines` (parc), `incidents` (problèmes actifs)
-- Zones : IDF, OUEST, NORD ET CENTRE, SUD OUEST, SUD EST, EST
-- Sections customisables : Livraisons/Fournisseurs, Tournées, Inventaire
-- KPI par zone : nb incidents actifs, nb salles concernées
-
----
-
-### 🗺️ Quartix
-
-Visualisation des trajets journaliers des réappros depuis les données QUARTIX.
-
-- Import du fichier Excel QUARTIX (multi-feuilles, multi-véhicules)
-- Sélecteur véhicule + journée
-- **Carte Folium interactive** : tracé complet du trajet + cercles proportionnels aux durées d'arrêt
-- Géocodage Nominatim avec cache MongoDB (`quartix_geocode_cache`)
-- Enrichissement OSRM pour tracé précis des routes (`quartix_routes_cache`)
-- KPIs : distance minimale dépôt avant 11h et après 18h, passages dépôt
-- Persistance employé ↔ véhicule (collection `quartix_vehicles`)
-
----
-
-### 📋 Picklist
-
-Comparaison de la picklist prévisionnelle avec le chargement réel machine.
-
-- Import picklist CSV et fichier chargement ERP (CSV `;`)
-- Croisement ligne par ligne par (machine × produit)
-- Statuts : ✅ Conforme / ❌ Non chargé / ⚠️ Insuffisant / 🔄 Surplus / ℹ️ Non prévu
-- Résumé global : taux de conformité, nb écarts
-- Détail par machine et par réappro (expandeurs)
-- Export Excel avec mise en forme couleur
-
----
-
-## 🏗️ Architecture
-
-```
-PC Local                    GitHub                  Streamlit Cloud
-─────────                   ──────                  ───────────────
-plannings/ (CSV)            code source      →      app déployée
-     │                      (sans secrets)          (lit MongoDB)
-     │ import_plannings_mongo.py
-     │                                              ┌─ Importer planning CSV
-     │                                              │  (expander "📥 Mettre à jour")
-     ▼                                              └─ Supprimer un planning
-MongoDB Atlas                          ◄────────────   (expander "🗑️ Supprimer")
-(toutes les collections)
-```
-
-- Les **plannings** peuvent être importés depuis le PC (script) **ou depuis l'app** (expander dédié)
-- Le **code** est sur GitHub, déployé automatiquement sur Streamlit Cloud à chaque push
-- Les **données** sont dans MongoDB Atlas (collections listées ci-dessous)
-- Les **fichiers de chargement, audit et inventaires** sont uploadés directement dans l'app
-
----
-
-## 📁 Structure du projet
-
-```
-├── app.py                      # Application principale — navigation et routing
-├── page_machines.py            # Module Machines (parc de distributeurs)
-├── page_no_audit.py            # Module No Audit / Sans Ventes
-├── page_planogrammes.py        # Module Planogrammes (UI complète)
-├── page_inventaires.py         # Module Inventaires
-├── page_commandes.py           # Module Commandes (extraction Gemini + Excel)
-├── page_indefinis.py           # Module Indéfinis + Contrôle des prix
-├── page_cr.py                  # Module Compte Rendu hebdomadaire
-├── page_quartix.py             # Module Trajets QUARTIX (carte Folium)
-├── page_picklist.py            # Module Picklist vs Chargement
-├── page_controle_reception.py  # Module Contrôle réception (factures fournisseurs)
-├── planogrammes_storage.py     # Accès MongoDB pour planogrammes et produits_lib
-├── planning_parser.py          # Parsing des fichiers CSV planning
-├── chargement_parser.py        # Parsing du fichier de chargement + tournées décalées
-├── mongo_storage.py            # MongoDB : plannings, salles traitées, caches Quartix
-├── excel_export.py             # Génération du fichier Excel coloré (Tournées)
-├── import_plannings_mongo.py   # Script one-shot d'import CSV → MongoDB (local)
-├── requirements.txt            # Dépendances Python
-├── .gitignore                  # Exclut secrets.toml et __pycache__
-├── .streamlit/
-│   └── secrets.toml            # Secrets locaux (NON pushé sur GitHub)
-└── plannings/                  # Fichiers CSV des plannings (NON pushés sur GitHub)
-```
-
----
-
-## 🗄️ Structure MongoDB
-
-```
-Cluster   : Tournees
-Database  : suivi_reappro
-```
-
-| Collection | Contenu | Utilisée par |
-|---|---|---|
-| `plannings` | Un document par réappro avec planning semaine | Tournées, Inventaires |
-| `planogrammes` | Grilles de remplissage des machines | Planogrammes |
-| `produits_lib` | Bibliothèque de produits (codes, prix HT, TVA, prix TTC) | Planogrammes, Contrôle des prix |
-| `machines` | Parc de distributeurs EN EXPLOITATION | Machines, No Audit, CR |
-| `incidents` | Incidents No Audit / Sans Ventes (actif/résolu) | No Audit |
-| `reappros` | Répartition zones ↔ réappros | CR |
-| `suivi_excel` | Fichier Excel de suivi commandes | Commandes |
-| `salles_traitees` | Salles avec anomalies de prix corrigées et validées | Contrôle des prix |
-| `quartix_vehicles` | Liaison véhicule QUARTIX ↔ employé | Quartix |
-| `quartix_geocode_cache` | Cache des géocodages Nominatim | Quartix |
-| `quartix_routes_cache` | Cache des calculs d'itinéraire OSRM | Quartix |
-| `product_mappings` | Correspondances produits facture ↔ reçu | Contrôle réception |
-
-### Format d'un document planning
-```json
-{
-  "employe": "RIDF1",
-  "semaine": "S13",
-  "updated_at": "2026-03-27",
-  "planning": {
-    "Lundi":    [["FTPA61 - FP BRIE COMTE ROBERT", "3218M1"], "..."],
-    "Mardi":    [["BFP40 - BF CLICHY LA GARENNE", "1138M1"], "..."],
-    "Mercredi": ["..."],
-    "Jeudi":    ["..."],
-    "Vendredi": ["..."]
-  }
-}
-```
-
-### Format d'un document salle traitée
-```json
-{
-  "machine":         "1036M1",
-  "salle":           "BF LANGON",
-  "code_client":     "BFLGN01",
-  "statut":          "traité",
-  "raison":          "2 anomalie(s) de prix | 1 produit(s) INDÉFINI",
-  "anomalies":       [{"Code": "EVIAN50CL", "Prix attendu (HT)": 0.95, "Prix réel (HT)": 1.65, "Écart (€)": 0.7}],
-  "date_traitement": "2026-04-01"
-}
-```
-
----
-
-## 📂 Format des fichiers
-
-### Fichier CSV planning (un par réappro)
-```
-Client;Machine;S13 - L 23;Ma 24;Me 25;J 26;V 27;S 28;D 29;S14 - L 30;...
-FTPA61 - FP BRIE COMTE ROBERT;3218M1;1;;;;;;;1;;;;;;
-BFP155 - BF SERRIS;3236M1;2;;;;;;;2;;;;;;
-```
-
-### Fichier de chargement machine (Tournées)
-```
-Tiers;Date début;Statut;Employé;Machine;Commentaire;Val. Ref;...
-BF PONT SAINTE MARIE;13/03/2026 15:26;Fait;RCHAMPAGNE;2427M1;;115,52;...
-```
-Salle considérée **faite** si : `Statut = "Fait"` **ET** `Val. Ref ≠ 0`
-
-### Fichier ERP Audit Télémétrie (Contrôle des prix)
-```
-Type tâche;Code DA;Stock Destination;Nom client;Code produit;Libellé produit;Quantité;Montant HT;Date
-Audit Telemetrie;1036M1;BFLGN01;BF LANGON;EVIAN50CL;Evian 50cl;24;22,80;31/03/2026
-```
-PU_HT calculé = Montant HT ÷ Quantité
-
-### Fichier de ventes machine — Audit IUC180 (Contrôle des prix, par machine)
-```
-SOURCE AUDIT;CODE MACHINE;CODE CLIENT;MODELE MACHINE;CODE PRODUIT;PU;LDP;PAYMENT
-"Audit IUC180";"1036M1";"BF LANGON";"JOFEMAR VISION COMBO+";"EVIAN50CL";"1,99";"22";"CB"
-```
-
-### Fichier d'inventaire machine
-```
-Num Piece;Date;Stock Origine;Code client;Nom client;Ressource;Code produit;Libellé produit;Quantité;Montant HT
-INV-001;01/04/2026;STOCK;BF0001;BF LANGON;RCHAMPAGNE;EVIAN50CL;Evian 50cl;24;22,80
-```
-
----
-
-## 🔧 Installation locale
-
-### Prérequis
-- Python 3.11+
-- Un compte MongoDB Atlas avec le cluster `Tournees` configuré
-
-### 1. Cloner le repo
-```bash
-git clone git@github.com:AjdahimHassan/Suivi-Reapprovisionneurs---Application-Streamlit.git
-cd Suivi-Reapprovisionneurs---Application-Streamlit
-```
-
-### 2. Installer les dépendances
 ```bash
 pip install -r requirements.txt
-```
-
-### 3. Lancer l'application
-```bash
 streamlit run app.py
 ```
-L'application s'ouvre sur http://localhost:8501
+
+L'application nécessite une connexion **MongoDB Atlas** configurée dans les secrets Streamlit (`secrets.toml` ou variables d'environnement) :
+
+```toml
+[mongo]
+uri = "mongodb+srv://..."
+db_name = "nom_de_la_base"
+```
+
+Les appels de geocodage (Nominatim) et de routage (OSRM) se font en ligne, sans clé API, mais nécessitent un accès internet.
 
 ---
 
-## 🗄️ Gestion des plannings
+## Structure de la base de données (MongoDB)
 
-### ✅ Depuis l'application (recommandé)
+Toutes les données persistantes sont stockées dans **MongoDB Atlas**. Voici les collections utilisées et leur rôle.
 
-Dans la page **Tournées**, section **⚙️ Plannings chargés** :
+### `machines`
+Inventaire du parc de machines à vending.
 
-**Importer / mettre à jour un planning**
-1. Déplier **📥 Mettre à jour les plannings**
-2. Déposer un ou plusieurs fichiers `{réappro}.csv`
-3. Cliquer **📥 Importer** → upsert dans MongoDB
-4. La liste se rafraîchit automatiquement
+| Champ | Description |
+|-------|-------------|
+| `Code` | Identifiant unique de la machine (salle) |
+| `Client` | Nom du client / site |
+| `Ville` | Ville d'installation |
+| `Code postal` | Code postal |
+| `Modèle` | Modèle de la machine |
+| `Approvisionneur` | Code du réapprovisionneur assigné |
+| `Date d'install` | Date d'installation |
+| `Statut` | Actif / Inactif |
 
-**Supprimer un planning**
-1. Déplier **🗑️ Supprimer un planning**
-2. Sélectionner un ou plusieurs réappros
-3. Cliquer **🗑️ Supprimer (N)** → suppression de MongoDB
-
-### 🖥️ Depuis le terminal (méthode alternative)
-```bash
-python import_plannings_mongo.py
-```
-
----
-
-## ☁️ Déploiement sur Streamlit Cloud
-
-### 1. Pusher le code sur GitHub
-```bash
-git add .
-git commit -m "mise a jour"
-git push origin main
-```
-
-### 2. Autoriser Streamlit Cloud dans MongoDB Atlas
-1. Atlas → **Security** → **Network Access**
-2. **Add IP Address** → **Allow Access from Anywhere** (`0.0.0.0/0`)
-
-> ✅ Chaque `git push` redéploie automatiquement l'app. Les données MongoDB ne sont pas affectées.
+**Alimentée par** : onglet Machines (import CSV).
+**Lue par** : No Audit, Tournées, Quartix, CR, Rapport Employé.
 
 ---
 
-## 🎨 Code couleur
+### `plannings`
+Plannings hebdomadaires des réapprovisionneurs — quelle salle est prévue quel jour.
 
-| Couleur | Page | Signification |
-|---------|------|---------------|
-| 🟢 Vert | Tournées | Salle faite normalement |
-| 🔴 Rouge | Tournées / Prix | Salle non faite / Erreur de prix / INDÉFINI |
-| 🟠 Orange | Tournées / Prix | Joker — fait par un autre réappro / Écart ≥ 0,20 € |
-| 🟣 Violet | Tournées | Tournée décalée — faite un autre jour |
-| 🟡 Jaune | Prix | Doublon LDP / Écart < 0,20 € |
-| 🟢 Vert | Prix | Salle validée comme traitée |
+| Champ | Description |
+|-------|-------------|
+| `employe` | Code du réapprovisionneur |
+| `semaine` | Numéro de semaine ISO |
+| `planning` | Objet `{Lundi: [(client, machine)], Mardi: [...], ...}` |
+| `updated_at` | Horodatage de la dernière mise à jour |
 
----
-
-## 🔁 Workflows
-
-### Suivi réappros (chaque matin)
-```
-1. Ouvrir l'app → page "Tournées"
-2. Sélectionner le jour dans le sélecteur "Jour d'analyse"
-3. Uploader le fichier de chargement machine du jour (export CSV)
-4. Cliquer "Lancer l'analyse"
-5. Consulter les résultats (récap, non faites, jokers, décalées)
-6. Télécharger l'export Excel si besoin
-```
-
-### Contrôle des prix (périodique)
-```
-1. Ouvrir l'app → page "Indéfinis & Prix" → onglet "Contrôle des prix"
-2. Uploader le fichier ERP Audit Télémétrie (.csv)
-3. Cliquer "Analyser"
-4. Consulter les KPIs et les anomalies détectées
-5. Pour chaque machine à corriger :
-   a. Ouvrir l'expander de la machine
-   b. Importer le fichier de ventes machine (CSV audit IUC180)
-   c. Consulter le tableau surlignée + le résumé des erreurs
-   d. Exporter en Excel ou PNG pour partager
-   e. Une fois corrigée sur la machine : cliquer "✅ Marquer comme traité"
-6. Exporter par réappro via le menu "Sélectionner les réappros à exporter"
-7. Consulter l'onglet "✅ Salles traitées" pour le suivi global
-```
-
-### Diagnostic indéfinis (au besoin)
-```
-1. Ouvrir l'app → page "Indéfinis & Prix" → onglet "Indéfinis"
-2. Uploader le fichier de ventes (export audit machine)
-3. Uploader le fichier planogramme de la machine concernée
-4. Lire le diagnostic : lignes suspectes en rouge = spirales à vérifier
-```
-
-### No Audit / Sans Ventes
-```
-1. Ouvrir l'app → page "No Audit / Ventes"
-2. Uploader le fichier de télémétrie CSV
-3. Configurer la période (nombre de jours)
-4. Consulter les onglets "No Audit" et "Sans Ventes"
-5. Ajouter des commentaires sur les salles problématiques
-```
-
-### Mise à jour planogramme
-```
-1. Ouvrir l'app → page "Planogrammes"
-2. Créer ou modifier un planogramme
-3. Exporter en PDF si besoin pour affichage sur site
-```
+**Alimentée par** : import de fichiers CSV de planning (onglet Tournées).
+**Lue par** : onglet Tournées (croisement planning vs chargement), CR, Rapport Employé.
 
 ---
 
-## 📦 Dépendances
+### `reappros`
+Référentiel des réapprovisionneurs (métadonnées).
+
+| Champ | Description |
+|-------|-------------|
+| `code` | Code employé |
+| `prenom` | Prénom |
+| `zone` | Zone géographique / secteur |
+| `responsable` | Nom du responsable |
+
+**Lue par** : No Audit (groupement par zone), CR, Rapport Employé.
+
+---
+
+### `incidents`
+Suivi des incidents réseau : salles sans audit, sans ventes, sans chargement.
+
+| Champ | Description |
+|-------|-------------|
+| `salle` | Code machine concernée |
+| `type` | `no_audit` / `sans_ventes` / `sans_chargement` |
+| `commentaire` | Commentaire libre saisi par l'utilisateur |
+| `since_date` | Date de début de l'incident |
+| `status` | `open` / `resolved` |
+| `created_at` / `resolved_at` | Horodatages d'ouverture et de résolution |
+
+**Alimentée par** : No Audit (salles manquantes / zéro ventes), Tournées (salles sans chargement prolongé).
+**Lue par** : No Audit (pré-remplissage des commentaires), Rapport Employé.
+
+---
+
+### `justifications_nf`
+Justifications saisies pour les salles "Non Faites" lors de l'analyse de tournées.
+
+| Champ | Description |
+|-------|-------------|
+| `reappro` | Code réapprovisionneur |
+| `date_analyse` | Date d'analyse |
+| `jour` | Jour concerné |
+| `salles` | Liste `[{client, machine, justification}]` |
+
+**Alimentée par** : onglet Tournées (section "Non Faites").
+**Lue par** : Rapport Employé.
+
+---
+
+### `bilan_semaine`
+Résultats bruts de l'analyse hebdomadaire des tournées.
+
+| Champ | Description |
+|-------|-------------|
+| `iso_year` / `iso_week` | Année et semaine ISO |
+| `rows` | Liste des lignes `[{reappro, jour, machine, statut}]` |
+
+**Alimentée par** : onglet Tournées (sauvegarde des résultats).
+**Lue par** : CR Hebdomadaire, Rapport Employé, Inventaires.
+
+---
+
+### `inventaires_semaine`
+Suivi des inventaires validés semaine par semaine.
+
+| Champ | Description |
+|-------|-------------|
+| `iso_year` / `iso_week` | Semaine concernée |
+| `saved_at` | Horodatage |
+| `done` | Liste `[{reappro, date, code}]` |
+
+**Alimentée & lue par** : onglet Inventaires.
+
+---
+
+### `planogrammes`
+Définitions des planogrammes produits.
+
+| Champ | Description |
+|-------|-------------|
+| `nom` | Nom du planogramme |
+| `type` | Type de machine cible |
+| `rows` / `cols` | Dimensions de la grille |
+| `slots` | Objet `{"r-c": {product, price, qty, color}}` |
+| `row_labels` | Labels des lignes |
+
+**Alimentée & lue par** : onglet Planogrammes.
+
+---
+
+### `produits_lib`
+Bibliothèque produits (référentiel centralisé).
+
+| Champ | Description |
+|-------|-------------|
+| `nom` | Nom du produit |
+| `code` | Code article |
+| `categorie` | Catégorie produit |
+| `prix_ht` | Prix HT |
+| `prix_achat` | Prix d'achat |
+| `tva` | Taux TVA (%) |
+| `prix_ttc` | Prix TTC calculé |
+| `couleur` | Couleur d'affichage dans la grille |
+
+**Alimentée & lue par** : onglet Planogrammes (bibliothèque produits).
+
+---
+
+### `plannos_theoriques`
+Planogrammes théoriques extraits des exports machines.
+
+| Champ | Description |
+|-------|-------------|
+| `nom` | Identifiant machine/salle |
+| `produits` | Liste `[{code, libelle, unite, niv_haut, prix_ttc}]` |
+
+**Alimentée & lue par** : onglet Planogrammes (import depuis export machine).
+
+---
+
+### `quartix_vehicles`
+Association plaque d'immatriculation ↔ employé pour les véhicules GPS Quartix.
+
+| Champ | Description |
+|-------|-------------|
+| `plate` | Plaque d'immatriculation |
+| `employe` | Nom/code de l'employé |
+| `depot_address` | Adresse du dépôt de départ |
+| `depot_coords` | Coordonnées GPS du dépôt |
+| `updated_at` | Dernière mise à jour |
+
+**Alimentée & lue par** : onglet Quartix.
+
+---
+
+### `quartix_geocode_cache` et `quartix_routes_cache`
+Caches de geocodage (Nominatim) et de tracés de routes (OSRM) pour éviter les appels réseau répétés.
+
+**Alimentées & lues par** : onglet Quartix automatiquement.
+
+---
+
+### `rapport_employe_saves`
+Sauvegardes de rapports employé générés.
+
+| Champ | Description |
+|-------|-------------|
+| `_id` | Nom de la sauvegarde |
+| `employe` | Employé concerné |
+| `saved_at` | Date de sauvegarde |
+| `payload` | Données du rapport sérialisées |
+
+**Alimentée & lue par** : onglet Rapport Employé.
+
+---
+
+### `salles_traitees`
+Salles ayant fait l'objet d'un contrôle prix / réception.
+
+| Champ | Description |
+|-------|-------------|
+| `machine` / `salle` | Identifiants machine |
+| `statut` | Résultat du contrôle |
+| `raison` | Motif |
+| `anomalies` | Anomalies détectées |
+| `date_traitement` | Date du contrôle |
+
+**Alimentée & lue par** : onglet Commandes.
+
+---
+
+## Onglets — guide d'utilisation
+
+---
+
+### 1 — Machines
+
+**Objectif** : gérer le référentiel du parc de machines à vending.
+
+**Utilisation pas à pas** :
+
+1. Accéder à l'onglet **Machines** dans la barre de navigation.
+2. **Importer le CSV machines** — cliquer sur "Parcourir" et sélectionner l'export CSV (séparateur `;`) provenant du logiciel de gestion.
+   Colonnes attendues : `Code`, `Client`, `Ville`, `Code postal`, `Modèle`, `Approvisionneur`, `Date d'install`, `Statut`.
+3. Valider l'import — les données sont insérées / mises à jour dans la collection `machines` de MongoDB.
+4. Utiliser les **filtres** (zone, approvisionneur, statut) pour naviguer dans le parc.
+5. Exporter un sous-ensemble filtré en Excel via le bouton **Télécharger**.
+
+**Ce que cet onglet produit** : le référentiel `machines` utilisé par presque tous les autres onglets pour résoudre les codes salles en noms de clients et zones.
+
+---
+
+### 2 — Tournées (Suivi)
+
+**Objectif** : comparer le planning hebdomadaire prévu avec les chargements réels effectués, et calculer les KPIs de productivité.
+
+**Utilisation pas à pas** :
+
+1. **Importer le planning CSV de la semaine** (si pas encore fait) — format attendu : `Client;Machine;Lundi;Mardi;Mercredi;Jeudi;Vendredi`. Le planning est sauvegardé dans MongoDB (`plannings`).
+2. **Importer le CSV chargements** du jour ou de la période — export depuis le logiciel de gestion (colonnes : `Tiers`, `Date début`, `Statut`, `Employé`, `Machine`, `Val. Ref`, etc.).
+3. **Sélectionner le jour d'analyse** (Lundi … Vendredi) dans le sélecteur.
+4. Lancer l'analyse — l'application croise planning vs chargements et affiche :
+   - **KPIs** : Prévues / Faites / Non Faites / Jokers / Décalées / Taux de réalisation
+   - **Tableau détaillé** par réapprovisionneur
+   - **Jokers** : salle faite par un autre employé que le prévu
+   - **Tournées décalées** : employé a réalisé une tournée d'un autre jour
+5. Saisir les **justifications** pour les salles Non Faites (sauvegardées dans `justifications_nf`).
+6. Exporter le résultat complet en **Excel** (bouton Télécharger).
+7. **Section "Sans chargement prolongé"** (en bas de page) :
+   - Importer un CSV chargements sur une longue période (ex. 30 jours).
+   - Visualiser les salles sans aucun chargement depuis N jours.
+   - Sauvegarder les incidents dans la collection `incidents`.
+
+**Dépendances en entrée** : `plannings` (MongoDB), `machines` (MongoDB), CSV chargements (upload).
+**Produit** : `bilan_semaine`, `justifications_nf`, `incidents` (MongoDB) + fichier Excel.
+
+---
+
+### 3 — No Audit / Sans Ventes
+
+**Objectif** : détecter les machines qui ne remontent pas de données télémétriques ou qui affichent zéro vente.
+
+Cet onglet est divisé en deux sous-onglets.
+
+#### Sous-onglet "No Audit"
+
+1. **Importer le CSV télémétrie** — export du système d'audit distant (colonnes : `Salle`, `Date`, ..., `Prix`).
+2. L'application compare la liste des salles auditées **hier** avec le parc connu (collection `machines`).
+3. Les salles absentes du fichier télémétrie = **No Audit**.
+4. Saisir un **commentaire** pour chaque salle concernée (ex. : machine en panne, site fermé...).
+5. Cliquer **Sauvegarder** — les commentaires sont inscrits dans la collection `incidents` (type `no_audit`).
+6. Quand une salle réapparaît dans la télémétrie, l'incident est **auto-résolu**.
+7. Exporter un rapport Excel : global ou **par zone** (un onglet par zone + un onglet récap).
+
+#### Sous-onglet "Sans Ventes"
+
+1. Même import de CSV télémétrie.
+2. Les salles auditées mais avec `Prix = 0` (ou ventes nulles) = **Sans Ventes**.
+3. Même processus de commentaire / sauvegarde dans `incidents` (type `sans_ventes`).
+4. Export Excel identique.
+
+**Dépendances en entrée** : `machines` (MongoDB), CSV télémétrie (upload).
+**Produit** : collection `incidents` mise à jour + fichiers Excel.
+
+---
+
+### 4 — Planogrammes
+
+**Objectif** : créer, éditer et exporter les planogrammes (dispositions produits) des machines.
+
+L'onglet est organisé en plusieurs vues accessibles via des boutons de navigation internes.
+
+#### Vue "Liste des planogrammes"
+
+- Affiche tous les planogrammes sauvegardés dans MongoDB.
+- Boutons : **Créer**, **Éditer**, **Dupliquer**, **Supprimer**.
+
+#### Vue "Éditeur"
+
+1. Définir le **nom**, le **type de machine**, les dimensions (**lignes × colonnes**).
+2. Cliquer sur une cellule de la grille pour y assigner un produit :
+   - Rechercher dans la **bibliothèque produits** (`produits_lib`) par nom ou code.
+   - Renseigner la **quantité** et le **prix TTC**.
+3. Le coût total TTC du planogramme est calculé automatiquement (prix achat × TVA × quantité).
+4. **Sauvegarder** — écrit dans la collection `planogrammes`.
+5. **Exporter** en Excel ou en PDF.
+
+#### Vue "Bibliothèque produits"
+
+- Visualiser / ajouter / modifier les produits dans `produits_lib`.
+- Import en masse depuis un fichier Excel (colonnes : `nom`, `code`, `categorie`, `prix_ht`, `prix_achat`, `tva`).
+
+#### Vue "Import PDF"
+
+1. Déposer un PDF de planogramme (format BasicFit ou NXT Level).
+2. L'application parse les lignes (Quantité → Produit → Prix) via `pdfplumber`.
+3. La grille est pré-remplie automatiquement — vérifier et ajuster si besoin.
+4. Sauvegarder le résultat.
+
+#### Vue "Planogrammes théoriques"
+
+- Affiche les planogrammes extraits des exports machines (`plannos_theoriques`).
+- Permet de comparer la théorie avec le planogramme réel saisi.
+
+**Dépendances en entrée** : `planogrammes`, `produits_lib`, `plannos_theoriques` (MongoDB), PDF/Excel (upload optionnel).
+**Produit** : `planogrammes`, `produits_lib` mis à jour + fichiers Excel/PDF.
+
+---
+
+### 5 — Inventaires
+
+**Objectif** : analyser les inventaires hebdomadaires par réapprovisionneur et détecter les écarts de stock.
+
+**Utilisation pas à pas** :
+
+1. **Importer le CSV d'inventaire** de la semaine (une ligne par machine, avec niveaux de stock par produit).
+2. Sélectionner la **semaine ISO** d'analyse.
+3. L'application groupe les données par réapprovisionneur et identifie :
+   - Dépassements de **seuils** (stock trop bas ou trop haut)
+   - **Produits manquants** par rapport au planogramme théorique
+   - **Ruptures** potentielles
+4. Valider les inventaires réalisés pour une semaine donnée (sauvegarde dans `inventaires_semaine`).
+5. Exporter le bilan en **Excel**.
+
+**Dépendances en entrée** : `bilan_semaine`, `machines` (MongoDB), CSV inventaire (upload).
+**Produit** : `inventaires_semaine` mis à jour + fichier Excel.
+
+---
+
+### 6 — Commandes
+
+**Objectif** : contrôler la réception des commandes à partir de captures d'écran d'e-mails fournisseurs.
+
+**Utilisation pas à pas** :
+
+1. **Déposer la capture d'écran** de l'e-mail de commande (image PNG/JPG).
+2. L'application extrait les lignes produits (référence, quantité, prix) par parsing structuré.
+3. Les données sont **injectées dans un template Excel** de bon de réception.
+4. Vérifier et ajuster les lignes si besoin.
+5. Valider — le résultat est sauvegardé dans `salles_traitees` avec statut et anomalies détectées.
+6. Télécharger le fichier Excel généré.
+
+**Dépendances en entrée** : image e-mail (upload), template Excel interne.
+**Produit** : `salles_traitees` + fichier Excel.
+
+---
+
+### 7 — Indéfinis
+
+**Objectif** : détecter les produits vendus sous la catégorie "INDEFINI" (paramétrage incorrect dans la machine).
+
+**Utilisation pas à pas** :
+
+1. **Importer le CSV chargements** (même format que l'onglet Tournées).
+2. L'application filtre les lignes où le produit n'est pas reconnu et est catégorisé INDEFINI.
+3. Le tableau affiche : salle, date, produit non reconnu, valeur vendue.
+4. Ces informations permettent de corriger le **paramétrage produit** dans le logiciel de gestion.
+5. Export Excel disponible.
+
+**Dépendances en entrée** : CSV chargements (upload).
+**Produit** : rapport Excel des lignes INDEFINI (pas de stockage MongoDB).
+
+---
+
+### 8 — CR Hebdomadaire
+
+**Objectif** : générer le compte-rendu hebdomadaire par zone, synthèse des tournées réalisées.
+
+**Utilisation pas à pas** :
+
+1. Sélectionner la **semaine** à reporter.
+2. L'application charge les résultats depuis `bilan_semaine` et les regroupe par zone (`reappros`).
+3. Le CR affiche pour chaque zone :
+   - Nombre de salles prévues / faites / non faites
+   - Taux de réalisation
+   - Détail par réapprovisionneur
+4. Exporter en **PDF** ou **Excel** par zone ou toutes zones.
+
+**Dépendances en entrée** : `bilan_semaine`, `reappros` (MongoDB).
+**Produit** : fichiers PDF/Excel de CR.
+
+---
+
+### 9 — Quartix
+
+**Objectif** : visualiser les tournées GPS des conducteurs à partir des exports Quartix.
+
+**Utilisation pas à pas** :
+
+1. **Importer le CSV export Quartix** (données GPS : arrêts, durées, adresses, kilométrage).
+2. Configurer l'**association véhicule ↔ employé** dans le panneau de configuration (sauvegardé dans `quartix_vehicles`).
+3. Renseigner les **adresses de dépôt** de départ pour chaque véhicule.
+4. L'application géocode les adresses via Nominatim (cache dans `quartix_geocode_cache`) et calcule les tracés via OSRM (cache dans `quartix_routes_cache`).
+5. La carte **Folium interactive** s'affiche avec :
+   - Tracé de la route
+   - Marqueurs des arrêts avec durée et adresse
+   - Métriques d'efficacité (km/salle, temps/salle)
+6. Filtrer par employé ou par date.
+7. Exporter le rapport de tournée.
+
+**Dépendances en entrée** : `quartix_vehicles`, caches géocodage/routage (MongoDB), CSV Quartix (upload).
+**Produit** : carte interactive + rapport + mise à jour des caches.
+
+---
+
+### 10 — Picklist
+
+**Objectif** : comparer les listes de picking (préparation) avec les chargements réellement effectués et détecter les écarts.
+
+**Utilisation pas à pas** :
+
+1. **Importer le CSV picklist** (liste de préparation prévue : machine, produit, quantité).
+2. **Importer le CSV chargements** (réalisé, même format que l'onglet Tournées).
+3. L'application croise les deux fichiers ligne par ligne.
+4. Le tableau d'écarts affiche :
+   - Produits prévus mais non chargés
+   - Produits chargés en surplus
+   - Quantités différentes
+5. Exporter le rapport d'écarts en Excel.
+
+**Dépendances en entrée** : CSV picklist + CSV chargements (uploads).
+**Produit** : rapport Excel des écarts (pas de stockage MongoDB).
+
+---
+
+### 11 — Rapport Employé
+
+**Objectif** : générer un rapport de performance détaillé par employé sur une période donnée.
+
+**Utilisation pas à pas** :
+
+1. Sélectionner l'**employé** et la **période** (semaines ISO).
+2. L'application agrège depuis `bilan_semaine` et `justifications_nf` :
+   - Taux de réalisation semaine par semaine
+   - Détail des Non Faites et justifications associées
+   - Évolution du nombre de salles prévues vs faites
+   - Analyse des jokers et tournées décalées
+3. Les graphiques et tableaux sont affichés directement.
+4. **Sauvegarder** le rapport dans MongoDB (`rapport_employe_saves`) pour y revenir plus tard.
+5. Exporter en **Excel** (multi-onglets) ou **PDF**.
+
+**Dépendances en entrée** : `bilan_semaine`, `justifications_nf`, `incidents`, `reappros` (MongoDB).
+**Produit** : `rapport_employe_saves` + fichiers Excel/PDF.
+
+---
+
+## Ce qui impacte quoi — dépendances entre onglets
+
+Le schéma ci-dessous résume les flux de données entre onglets. Une flèche `→` signifie "produit des données utilisées par".
 
 ```
-streamlit>=1.32.0
-matplotlib>=3.7.0
-pandas>=2.0.0
-openpyxl>=3.1.0
-xlsxwriter>=3.1.0
-pymongo>=4.6.0
-reportlab>=4.0.0
-pdfplumber>=0.10.0
-requests>=2.31.0
-rapidfuzz>=3.0.0
-geopy>=2.4.0
-folium>=0.16.0
-streamlit-folium>=0.20.0
-xlrd>=2.0.0
+┌─────────────┐
+│   MACHINES  │ ← Import CSV
+│  (référence)│ → machines (MongoDB)
+└──────┬──────┘
+       │ Résolution code salle → client/zone
+       ▼
+┌──────────────────────────────────────────┐
+│  No Audit · Tournées · Quartix · CR ·    │
+│  Rapport Employé · Inventaires           │
+└──────────────────────────────────────────┘
+
+┌─────────────┐
+│  TOURNÉES   │ ← CSV chargements + plannings (MongoDB)
+│   (suivi)   │ → bilan_semaine, justifications_nf, incidents (MongoDB)
+└──────┬──────┘
+       │
+       ├──────────────────────────────► CR Hebdomadaire
+       │                                 (lit bilan_semaine)
+       └──────────────────────────────► Rapport Employé
+                                         (lit bilan_semaine + justifications_nf)
+
+┌─────────────┐
+│  NO AUDIT   │ ← CSV télémétrie + machines (MongoDB)
+│ SANS VENTES │ → incidents (MongoDB)
+└──────┬──────┘
+       │
+       └──────────────────────────────► Rapport Employé
+                                         (lit incidents)
+
+┌──────────────┐
+│ PLANOGRAMMES │ ↔ planogrammes, produits_lib, plannos_theoriques (MongoDB)
+│              │   (autonome — pas de dépendance aval dans l'app)
+└──────────────┘
+
+┌─────────────┐
+│ INVENTAIRES │ ← CSV inventaire + bilan_semaine (MongoDB)
+│             │ → inventaires_semaine (MongoDB)
+└─────────────┘
+
+┌─────────────┐
+│  COMMANDES  │ ← Image e-mail (upload)
+│             │ → salles_traitees (MongoDB) + Excel
+└─────────────┘
+
+┌─────────────┐
+│  INDÉFINIS  │ ← CSV chargements (upload)
+│             │ → rapport Excel (pas de stockage MongoDB)
+└─────────────┘
+
+┌─────────────┐
+│   PICKLIST  │ ← CSV picklist + CSV chargements (uploads)
+│             │ → rapport Excel (pas de stockage MongoDB)
+└─────────────┘
+
+┌─────────────┐
+│   QUARTIX   │ ← CSV Quartix (upload) + quartix_vehicles (MongoDB)
+│             │ → quartix_vehicles, caches géocodage/routage (MongoDB)
+└─────────────┘
 ```
+
+### Ordre logique de remplissage
+
+Pour un démarrage de zéro, il est recommandé de remplir les données dans cet ordre :
+
+1. **Machines** — importer le parc (référentiel de base de tout le reste).
+2. **Tournées** — importer le planning de la semaine puis le CSV chargements.
+3. **No Audit / Sans Ventes** — importer la télémétrie du jour.
+4. **CR Hebdomadaire / Rapport Employé** — disponibles dès que `bilan_semaine` est alimenté par Tournées.
+5. **Planogrammes** — indépendant, peut être rempli à tout moment.
+6. **Quartix / Picklist / Indéfinis / Commandes** — au fil des besoins.

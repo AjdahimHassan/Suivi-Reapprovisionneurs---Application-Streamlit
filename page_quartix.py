@@ -1965,53 +1965,126 @@ def _build_hebdo_excel(
 
     _auto_width(ws_sum)
 
-    # ── Feuille Trajets hors horaires ───────────────────────────────────────
-    ws_late = wb.create_sheet("Trajets hors horaires")
-    headers_late = ["Véhicule", "Réappro", "Date", "Jour", "Heure départ", "Heure arrivée",
+    # ── Une feuille par conducteur ──────────────────────────────────────────
+    SECTION_LATE_FILL = PatternFill("solid", fgColor="1B3D6F")
+    SECTION_WKND_FILL = PatternFill("solid", fgColor="B45309")
+    SECTION_FONT      = Font(color="FFFFFF", bold=True, size=12)
+
+    headers_late = ["Date", "Jour", "Heure départ", "Heure arrivée",
                     "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
-    for ci, h in enumerate(headers_late, 1):
-        ws_late.cell(row=1, column=ci, value=h)
-    _style_header_row(ws_late, 1, len(headers_late))
+    headers_wknd = ["Date", "Jour", "Heure départ", "Heure arrivée",
+                    "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
 
-    row = 2
-    for plate, trips in late_trips.items():
+    all_plates = sorted(set(list(late_trips.keys()) + list(weekend_trips.keys())))
+
+    used_names: dict[str, int] = {}
+
+    for plate in all_plates:
         prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
-        for t in trips:
-            vals = [
-                plate, prenom,
-                t["date"].strftime("%d/%m/%Y"), t["jour"],
-                t["heure_dep"], t["heure_arr"],
-                t["lieu_dep"], t["lieu_arr"],
-                t["distance_km"],
-            ]
-            for ci, val in enumerate(vals, 1):
-                c = ws_late.cell(row=row, column=ci, value=val)
-                c.fill = WARN_FILL
-                c.border = BORDER
-                c.alignment = CENTER if ci not in (7, 8) else WRAP
-            row += 1
-    _auto_width(ws_late)
+        raw_name = f"{prenom} - {plate}" if prenom else plate
+        base = raw_name[:28]
+        if base in used_names:
+            used_names[base] += 1
+            sheet_name = f"{base[:25]} ({used_names[base]})"
+        else:
+            used_names[base] = 1
+            sheet_name = base
 
-    # ── Feuille Activité weekend ────────────────────────────────────────────
-    ws_wknd = wb.create_sheet("Activité weekend")
-    headers_wknd = ["Véhicule", "Réappro", "Date", "Jour", "Heure départ", "Distance (km)"]
-    for ci, h in enumerate(headers_wknd, 1):
-        ws_wknd.cell(row=1, column=ci, value=h)
-    _style_header_row(ws_wknd, 1, len(headers_wknd))
+        ws = wb.create_sheet(sheet_name)
 
-    row = 2
-    for plate, trips in weekend_trips.items():
-        prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
-        for t in trips:
-            vals = [plate, prenom, t["date"].strftime("%d/%m/%Y"), t["jour"],
-                    t["heure_dep"], t["distance_km"]]
-            for ci, val in enumerate(vals, 1):
-                c = ws_wknd.cell(row=row, column=ci, value=val)
-                c.fill = WKND_FILL
-                c.border = BORDER
-                c.alignment = CENTER
-            row += 1
-    _auto_width(ws_wknd)
+        # En-tête conducteur
+        ws["A1"] = f"{prenom or plate}  —  {plate}"
+        ws["A1"].font = Font(bold=True, size=13, color="1B3D6F")
+        ws.merge_cells("A1:G1")
+        ws["A1"].alignment = CENTER
+
+        ws["A2"] = f"Période : {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}   |   Heure limite : {cutoff.strftime('%H:%M')}"
+        ws["A2"].font = Font(italic=True, size=10, color="555555")
+        ws.merge_cells("A2:G2")
+        ws["A2"].alignment = CENTER
+
+        current_row = 4
+
+        # Section Hors horaires
+        ncols_late = len(headers_late)
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=ncols_late)
+        sec_cell = ws.cell(row=current_row, column=1, value="TRAJETS HORS HORAIRES")
+        sec_cell.fill = SECTION_LATE_FILL
+        sec_cell.font = SECTION_FONT
+        sec_cell.alignment = CENTER
+        current_row += 1
+
+        for ci, h in enumerate(headers_late, 1):
+            ws.cell(row=current_row, column=ci, value=h)
+        _style_header_row(ws, current_row, ncols_late)
+        current_row += 1
+
+        late_list = late_trips.get(plate, [])
+        if late_list:
+            for t in late_list:
+                vals = [
+                    t["date"].strftime("%d/%m/%Y"), t["jour"],
+                    t["heure_dep"], t["heure_arr"],
+                    t["lieu_dep"], t["lieu_arr"],
+                    t["distance_km"],
+                ]
+                for ci, val in enumerate(vals, 1):
+                    c = ws.cell(row=current_row, column=ci, value=val)
+                    c.fill = WARN_FILL
+                    c.border = BORDER
+                    c.alignment = CENTER if ci not in (5, 6) else WRAP
+                current_row += 1
+        else:
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=ncols_late)
+            c = ws.cell(row=current_row, column=1, value="Aucun trajet hors horaires")
+            c.fill = OK_FILL
+            c.font = Font(italic=True, color="2E7D32")
+            c.alignment = CENTER
+            current_row += 1
+
+        current_row += 1  # ligne vide
+
+        # Section Weekend
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=ncols_late)
+        sec_cell2 = ws.cell(row=current_row, column=1, value="ACTIVITE WEEKEND")
+        sec_cell2.fill = SECTION_WKND_FILL
+        sec_cell2.font = SECTION_FONT
+        sec_cell2.alignment = CENTER
+        current_row += 1
+
+        ncols_wknd = len(headers_wknd)
+        for ci, h in enumerate(headers_wknd, 1):
+            ws.cell(row=current_row, column=ci, value=h)
+        _style_header_row(ws, current_row, ncols_wknd)
+        current_row += 1
+
+        wknd_list = weekend_trips.get(plate, [])
+        if wknd_list:
+            for t in wknd_list:
+                vals = [
+                    t["date"].strftime("%d/%m/%Y"), t["jour"],
+                    t["heure_dep"], t.get("heure_arr", "—"),
+                    t.get("lieu_dep", ""), t.get("lieu_arr", ""),
+                    t["distance_km"],
+                ]
+                for ci, val in enumerate(vals, 1):
+                    c = ws.cell(row=current_row, column=ci, value=val)
+                    c.fill = WKND_FILL
+                    c.border = BORDER
+                    c.alignment = CENTER if ci not in (5, 6) else WRAP
+                current_row += 1
+        else:
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=ncols_late)
+            c = ws.cell(row=current_row, column=1, value="Aucune activite weekend")
+            c.fill = OK_FILL
+            c.font = Font(italic=True, color="2E7D32")
+            c.alignment = CENTER
+
+        _auto_width(ws)
 
     buf = _io.BytesIO()
     wb.save(buf)
@@ -2343,6 +2416,9 @@ def _render_tab_hebdo() -> None:
                     "date":        row["_dep"].date(),
                     "jour":        _JOURS_FR[row["_dep"].weekday()],
                     "heure_dep":   row["_dep"].strftime("%H:%M"),
+                    "heure_arr":   row["_arr"].strftime("%H:%M") if pd.notna(row["_arr"]) else "—",
+                    "lieu_dep":    str(row["Lieu de départ"]),
+                    "lieu_arr":    str(row["Lieu d'arrivée"]),
                     "distance_km": _to_km(row["Distance totale"]),
                 }
                 for _, row in wkend_df.iterrows()
@@ -2471,6 +2547,7 @@ def _build_mensuel_excel_par_zone(
     date_max,
     cutoff,
     late_trips: dict,
+    weekend_trips: dict,
     vehicles_db: dict,
     mode: str = "par_zone",
 ) -> bytes:
@@ -2489,12 +2566,13 @@ def _build_mensuel_excel_par_zone(
     CENTER     = Alignment(horizontal="center", vertical="center")
     WRAP       = Alignment(wrap_text=True, vertical="center")
 
-    HEADERS = ["Réappro", "Plaque", "Date", "Jour", "Heure départ", "Heure arrivée",
-               "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
-    NCOLS   = len(HEADERS)
+    HDR_LATE   = ["Réappro", "Plaque", "Date", "Jour", "Heure départ", "Heure arrivée",
+                  "Lieu de départ", "Lieu d'arrivée", "Distance (km)"]
+    HDR_WKND   = ["Réappro", "Plaque", "Date", "Jour", "Heure départ", "Distance (km)"]
+    WKND_FILL  = PatternFill("solid", fgColor="FFF3E0")
 
-    def _style_header_row(ws, row_idx: int) -> None:
-        for c in range(1, NCOLS + 1):
+    def _style_hdr(ws, row_idx: int, ncols: int) -> None:
+        for c in range(1, ncols + 1):
             cell = ws.cell(row=row_idx, column=c)
             cell.fill = HDR_FILL
             cell.font = HDR_FONT
@@ -2506,20 +2584,51 @@ def _build_mensuel_excel_par_zone(
             max_len = max((len(str(c.value or "")) for c in col), default=8)
             ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 48)
 
-    def _write_trip_row(ws, row_idx: int, plate: str, t: dict) -> None:
+    def _write_late_row(ws, row_idx: int, plate: str, t: dict) -> None:
         prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
-        vals = [
-            prenom, plate,
-            t["date"].strftime("%d/%m/%Y"), t["jour"],
-            t["heure_dep"], t["heure_arr"],
-            t["lieu_dep"], t["lieu_arr"],
-            t["distance_km"],
-        ]
+        vals = [prenom, plate, t["date"].strftime("%d/%m/%Y"), t["jour"],
+                t["heure_dep"], t["heure_arr"], t["lieu_dep"], t["lieu_arr"], t["distance_km"]]
         for ci, val in enumerate(vals, 1):
             c = ws.cell(row=row_idx, column=ci, value=val)
             c.fill = WARN_FILL
             c.border = BORDER
             c.alignment = CENTER if ci not in (7, 8) else WRAP
+
+    def _write_wknd_row(ws, row_idx: int, plate: str, t: dict) -> None:
+        prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
+        vals = [prenom, plate, t["date"].strftime("%d/%m/%Y"), t["jour"],
+                t["heure_dep"], t["distance_km"]]
+        for ci, val in enumerate(vals, 1):
+            c = ws.cell(row=row_idx, column=ci, value=val)
+            c.fill = WKND_FILL
+            c.border = BORDER
+            c.alignment = CENTER
+
+    def _write_section(ws, start_row: int, title: str, headers: list,
+                       plates: list, trips_dict: dict, write_fn) -> int:
+        """Écrit un bloc titre + entêtes + lignes, retourne la prochaine ligne disponible."""
+        ncols = len(headers)
+        title_cell = ws.cell(row=start_row, column=1, value=title)
+        title_cell.font = Font(bold=True, size=11, color="1B3D6F")
+        title_cell.fill = PatternFill("solid", fgColor="D6E4F0")
+        ws.merge_cells(f"A{start_row}:{get_column_letter(ncols)}{start_row}")
+        title_cell.alignment = CENTER
+        hdr_row = start_row + 1
+        for ci, h in enumerate(headers, 1):
+            ws.cell(row=hdr_row, column=ci, value=h)
+        _style_hdr(ws, hdr_row, ncols)
+        row = hdr_row + 1
+        for plate in plates:
+            for t in trips_dict.get(plate, []):
+                write_fn(ws, row, plate, t)
+                row += 1
+        if row == hdr_row + 1:
+            ws.cell(row=row, column=1, value="Aucune anomalie détectée")
+            ws.merge_cells(f"A{row}:{get_column_letter(ncols)}{row}")
+            ws.cell(row=row, column=1).alignment = CENTER
+            ws.cell(row=row, column=1).fill = OK_FILL
+            row += 1
+        return row + 1  # ligne vide entre sections
 
     period_str = (
         f"Période : {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}"
@@ -2530,39 +2639,32 @@ def _build_mensuel_excel_par_zone(
     wb.remove(wb.active)
 
     if mode == "simple":
-        ws = wb.create_sheet("Trajets hors horaires")
-        ws["A1"] = "Rapport Mensuel QUARTIX — Trajets hors horaires"
+        ws = wb.create_sheet("Rapport mensuel")
+        ws["A1"] = "Rapport Mensuel QUARTIX"
         ws["A1"].font = TITLE_FONT
-        ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+        ws.merge_cells(f"A1:{get_column_letter(max(len(HDR_LATE), len(HDR_WKND)))}1")
         ws["A1"].alignment = CENTER
         ws["A2"] = period_str
         ws["A2"].font = Font(italic=True, size=10)
-        ws.merge_cells(f"A2:{get_column_letter(NCOLS)}2")
-        for ci, h in enumerate(HEADERS, 1):
-            ws.cell(row=4, column=ci, value=h)
-        _style_header_row(ws, 4)
-        row = 5
-        for plate, trips in sorted(late_trips.items()):
-            for t in trips:
-                _write_trip_row(ws, row, plate, t)
-                row += 1
-        if row == 5:
-            ws.cell(row=5, column=1, value="Aucun trajet hors horaires détecté")
-            ws.merge_cells(f"A5:{get_column_letter(NCOLS)}5")
-            ws["A5"].alignment = CENTER
-            ws["A5"].fill = OK_FILL
+        ws.merge_cells(f"A2:{get_column_letter(max(len(HDR_LATE), len(HDR_WKND)))}2")
+        all_plates = sorted(set(list(late_trips) + list(weekend_trips)))
+        next_row = _write_section(ws, 4, f"TRAJETS HORS HORAIRES (après {cutoff.strftime('%H:%M')})",
+                                  HDR_LATE, all_plates, late_trips, _write_late_row)
+        _write_section(ws, next_row, "ACTIVITÉ WEEKEND",
+                       HDR_WKND, all_plates, weekend_trips, _write_wknd_row)
         _auto_width(ws)
     else:
         zones: dict[str, list[str]] = {}
-        for plate in late_trips:
+        all_plates_anomaly = set(late_trips) | set(weekend_trips)
+        for plate in all_plates_anomaly:
             zone = vehicles_db.get(plate, {}).get("zone", "").strip() or "Sans zone"
             zones.setdefault(zone, []).append(plate)
 
         if not zones:
             ws = wb.create_sheet("Aucune anomalie")
-            ws["A1"] = "Aucun trajet hors horaires détecté sur cette période."
+            ws["A1"] = "Aucune anomalie détectée sur cette période."
             ws["A1"].font = Font(italic=True, size=12)
-            ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+            ws.merge_cells(f"A1:{get_column_letter(len(HDR_LATE))}1")
             ws["A1"].alignment = CENTER
             ws["A1"].fill = OK_FILL
         else:
@@ -2572,29 +2674,22 @@ def _build_mensuel_excel_par_zone(
 
                 ws["A1"] = f"Zone : {zone_name}"
                 ws["A1"].font = TITLE_FONT
-                ws.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
+                ws.merge_cells(f"A1:{get_column_letter(max(len(HDR_LATE), len(HDR_WKND)))}1")
                 ws["A1"].alignment = CENTER
 
                 ws["A2"] = period_str
                 ws["A2"].font = Font(italic=True, size=10)
-                ws.merge_cells(f"A2:{get_column_letter(NCOLS)}2")
+                ws.merge_cells(f"A2:{get_column_letter(max(len(HDR_LATE), len(HDR_WKND)))}2")
 
-                for ci, h in enumerate(HEADERS, 1):
-                    ws.cell(row=4, column=ci, value=h)
-                _style_header_row(ws, 4)
-
-                row = 5
-                for plate in sorted(zones[zone_name]):
-                    for t in late_trips[plate]:
-                        _write_trip_row(ws, row, plate, t)
-                        row += 1
-
-                if row == 5:
-                    ws.cell(row=5, column=1, value="Aucun trajet hors horaires pour cette zone")
-                    ws.merge_cells(f"A5:{get_column_letter(NCOLS)}5")
-                    ws["A5"].alignment = CENTER
-                    ws["A5"].fill = OK_FILL
-
+                plates_in_zone = sorted(zones[zone_name])
+                next_row = _write_section(
+                    ws, 4, f"TRAJETS HORS HORAIRES (après {cutoff.strftime('%H:%M')})",
+                    HDR_LATE, plates_in_zone, late_trips, _write_late_row,
+                )
+                _write_section(
+                    ws, next_row, "ACTIVITÉ WEEKEND",
+                    HDR_WKND, plates_in_zone, weekend_trips, _write_wknd_row,
+                )
                 _auto_width(ws)
 
     buf = _io.BytesIO()
@@ -2718,8 +2813,9 @@ def _render_tab_mensuel() -> None:
             unsafe_allow_html=True,
         )
 
-    # ── 5. Analyse hors horaires ──────────────────────────
-    late_trips: dict[str, list] = {}
+    # ── 5. Analyse ────────────────────────────────────────
+    late_trips:    dict[str, list] = {}
+    weekend_trips: dict[str, list] = {}
 
     for plate, df in all_dfs.items():
         weekday_df = df[(df["_dep"].dt.weekday < 5) &
@@ -2741,46 +2837,67 @@ def _render_tab_mensuel() -> None:
                 for _, row in late_df.iterrows()
             ]
 
-    # ── 6. Résultats ──────────────────────────────────────
+        wkend_df = df[(df["_dep"].dt.weekday >= 5) &
+                      (df["Distance totale"].apply(_to_km) >= _MIN_TRIP_KM)]
+        if not wkend_df.empty:
+            weekend_trips[plate] = [
+                {
+                    "date":        row["_dep"].date(),
+                    "jour":        _JOURS_FR[row["_dep"].weekday()],
+                    "heure_dep":   row["_dep"].strftime("%H:%M"),
+                    "heure_arr":   row["_arr"].strftime("%H:%M") if pd.notna(row["_arr"]) else "—",
+                    "lieu_dep":    str(row["Lieu de départ"]),
+                    "lieu_arr":    str(row["Lieu d'arrivée"]),
+                    "distance_km": _to_km(row["Distance totale"]),
+                }
+                for _, row in wkend_df.iterrows()
+            ]
+
+    # ── 6. Affichage résultats ────────────────────────────
     st.divider()
     st.markdown("### 🔍 Résultats de l'analyse mensuelle")
 
-    if not late_trips:
-        st.success("✅ Aucun trajet hors horaires détecté sur l'ensemble du mois.")
-    else:
-        nb_total = sum(len(v) for v in late_trips.values())
-        st.info(
-            f"**{len(late_trips)} véhicule(s)** concernés — "
-            f"**{nb_total} trajet(s)** hors horaires détectés."
-        )
+    for plate in vehicle_sheets:
+        if plate not in all_dfs:
+            continue
+        label_base = _vehicle_label(plate, vehicles_db)
+        has_late   = plate in late_trips
+        has_wkend  = plate in weekend_trips
+        tags       = (" ⚠️" if has_late else "") + (" 🗓️" if has_wkend else "")
+        label      = f"🚗 {label_base}{tags}"
 
-        zones_map: dict[str, list[str]] = {}
-        for plate in late_trips:
-            zone = vehicles_db.get(plate, {}).get("zone", "").strip() or "Sans zone"
-            zones_map.setdefault(zone, []).append(plate)
-
-        for zone_name in sorted(zones_map.keys()):
-            st.markdown(f"#### 🗺️ Zone : {zone_name}")
-            for plate in sorted(zones_map[zone_name]):
-                prenom = vehicles_db.get(plate, {}).get("prenom", "").strip()
-                label  = (
-                    f"🚗 {plate}" + (f"  —  {prenom}" if prenom else "")
-                    + f"  ⚠️ ({len(late_trips[plate])} trajet(s))"
-                )
-                with st.expander(label, expanded=False):
-                    rows = [
+        with st.expander(label, expanded=(has_late or has_wkend)):
+            if not has_late and not has_wkend:
+                st.success("✅ Aucune anomalie détectée")
+            else:
+                if has_late:
+                    st.markdown(f"**⚠️ Trajets hors horaires** (après {cutoff.strftime('%H:%M')})")
+                    late_rows = [
                         {
-                            "Date":           t["date"].strftime("%d/%m/%Y"),
-                            "Jour":           t["jour"],
-                            "Heure départ":   t["heure_dep"],
-                            "Heure arrivée":  t["heure_arr"],
-                            "Lieu de départ": t["lieu_dep"],
-                            "Lieu d'arrivée": t["lieu_arr"],
-                            "Distance (km)":  t["distance_km"],
+                            "Date":          t["date"].strftime("%d/%m/%Y"),
+                            "Jour":          t["jour"],
+                            "Heure départ":  t["heure_dep"],
+                            "Heure arrivée": t["heure_arr"],
+                            "Lieu départ":   t["lieu_dep"],
+                            "Lieu arrivée":  t["lieu_arr"],
+                            "Distance (km)": t["distance_km"],
                         }
                         for t in late_trips[plate]
                     ]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(late_rows), use_container_width=True, hide_index=True)
+
+                if has_wkend:
+                    st.markdown("**🗓️ Activité weekend**")
+                    wk_rows = [
+                        {
+                            "Date":          d["date"].strftime("%d/%m/%Y"),
+                            "Jour":          d["jour"],
+                            "Heure départ":  d["heure_dep"],
+                            "Distance (km)": d["distance_km"],
+                        }
+                        for d in weekend_trips[plate]
+                    ]
+                    st.dataframe(pd.DataFrame(wk_rows), use_container_width=True, hide_index=True)
 
     # ── 7. Export Excel ───────────────────────────────────
     st.divider()
@@ -2797,12 +2914,13 @@ def _render_tab_mensuel() -> None:
     mode_key = "par_zone" if export_mode.startswith("Par") else "simple"
 
     excel_bytes = _build_mensuel_excel_par_zone(
-        date_min    = date_min,
-        date_max    = date_max,
-        cutoff      = cutoff,
-        late_trips  = late_trips,
-        vehicles_db = vehicles_db,
-        mode        = mode_key,
+        date_min      = date_min,
+        date_max      = date_max,
+        cutoff        = cutoff,
+        late_trips    = late_trips,
+        weekend_trips = weekend_trips,
+        vehicles_db   = vehicles_db,
+        mode          = mode_key,
     )
     fname = (
         f"rapport_mensuel_quartix_"
