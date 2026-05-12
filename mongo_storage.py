@@ -609,3 +609,62 @@ def load_justifications_nf(date_analyse: str) -> list:
         return docs
     except Exception:
         return []
+
+
+def update_justification_nf_date(reappro: str, old_date: str, new_date: str) -> bool:
+    """Corrige la date_analyse d'une entrée justifications_nf (reappro + ancienne date → nouvelle date)."""
+    try:
+        col = _get_justif_nf_col()
+        # Récupérer le doc existant
+        doc = col.find_one({"reappro": reappro, "date_analyse": old_date})
+        if not doc:
+            return False
+        # Calculer le nouveau jour_fr à partir de new_date
+        new_dt  = datetime.date.fromisoformat(new_date)
+        jours   = {0: "Lundi", 1: "Mardi", 2: "Mercredi", 3: "Jeudi", 4: "Vendredi",
+                   5: "Samedi", 6: "Dimanche"}
+        new_jour = jours[new_dt.weekday()]
+        col.update_one(
+            {"reappro": reappro, "date_analyse": old_date},
+            {"$set": {"date_analyse": new_date, "jour": new_jour}},
+        )
+        return True
+    except Exception:
+        return False
+
+
+def list_weeks_justifications_nf() -> list:
+    """
+    Retourne la liste des semaines ISO disponibles dans justifications_nf.
+    Résultat : [(iso_year, iso_week), ...] triées décroissantes.
+    """
+    try:
+        docs = list(_get_justif_nf_col().find({}, {"_id": 0, "date_analyse": 1}))
+        weeks = set()
+        for doc in docs:
+            try:
+                d = datetime.date.fromisoformat(doc["date_analyse"])
+                iso = d.isocalendar()
+                weeks.add((iso.year, iso.week))
+            except Exception:
+                pass
+        return sorted(weeks, reverse=True)
+    except Exception:
+        return []
+
+
+def load_justifications_nf_week(iso_year: int, iso_week: int) -> list:
+    """
+    Retourne tous les docs de justifications_nf pour la semaine ISO donnée,
+    triés par date puis réappro.
+    """
+    try:
+        monday = datetime.date.fromisocalendar(iso_year, iso_week, 1)
+        sunday = datetime.date.fromisocalendar(iso_year, iso_week, 7)
+        docs = list(_get_justif_nf_col().find(
+            {"date_analyse": {"$gte": monday.isoformat(), "$lte": sunday.isoformat()}},
+            {"_id": 0},
+        ).sort([("date_analyse", 1), ("reappro", 1)]))
+        return docs
+    except Exception:
+        return []

@@ -119,3 +119,17 @@ def get_today_day_str(date=None) -> str:
     if date is None:
         date = datetime.date.today()
     return JOUR_MAP_WEEKDAY.get(date.weekday(), "Lundi")
+
+
+def get_default_jour_analyse() -> str:
+    """
+    Retourne le jour à analyser par défaut (dernier jour ouvré, J-1) :
+    - Mardi → Vendredi : hier (J-1)
+    - Lundi             : Vendredi (car week-end entre les deux)
+    - Samedi / Dimanche : Vendredi
+    """
+    import datetime
+    wd = datetime.date.today().weekday()  # 0=Lundi … 6=Dimanche
+    if wd == 0 or wd >= 5:   # Lundi, Samedi, Dimanche → Vendredi
+        return "Vendredi"
+    return JOURS[wd - 1]     # Mardi→Lundi, Mercredi→Mardi, Jeudi→Mercredi, Vendredi→Jeudi

@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 
-from planning_parser import get_today_day_str, JOURS
+from planning_parser import get_today_day_str, get_default_jour_analyse, JOURS
 import page_machines
 import page_no_audit
 import page_cr
@@ -227,7 +227,7 @@ if "page" not in st.session_state:
 if "results" not in st.session_state:
     st.session_state.results = {}
 if "jour_analyse" not in st.session_state:
-    st.session_state.jour_analyse = get_today_day_str()
+    st.session_state.jour_analyse = get_default_jour_analyse()
 if "chargement_bytes" not in st.session_state:
     st.session_state["chargement_bytes"] = None
 if "excel_bytes" not in st.session_state:
@@ -554,6 +554,174 @@ def _build_sc_excel_by_zone(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _render_bilan_semaine():
+    """Contenu de l'onglet Bilan Semaine — accessible avec ou sans analyse lancée."""
+    from mongo_storage import (list_weeks_justifications_nf, load_justifications_nf_week,
+                               update_justification_nf_date)
+    from collections import defaultdict as _dd
+
+    _JOURS = {0: "Lundi", 1: "Mardi", 2: "Mercredi",
+              3: "Jeudi", 4: "Vendredi", 5: "Samedi", 6: "Dimanche"}
+
+    weeks_dispo = list_weeks_justifications_nf()
+
+    if not weeks_dispo:
+        st.info(
+            "Aucun bilan enregistré pour le moment.\n\n"
+            "👉 Allez dans l'onglet **❌ Non Faites**, saisissez des justifications "
+            "et cliquez **💾 Enregistrer** pour alimenter ce bilan."
+        )
+        return
+
+    def _week_label(iso_year, iso_week):
+        mon = datetime.date.fromisocalendar(iso_year, iso_week, 1)
+        fri = datetime.date.fromisocalendar(iso_year, iso_week, 5)
+        return f"S{iso_week} · {iso_year}   ({mon.strftime('%d/%m')} → {fri.strftime('%d/%m/%Y')})"
+
+    selected_week = st.selectbox(
+        "Semaine",
+        options=weeks_dispo,
+        format_func=lambda x: _week_label(*x),
+        key="bilan_sem_week_select",
+    )
+
+    bilan_docs = load_justifications_nf_week(*selected_week)
+
+    if not bilan_docs:
+        st.info("Aucune donnée enregistrée pour cette semaine.")
+        return
+
+    total_jours    = len({d["date_analyse"] for d in bilan_docs})
+    total_reappros = len({d["reappro"]      for d in bilan_docs})
+    total_salles   = sum(len(d["salles"])   for d in bilan_docs)
+    total_justif   = sum(
+        1 for d in bilan_docs
+        for s in d["salles"] if s.get("justification", "").strip()
+    )
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("📅 Jours enregistrés",  total_jours)
+    k2.metric("👤 Réappros concernés", total_reappros)
+    k3.metric("❌ Salles non faites",  total_salles)
+    k4.metric("📝 Avec justification", total_justif)
+
+    st.divider()
+
+    by_date = _dd(list)
+    for doc in bilan_docs:
+        by_date[doc["date_analyse"]].append(doc)
+
+    for date_str in sorted(by_date.keys()):
+        date_obj    = datetime.date.fromisoformat(date_str)
+        jour_fr     = _JOURS[date_obj.weekday()]
+        date_disp   = date_obj.strftime("%d/%m/%Y")
+        day_docs    = by_date[date_str]
+        nb_sal_jour = sum(len(d["salles"]) for d in day_docs)
+
+        st.markdown(
+            f"### 📆 {jour_fr} {date_disp} "
+            f"<span style='color:#C0392B;font-size:0.85em;'>"
+            f"— {nb_sal_jour} salle{'s' if nb_sal_jour > 1 else ''} non faite{'s' if nb_sal_jour > 1 else ''}"
+            f"</span>",
+            unsafe_allow_html=True,
+        )
+
+        _CSS = """
+        <style>
+        .bilan-table { width:100%; border-collapse:collapse; font-size:14px; margin-bottom:6px; }
+        .bilan-table th {
+            background:#f0f0f0; padding:8px 12px; text-align:left;
+            border:1px solid #ccc; font-weight:700; color:#333;
+        }
+        .bilan-table td { padding:7px 12px; border:1px solid #e0e0e0; vertical-align:middle; }
+        .bilan-table tr.group-start td { border-top:3px solid #444 !important; }
+        .bilan-table .td-reappro { font-weight:700; background:#fafafa; }
+        .bilan-table .td-justif  { color:#C0392B; font-weight:600; }
+        .bilan-table .td-justif-center { color:#C0392B; font-weight:600;
+                                         text-align:center; vertical-align:middle; }
+        </style>
+        """
+
+        html_rows = []
+        for doc in day_docs:
+            reappro  = doc["reappro"]
+            salles   = doc["salles"]
+            n        = len(salles)
+            justifs  = [s.get("justification", "").strip() for s in salles]
+            same_j   = len(set(justifs)) == 1   # même justification pour toutes les salles
+
+            for i, s in enumerate(salles):
+                group_cls = ' class="group-start"' if i == 0 else ""
+                row = f"<tr{group_cls}>"
+
+                # Colonne Réappro — rowspan sur tout le groupe, affiché une seule fois
+                if i == 0:
+                    row += f'<td rowspan="{n}" class="td-reappro">{reappro}</td>'
+
+                # Colonnes Client / Salle et Machine
+                row += f'<td>{s["client"]}</td>'
+                row += f'<td>{s["machine"]}</td>'
+
+                # Colonne Justification
+                if same_j and i == 0:
+                    val = justifs[0] if justifs[0] else "—"
+                    row += f'<td rowspan="{n}" class="td-justif-center">{val}</td>'
+                elif not same_j:
+                    val = justifs[i] if justifs[i] else "—"
+                    row += f'<td class="td-justif">{val}</td>'
+                # si same_j et i > 0 : cellule gérée par le rowspan, on n'en ajoute pas
+
+                row += "</tr>"
+                html_rows.append(row)
+
+        table_html = (
+            _CSS
+            + '<table class="bilan-table">'
+            + "<thead><tr>"
+            + "<th>Réappro</th><th>Client / Salle</th><th>Machine</th><th>Justification</th>"
+            + "</tr></thead>"
+            + "<tbody>" + "".join(html_rows) + "</tbody>"
+            + "</table>"
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
+        st.divider()
+
+    # ── Correction de date ────────────────────────────────────────────────────
+    with st.expander("🔧 Corriger la date d'une entrée"):
+        st.caption("Utile si une tournée a été enregistrée avec la mauvaise date (ex : Mardi au lieu de Lundi).")
+
+        # Charger tous les docs pour construire la liste des entrées corrigeables
+        all_docs = []
+        for yw in weeks_dispo:
+            all_docs.extend(load_justifications_nf_week(*yw))
+
+        if not all_docs:
+            st.info("Aucune entrée en base.")
+        else:
+            entrees = {
+                f"{d['reappro']} — {d['jour']} {d['date_analyse']}": (d["reappro"], d["date_analyse"])
+                for d in all_docs
+            }
+            choix = st.selectbox("Entrée à corriger", list(entrees.keys()),
+                                 key="corr_entree_select")
+            reappro_corr, old_date_corr = entrees[choix]
+
+            new_date_corr = st.date_input(
+                "Nouvelle date",
+                value=datetime.date.fromisoformat(old_date_corr),
+                key="corr_new_date",
+            )
+
+            if st.button("✅ Appliquer la correction", key="btn_corr_date"):
+                ok = update_justification_nf_date(
+                    reappro_corr, old_date_corr, new_date_corr.isoformat()
+                )
+                if ok:
+                    st.success(f"Date corrigée : {old_date_corr} → {new_date_corr.isoformat()}")
+                    st.rerun()
+                else:
+                    st.error("Entrée introuvable ou erreur MongoDB.")
 
 
 def _render_machines_sans_chargement(plannings: dict):
@@ -1162,15 +1330,18 @@ elif st.session_state.page == "suivi":
                 st.stop()
         st.rerun()  # Force re-render : Export Excel voit maintenant st.session_state.results
 
-    if not st.session_state.results:
+    results = st.session_state.results
+    jour    = st.session_state.jour_analyse
+
+    if not results:
+        # Sans analyse : seulement l'onglet Bilan Semaine
+        (tab_bilan_sem,) = st.tabs(["📊 Bilan Semaine"])
+        with tab_bilan_sem:
+            _render_bilan_semaine()
         _render_machines_sans_chargement(plannings)
         st.stop()
 
-    results = st.session_state.results
-
-    jour = st.session_state.jour_analyse
-
-    # KPIs
+    # Analyse disponible — KPIs
     st.divider()
     total_prev   = sum(len(d["salles_prevues"])    for d in results.values())
     total_fait   = sum(len(d["salles_faites"])     for d in results.values())
@@ -1188,9 +1359,9 @@ elif st.session_state.page == "suivi":
     k5.metric("📅 Décalées",    total_decale)
     k6.metric("📈 Taux global", f"{taux_global}%")
 
-    # Tabs résultats
-    tab_recap, tab_nf, tab_jokers, tab_decale, tab_detail = st.tabs([
-        "📋 Récapitulatif", "❌ Non Faites", "🔄 Jokers", "📅 Tournées Décalées", "🔍 Détail par réappro"
+    tab_recap, tab_nf, tab_jokers, tab_decale, tab_detail, tab_bilan_sem = st.tabs([
+        "📋 Récapitulatif", "❌ Non Faites", "🔄 Jokers", "📅 Tournées Décalées",
+        "🔍 Détail par réappro", "📊 Bilan Semaine",
     ])
 
     with tab_recap:
@@ -1238,7 +1409,14 @@ elif st.session_state.page == "suivi":
 
             # ── Justifications par réappro / par salle ─────────────────────
             from mongo_storage import save_justification_nf, load_justifications_nf
-            date_analyse = datetime.date.today().isoformat()
+            # Date réelle de la tournée : retrouver la date calendaire du jour analysé
+            _JOURS_IDX = {"Lundi": 0, "Mardi": 1, "Mercredi": 2, "Jeudi": 3, "Vendredi": 4}
+            _today     = datetime.date.today()
+            _jour_idx  = _JOURS_IDX.get(jour, _today.weekday())
+            _delta     = _jour_idx - _today.weekday()
+            if _delta > 0:   # le jour est "dans le futur" → c'est la semaine précédente
+                _delta -= 7
+            date_analyse = (_today + datetime.timedelta(days=_delta)).isoformat()
 
             # Pré-remplissage depuis MongoDB : { (reappro, machine): texte }
             existing_docs = load_justifications_nf(date_analyse)
@@ -1251,6 +1429,8 @@ elif st.session_state.page == "suivi":
                 ("AM",              "AM (arrêt maladie)"),
                 ("AT",              "AT (arrêt de travail)"),
                 ("AI",              "AI (absence injustifiée)"),
+                ("CP",              "CP (congés payés)"),
+                ("WA",              "WA (WhatsApp)"),
                 ("Véhicule garage", "Véhicule garage"),
             ]
 
@@ -1421,6 +1601,9 @@ elif st.session_state.page == "suivi":
                     use_container_width=True, hide_index=True,
                     height=min(700, 38 + len(df_d) * 35),
                 )
+
+    with tab_bilan_sem:
+        _render_bilan_semaine()
 
     _render_machines_sans_chargement(plannings)
 
