@@ -580,12 +580,20 @@ def _render_bilan_semaine():
         fri = datetime.date.fromisocalendar(iso_year, iso_week, 5)
         return f"S{iso_week} · {iso_year}   ({mon.strftime('%d/%m')} → {fri.strftime('%d/%m/%Y')})"
 
-    selected_week = st.selectbox(
-        "Semaine",
-        options=weeks_dispo,
-        format_func=lambda x: _week_label(*x),
-        key="bilan_sem_week_select",
-    )
+    col_week, col_jour = st.columns([3, 2])
+    with col_week:
+        selected_week = st.selectbox(
+            "Semaine",
+            options=weeks_dispo,
+            format_func=lambda x: _week_label(*x),
+            key="bilan_sem_week_select",
+        )
+    with col_jour:
+        filtre_jour = st.selectbox(
+            "Jour",
+            options=["Tous les jours", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"],
+            key="bilan_sem_jour_select",
+        )
 
     bilan_docs = load_justifications_nf_week(*selected_week)
 
@@ -608,25 +616,22 @@ def _render_bilan_semaine():
 
     st.divider()
 
+    # ── Groupement par date ───────────────────────────────────────────────────
     by_date = _dd(list)
     for doc in bilan_docs:
         by_date[doc["date_analyse"]].append(doc)
 
-    for date_str in sorted(by_date.keys()):
-        date_obj    = datetime.date.fromisoformat(date_str)
-        jour_fr     = _JOURS[date_obj.weekday()]
-        date_disp   = date_obj.strftime("%d/%m/%Y")
-        day_docs    = by_date[date_str]
-        nb_sal_jour = sum(len(d["salles"]) for d in day_docs)
+    # Appliquer le filtre jour
+    dates_a_afficher = sorted(by_date.keys())
+    if filtre_jour != "Tous les jours":
+        dates_a_afficher = [
+            d for d in dates_a_afficher
+            if _JOURS[datetime.date.fromisoformat(d).weekday()] == filtre_jour
+        ]
 
-        st.markdown(
-            f"### 📆 {jour_fr} {date_disp} "
-            f"<span style='color:#C0392B;font-size:0.85em;'>"
-            f"— {nb_sal_jour} salle{'s' if nb_sal_jour > 1 else ''} non faite{'s' if nb_sal_jour > 1 else ''}"
-            f"</span>",
-            unsafe_allow_html=True,
-        )
-
+    if not dates_a_afficher:
+        st.info(f"Aucune salle non faite enregistrée pour **{filtre_jour}** cette semaine.")
+    else:
         _CSS = """
         <style>
         .bilan-table { width:100%; border-collapse:collapse; font-size:14px; margin-bottom:6px; }
@@ -643,49 +648,197 @@ def _render_bilan_semaine():
         </style>
         """
 
-        html_rows = []
-        for doc in day_docs:
-            reappro  = doc["reappro"]
-            salles   = doc["salles"]
-            n        = len(salles)
-            justifs  = [s.get("justification", "").strip() for s in salles]
-            same_j   = len(set(justifs)) == 1   # même justification pour toutes les salles
+        for date_str in dates_a_afficher:
+            date_obj    = datetime.date.fromisoformat(date_str)
+            jour_fr     = _JOURS[date_obj.weekday()]
+            date_disp   = date_obj.strftime("%d/%m/%Y")
+            day_docs    = by_date[date_str]
+            nb_sal_jour = sum(len(d["salles"]) for d in day_docs)
 
-            for i, s in enumerate(salles):
-                group_cls = ' class="group-start"' if i == 0 else ""
-                row = f"<tr{group_cls}>"
+            st.markdown(
+                f"### 📆 {jour_fr} {date_disp} "
+                f"<span style='color:#C0392B;font-size:0.85em;'>"
+                f"— {nb_sal_jour} salle{'s' if nb_sal_jour > 1 else ''} non faite{'s' if nb_sal_jour > 1 else ''}"
+                f"</span>",
+                unsafe_allow_html=True,
+            )
 
-                # Colonne Réappro — rowspan sur tout le groupe, affiché une seule fois
-                if i == 0:
-                    row += f'<td rowspan="{n}" class="td-reappro">{reappro}</td>'
+            html_rows = []
+            for doc in day_docs:
+                reappro  = doc["reappro"]
+                salles   = doc["salles"]
+                n        = len(salles)
+                justifs  = [s.get("justification", "").strip() for s in salles]
+                same_j   = len(set(justifs)) == 1
 
-                # Colonnes Client / Salle et Machine
-                row += f'<td>{s["client"]}</td>'
-                row += f'<td>{s["machine"]}</td>'
+                for i, s in enumerate(salles):
+                    group_cls = ' class="group-start"' if i == 0 else ""
+                    row = f"<tr{group_cls}>"
+                    if i == 0:
+                        row += f'<td rowspan="{n}" class="td-reappro">{reappro}</td>'
+                    row += f'<td>{s["client"]}</td>'
+                    row += f'<td>{s["machine"]}</td>'
+                    if same_j and i == 0:
+                        val = justifs[0] if justifs[0] else "—"
+                        row += f'<td rowspan="{n}" class="td-justif-center">{val}</td>'
+                    elif not same_j:
+                        val = justifs[i] if justifs[i] else "—"
+                        row += f'<td class="td-justif">{val}</td>'
+                    row += "</tr>"
+                    html_rows.append(row)
 
-                # Colonne Justification
-                if same_j and i == 0:
-                    val = justifs[0] if justifs[0] else "—"
-                    row += f'<td rowspan="{n}" class="td-justif-center">{val}</td>'
-                elif not same_j:
-                    val = justifs[i] if justifs[i] else "—"
-                    row += f'<td class="td-justif">{val}</td>'
-                # si same_j et i > 0 : cellule gérée par le rowspan, on n'en ajoute pas
+            table_html = (
+                _CSS
+                + '<table class="bilan-table">'
+                + "<thead><tr>"
+                + "<th>Réappro</th><th>Client / Salle</th><th>Machine</th><th>Justification</th>"
+                + "</tr></thead>"
+                + "<tbody>" + "".join(html_rows) + "</tbody>"
+                + "</table>"
+            )
+            st.markdown(table_html, unsafe_allow_html=True)
+            st.divider()
 
-                row += "</tr>"
-                html_rows.append(row)
+    # ── Export Excel ──────────────────────────────────────────────────────────
+    def _build_bilan_excel(docs_par_date: dict, dates: list, week_label: str) -> bytes:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
 
-        table_html = (
-            _CSS
-            + '<table class="bilan-table">'
-            + "<thead><tr>"
-            + "<th>Réappro</th><th>Client / Salle</th><th>Machine</th><th>Justification</th>"
-            + "</tr></thead>"
-            + "<tbody>" + "".join(html_rows) + "</tbody>"
-            + "</table>"
-        )
-        st.markdown(table_html, unsafe_allow_html=True)
-        st.divider()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Bilan semaine"
+
+        # Styles
+        hdr_font   = Font(bold=True, color="FFFFFF", size=11)
+        hdr_fill   = PatternFill("solid", fgColor="2E4057")
+        day_font   = Font(bold=True, color="FFFFFF", size=11)
+        day_fill   = PatternFill("solid", fgColor="C0392B")
+        reap_font  = Font(bold=True, size=10)
+        reap_fill  = PatternFill("solid", fgColor="F2F2F2")
+        justif_font = Font(color="C0392B", bold=True, size=10)
+        center_al  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        left_al    = Alignment(vertical="center", wrap_text=True)
+
+        thin  = Side(style="thin",   color="CCCCCC")
+        thick = Side(style="medium", color="444444")
+        thin_border  = Border(left=thin,  right=thin,  top=thin,  bottom=thin)
+        thick_top    = Border(left=thin,  right=thin,  top=thick, bottom=thin)
+
+        # Titre
+        ws.merge_cells("A1:D1")
+        ws["A1"] = f"Bilan semaine — {week_label}"
+        ws["A1"].font = Font(bold=True, size=13, color="2E4057")
+        ws["A1"].alignment = center_al
+        ws.row_dimensions[1].height = 22
+
+        current_row = 2
+
+        for date_str in dates:
+            date_obj  = datetime.date.fromisoformat(date_str)
+            jour_fr   = _JOURS[date_obj.weekday()]
+            date_disp = date_obj.strftime("%d/%m/%Y")
+            day_docs  = docs_par_date[date_str]
+
+            # Ligne jour
+            ws.merge_cells(f"A{current_row}:D{current_row}")
+            cell = ws[f"A{current_row}"]
+            cell.value = f"{jour_fr}  {date_disp}"
+            cell.font      = day_font
+            cell.fill      = day_fill
+            cell.alignment = center_al
+            ws.row_dimensions[current_row].height = 18
+            current_row += 1
+
+            # En-têtes colonnes
+            for col_i, hdr in enumerate(["Réappro", "Client / Salle", "Machine", "Justification"], 1):
+                c = ws.cell(row=current_row, column=col_i, value=hdr)
+                c.font = hdr_font
+                c.fill = hdr_fill
+                c.alignment = center_al
+                c.border = thin_border
+            ws.row_dimensions[current_row].height = 16
+            current_row += 1
+
+            for doc in day_docs:
+                reappro = doc["reappro"]
+                salles  = doc["salles"]
+                n       = len(salles)
+                justifs = [s.get("justification", "").strip() for s in salles]
+                same_j  = len(set(justifs)) == 1
+                start_r = current_row
+
+                for i, s in enumerate(salles):
+                    is_first = (i == 0)
+                    brd = thick_top if is_first else thin_border
+
+                    # Réappro (fusionné verticalement si > 1 salle)
+                    if is_first:
+                        c = ws.cell(row=current_row, column=1, value=reappro)
+                        c.font = reap_font; c.fill = reap_fill
+                        c.alignment = center_al; c.border = brd
+                        if n > 1:
+                            ws.merge_cells(
+                                start_row=start_r, start_column=1,
+                                end_row=start_r + n - 1, end_column=1
+                            )
+
+                    # Client / Salle
+                    c = ws.cell(row=current_row, column=2, value=s["client"])
+                    c.alignment = left_al; c.border = brd if is_first else thin_border
+
+                    # Machine
+                    c = ws.cell(row=current_row, column=3, value=s["machine"])
+                    c.alignment = center_al; c.border = brd if is_first else thin_border
+
+                    # Justification
+                    if same_j and is_first:
+                        val = justifs[0] if justifs[0] else ""
+                        c = ws.cell(row=current_row, column=4, value=val)
+                        c.font = justif_font; c.alignment = center_al
+                        c.border = brd
+                        if n > 1:
+                            ws.merge_cells(
+                                start_row=start_r, start_column=4,
+                                end_row=start_r + n - 1, end_column=4
+                            )
+                    elif not same_j:
+                        val = justifs[i] if justifs[i] else ""
+                        c = ws.cell(row=current_row, column=4, value=val)
+                        c.font = justif_font; c.alignment = left_al
+                        c.border = brd if is_first else thin_border
+
+                    ws.row_dimensions[current_row].height = 15
+                    current_row += 1
+
+            current_row += 1  # ligne vide entre les jours
+
+        # Largeurs colonnes
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 40
+        ws.column_dimensions["C"].width = 14
+        ws.column_dimensions["D"].width = 28
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    iso_y, iso_w = selected_week
+    xl_label = _week_label(iso_y, iso_w)
+    xl_dates = dates_a_afficher  # respecte le filtre jour actif
+    xl_bytes = _build_bilan_excel(by_date, xl_dates, xl_label)
+    fname = f"bilan_S{iso_w}_{iso_y}"
+    if filtre_jour != "Tous les jours":
+        fname += f"_{filtre_jour}"
+    fname += ".xlsx"
+
+    st.download_button(
+        label="📥 Exporter en Excel",
+        data=xl_bytes,
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="bilan_export_xl",
+    )
 
     # ── Correction de date ────────────────────────────────────────────────────
     with st.expander("🔧 Corriger la date d'une entrée"):
@@ -1425,7 +1578,8 @@ elif st.session_state.page == "suivi":
                 for s in doc.get("salles", []):
                     prefill[(doc["reappro"], s["machine"])] = s.get("justification", "")
 
-            _PRESETS_NF = [
+            # Boutons généraux (remplissent toutes les salles d'un réappro)
+            _PRESETS_GENERAL = [
                 ("AM",              "AM (arrêt maladie)"),
                 ("AT",              "AT (arrêt de travail)"),
                 ("AI",              "AI (absence injustifiée)"),
@@ -1433,46 +1587,117 @@ elif st.session_state.page == "suivi":
                 ("WA",              "WA (WhatsApp)"),
                 ("Véhicule garage", "Véhicule garage"),
             ]
+            # Boutons spécifiques par salle
+            _PRESETS_SALLE = [
+                ("DA HS",           "DA HS"),
+                ("Salle fermée",    "Salle fermée"),
+                ("Tournée décalée", "Tournée décalée"),
+            ]
+
+            # ── Initialiser les valeurs depuis MongoDB (une seule fois par session) ──
+            # On utilise des clés session_state SANS les lier à un widget (pas de key=)
+            # pour pouvoir les modifier librement depuis les boutons preset.
+            for _r, _snf in nf_by_reappro.items():
+                for _s in _snf:
+                    _vk = f"justif__{_r}__{_s['machine']}"
+                    if _vk not in st.session_state:
+                        st.session_state[_vk] = prefill.get((_r, _s["machine"]), "")
 
             st.divider()
             st.subheader("📝 Justifications des salles non faites")
 
             for reappro, salles_nf in sorted(nf_by_reappro.items()):
+
+                # ── Traitement des presets (AVANT l'expander) ─────────────────────────
+                # Les presets écrivent directement dans session_state — pas de conflit
+                # puisque les text_inputs n'ont pas de key= liée.
+                _had_pending = False
+
+                pending_all = f"_pending_all__{reappro}"
+                if pending_all in st.session_state:
+                    _had_pending = True
+                    val_all = st.session_state.pop(pending_all)
+                    for s in salles_nf:
+                        st.session_state[f"justif__{reappro}__{s['machine']}"] = val_all
+
+                for s in salles_nf:
+                    pending_s = f"_pending_s__{reappro}__{s['machine']}"
+                    if pending_s in st.session_state:
+                        _had_pending = True
+                        val_s = st.session_state.pop(pending_s)
+                        st.session_state[f"justif__{reappro}__{s['machine']}"] = val_s
+
+                # Forcer l'expander ouvert si un preset vient d'être appliqué
+                _exp_open_key = f"_exp_open__{reappro}"
+                if _had_pending:
+                    st.session_state[_exp_open_key] = True
+                _is_expanded = st.session_state.pop(_exp_open_key, False)
+
                 nb = len(salles_nf)
                 with st.expander(
                     f"👤 {reappro} — {nb} salle{'s' if nb > 1 else ''} non faite{'s' if nb > 1 else ''}",
+                    expanded=_is_expanded,
                 ):
-                    hdr_salle, hdr_machine, hdr_justif = st.columns([3, 1, 4])
-                    hdr_salle.markdown("**Client / Salle**")
-                    hdr_machine.markdown("**Machine**")
-                    hdr_justif.markdown("**Justification**")
+                    # ── En-têtes ────────────────────────────────────────────────────────
+                    hdr_s, hdr_m, hdr_j, hdr_b = st.columns([3, 1, 3, 2])
+                    hdr_s.markdown("**Client / Salle**")
+                    hdr_m.markdown("**Machine**")
+                    hdr_j.markdown("**Justification**")
+                    hdr_b.markdown("**Cas spécifique**")
                     st.divider()
 
+                    # ── Une ligne par salle ──────────────────────────────────────────────
                     for s in salles_nf:
-                        col_salle, col_machine, col_justif = st.columns([3, 1, 4])
-                        col_salle.markdown(s["client"])
-                        col_machine.markdown(f"`{s['machine']}`")
-                        with col_justif:
-                            text_key = f"justif__{reappro}__{s['machine']}"
+                        col_s, col_m, col_j, col_b = st.columns([3, 1, 3, 2])
+                        col_s.markdown(s["client"])
+                        col_m.markdown(f"`{s['machine']}`")
+                        val_key = f"justif__{reappro}__{s['machine']}"
+
+                        with col_j:
+                            # On utilise key= (obligatoire pour éviter les IDs dupliqués).
+                            # Les presets sont traités AVANT l'expander (avant que le widget
+                            # soit instancié), donc modifier session_state[val_key] est autorisé.
                             st.text_input(
                                 "justification",
-                                value=prefill.get((reappro, s["machine"]), ""),
-                                placeholder="Saisir ou choisir un raccourci ci-dessous...",
-                                key=text_key,
+                                key=val_key,
+                                placeholder="Justification...",
                                 label_visibility="collapsed",
                             )
-                            # Boutons raccourcis
-                            p_cols = st.columns(len(_PRESETS_NF))
-                            for pi, (label, valeur) in enumerate(_PRESETS_NF):
-                                if p_cols[pi].button(
+
+                        with col_b:
+                            ps_cols = st.columns(len(_PRESETS_SALLE))
+                            for pi, (label, valeur) in enumerate(_PRESETS_SALLE):
+                                if ps_cols[pi].button(
                                     label,
-                                    key=f"preset__{reappro}__{s['machine']}__{pi}",
+                                    key=f"ps__{reappro}__{s['machine']}__{pi}",
                                     use_container_width=True,
                                 ):
-                                    st.session_state[text_key] = valeur
+                                    st.session_state[f"_pending_s__{reappro}__{s['machine']}"] = valeur
                                     st.rerun()
 
-                    if st.button("💾 Enregistrer", key=f"btn_justif__{reappro}", type="primary"):
+                    st.divider()
+
+                    # ── Barre du bas — Enregistrer + boutons généraux ────────────────────
+                    col_save, col_gen = st.columns([1, 5])
+                    with col_save:
+                        enregistrer = st.button(
+                            "💾 Enregistrer",
+                            key=f"btn_justif__{reappro}",
+                            type="primary",
+                            use_container_width=True,
+                        )
+                    with col_gen:
+                        pg_cols = st.columns(len(_PRESETS_GENERAL))
+                        for pi, (label, valeur) in enumerate(_PRESETS_GENERAL):
+                            if pg_cols[pi].button(
+                                label,
+                                key=f"pg__{reappro}__{pi}",
+                                use_container_width=True,
+                            ):
+                                st.session_state[f"_pending_all__{reappro}"] = valeur
+                                st.rerun()
+
+                    if enregistrer:
                         salles_payload = [
                             {
                                 "client": s["client"],
