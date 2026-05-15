@@ -861,37 +861,37 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
     # Construire les listes de choix depuis reappros_df (zone = responsable)
     all_reappros_in_bilan = sorted({r["reappro"] for r in bilan_rows})
 
-    # Responsables disponibles pour les réappros présents dans le bilan
+    # Zones disponibles pour les réappros présents dans le bilan
     if not reappros_df.empty:
-        resp_map = (
+        zone_map = (
             reappros_df
-            .dropna(subset=["code", "responsable"])
+            .dropna(subset=["code", "zone"])
             .assign(code=lambda d: d["code"].str.strip(),
-                    responsable=lambda d: d["responsable"].str.strip())
-            .set_index("code")["responsable"]
+                    zone=lambda d: d["zone"].str.strip())
+            .set_index("code")["zone"]
             .to_dict()
         )
-        all_responsables = sorted({
-            resp_map[r] for r in all_reappros_in_bilan if r in resp_map
+        all_zones = sorted({
+            zone_map[r] for r in all_reappros_in_bilan if r in zone_map
         })
     else:
-        resp_map = {}
-        all_responsables = []
+        zone_map = {}
+        all_zones = []
 
     fc1, fc2 = st.columns(2)
     with fc1:
-        sel_resp = st.multiselect(
-            "Filtrer par responsable",
-            options=all_responsables,
+        sel_zones = st.multiselect(
+            "Filtrer par zone",
+            options=all_zones,
             default=[],
-            key="cr_bilan_f_resp",
-            placeholder="Tous les responsables",
+            key="cr_bilan_f_zone",
+            placeholder="Toutes les zones",
         )
     with fc2:
         reappro_options = all_reappros_in_bilan
-        if sel_resp:
+        if sel_zones:
             reappro_options = [r for r in all_reappros_in_bilan
-                               if resp_map.get(r) in sel_resp]
+                               if zone_map.get(r) in sel_zones]
         sel_reappros = st.multiselect(
             "Filtrer par réappro",
             options=reappro_options,
@@ -908,7 +908,7 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
 
     # Appliquer les filtres
     active_reappros = sel_reappros if sel_reappros else (
-        reappro_options if sel_resp else all_reappros_in_bilan
+        reappro_options if sel_zones else all_reappros_in_bilan
     )
     filtered_rows = [r for r in bilan_rows if r["reappro"] in active_reappros]
     if only_nf:
