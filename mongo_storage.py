@@ -429,7 +429,7 @@ def list_bilan_semaines() -> list:
         col  = _get_bilan_semaine_col()
         docs = list(col.find(
             {},
-            {"_id": 0, "iso_year": 1, "iso_week": 1, "saved_at": 1},
+            {"_id": 0, "iso_year": 1, "iso_week": 1, "label": 1, "saved_at": 1},
         ).sort([("iso_year", -1), ("iso_week", -1)]))
         return docs
     except Exception:

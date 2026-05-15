@@ -1131,6 +1131,7 @@ def _section_bilan_cr(plannings_mongo: dict, reappros_df: pd.DataFrame):
                     st.session_state["cr_bilan_rows_bdd"]  = bilan_rows
                     st.session_state["cr_bilan_src_label"] = save_label.strip()
                     st.success(f"✅ « {save_label.strip()} » sauvegardé en BDD !")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ Erreur lors de la sauvegarde : {e}")
 
