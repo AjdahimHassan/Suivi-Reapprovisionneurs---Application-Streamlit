@@ -420,6 +420,8 @@ TABLE_CORRESPONDANCE = [
     ('NMO XL SHAKE CHOC 475ML 7LA',                 'NMO XL CHOCOLATE 475ML'),
     ('ON HFSS CHOC CARAMEL BAR 60G',                'ON BARRE CHOCOLAT CARAMEL'),
     ('ON HFSS WHITE CHOC PNUT BAR 68G',             'ON WHITE CHOCO PEANUT'),
+    ('NMO +PRO PWO SHOT BERRIES FR OVST',           'NMO + PreWorkout shot berry 60ML'),
+    ('NMO +PRO PWO SHOT ORANGE FR OVST',            'NMO + PreWorkoutshot orange 60ML'),
 ]
 
 
