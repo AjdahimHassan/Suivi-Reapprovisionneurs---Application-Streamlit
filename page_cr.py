@@ -10,6 +10,7 @@ Sources :
 
 import io
 import datetime
+from collections import Counter
 
 import altair as alt
 import pandas as pd
@@ -21,6 +22,7 @@ from mongo_storage import (
     _get_client,
     save_bilan_semaine, load_bilan_semaine, list_bilan_semaines, delete_bilan_semaine,
     list_inventaires_semaines, load_inventaires_semaine,
+    list_weeks_justifications_nf, load_justifications_nf_week,
 )
 from page_inventaires import _parse_planning_for_reappro, WEEKDAY_TO_JOUR
 
@@ -37,6 +39,9 @@ SECTION_DEFAULTS: dict[str, str] = {
     "Tournées":                   "Toutes les tournées se sont bien déroulées.",
     "Inventaire":                 "",
 }
+
+# Justifications qui indiquent une absence (présets connus)
+_ABSENCE_KEYWORDS: set[str] = {"CP", "AM", "AT", "AI"}
 
 
 # ────────────────────────────────────────────────────────
@@ -520,6 +525,155 @@ def _build_inventaire_cr_text_from_bilan(
         return "Tous les inventaires ont été réalisés conformément au planning."
 
     return "\n\n".join(result_blocks)
+
+
+# ────────────────────────────────────────────────────────
+# TOURNÉES — génération auto depuis justifications_nf
+# ────────────────────────────────────────────────────────
+
+def _week_label_tournee(iso_year: int, iso_week: int) -> str:
+    mon = datetime.date.fromisocalendar(iso_year, iso_week, 1)
+    fri = datetime.date.fromisocalendar(iso_year, iso_week, 5)
+    return f"S{iso_week} · {iso_year}   ({mon.strftime('%d/%m')} → {fri.strftime('%d/%m/%Y')})"
+
+
+def _build_tournee_cr_text(
+    justif_docs: list,
+    reappros_df,
+    zone: str,
+    remplacants: dict,
+    include_vendredi: bool = True,
+) -> tuple[str, dict]:
+    """
+    Génère le texte de la section Tournées du CR depuis les justifications_nf.
+    Retourne (texte, absents) où absents = {reappro_code: justification_principale}.
+
+    Règles :
+    - Absence complète (tous jours/salles = mot-clé absence) → résumé "en CP toute la semaine"
+    - Même justification sur un jour → grouper les salles
+    - Justifications différentes → lister salle par salle
+    - Texte libre → traité jour par jour (jamais de résumé "absence complète")
+    """
+    if not justif_docs:
+        return "Toutes les tournées se sont bien déroulées.", {}
+
+    # Filtrer par zone
+    if not reappros_df.empty and zone:
+        zone_codes = set(reappros_df[reappros_df["zone"] == zone]["code"].str.strip())
+    else:
+        zone_codes = {d["reappro"] for d in justif_docs}
+
+    code_to_prenom = (
+        dict(zip(reappros_df["code"].str.strip(), reappros_df["prenom"].str.strip()))
+        if not reappros_df.empty else {}
+    )
+
+    # Filtrer docs zone + vendredi
+    docs = [
+        d for d in justif_docs
+        if d["reappro"] in zone_codes
+        and (include_vendredi or d.get("jour") != "Vendredi")
+    ]
+    if not docs:
+        return "Toutes les tournées se sont bien déroulées.", {}
+
+    # Grouper par reappro puis par jour (en conservant l'ordre lundi→vendredi)
+    _JOURS_ORD = {"Lundi": 0, "Mardi": 1, "Mercredi": 2, "Jeudi": 3, "Vendredi": 4}
+    by_reappro: dict = {r: [] for r in {d["reappro"] for d in docs}}
+    for d in docs:
+        by_reappro[d["reappro"]].append(d)
+
+    result_blocks: list[str] = []
+    absents_detected: dict[str, str] = {}
+
+    for reappro in sorted(by_reappro.keys()):
+        day_docs = sorted(by_reappro[reappro], key=lambda d: _JOURS_ORD.get(d.get("jour", ""), 99))
+        prenom = code_to_prenom.get(reappro, reappro)
+        remp = (remplacants.get(reappro) or "").strip()
+
+        # Déterminer si absence complète (tous les jours, toutes les salles = keyword absence)
+        all_justifs = [
+            s.get("justification", "").strip().upper()
+            for d in day_docs for s in d.get("salles", [])
+        ]
+        absence_complete = (
+            bool(all_justifs)
+            and all(j in _ABSENCE_KEYWORDS for j in all_justifs)
+        )
+        # Justification principale (la plus fréquente si plusieurs)
+        absence_type = ""
+        if absence_complete:
+            absence_type = Counter(all_justifs).most_common(1)[0][0]
+            absents_detected[reappro] = absence_type
+
+        if absence_complete:
+            if remp:
+                result_blocks.append(
+                    f"{prenom} ({reappro}) en {absence_type} : toutes ses salles ont été faites par {remp}."
+                )
+            else:
+                result_blocks.append(
+                    f"{prenom} ({reappro}) en {absence_type} toute la semaine : aucune salle faite."
+                )
+            continue
+
+        # Sinon, détail jour par jour
+        day_lines: list[str] = []
+        for d in day_docs:
+            jour = d.get("jour", "?")
+            salles = d.get("salles", [])
+            if not salles:
+                continue
+
+            justifs_raw = [s.get("justification", "").strip() for s in salles]
+            clients = [s.get("client", "?").strip() for s in salles]
+
+            # Nettoyer la justification : si le texte commence par un mot-clé connu suivi
+            # d'une précision entre parenthèses (ex "AI (absence injustifiée)"), ne garder
+            # que la partie entre parenthèses.
+            def _clean_justif(j: str) -> str:
+                m = _re.match(r"^([A-Z]{2,3})\s*\((.+)\)$", j.strip())
+                if m and m.group(1).upper() in _ABSENCE_KEYWORDS:
+                    return m.group(2).strip()
+                return j
+
+            justifs = [_clean_justif(j) for j in justifs_raw]
+            unique_justifs = set(j.upper() for j in justifs_raw if j)
+
+            # Même justification pour toutes les salles → grouper
+            if len(set(justifs)) == 1:
+                j = justifs[0] if justifs[0] else "—"
+                nb = len(salles)
+                accord = "non faites" if nb > 1 else "non faite"
+                if nb == 1:
+                    day_lines.append(f"- {jour} : {clients[0]} {accord} ({j})")
+                else:
+                    day_lines.append(f"- {jour} : {nb} salles {accord} ({j})")
+            else:
+                # Justifications différentes → une ligne par salle avec retour à la ligne
+                header_line = f"- {jour} :"
+                salle_lines = [
+                    f"    • {c} ({j})" if j else f"    • {c}"
+                    for c, j in zip(clients, justifs)
+                ]
+                day_lines.append(header_line + "\n" + "\n".join(salle_lines))
+
+            # Détecter absence partielle pour les absents_detected
+            if unique_justifs & _ABSENCE_KEYWORDS and reappro not in absents_detected:
+                main_abs = next(j for j in justifs_raw if j.upper() in _ABSENCE_KEYWORDS)
+                absents_detected[reappro] = main_abs.upper()
+
+        if day_lines:
+            header = f"{prenom} ({reappro}) :"
+            if remp and reappro in absents_detected:
+                header = f"{prenom} ({reappro}) — {absents_detected[reappro]}, remplaçant : {remp} :"
+            result_blocks.append(header + "\n" + "\n".join(day_lines))
+
+    if not result_blocks:
+        return "Toutes les tournées se sont bien déroulées.", {}
+
+    intro = "Toutes les tournées se sont bien déroulées, sauf :\n\n"
+    return intro + "\n\n".join(result_blocks), absents_detected
 
 
 # ────────────────────────────────────────────────────────
@@ -1372,6 +1526,94 @@ def render():
                     titre,
                     value=inv_default,
                     height=220,
+                    key=f"cr_txt_{titre}_{zone}",
+                    label_visibility="collapsed",
+                )
+            elif titre == "Tournées":
+                # ── Source : justifications_nf (BDD) ────────────────────────
+                weeks_jnf = list_weeks_justifications_nf()
+                if weeks_jnf:
+                    st.caption("**Générer depuis les justifications enregistrées :**")
+
+                    # Semaine par défaut = semaine précédente
+                    today = datetime.date.today()
+                    last_week_iso = (today - datetime.timedelta(weeks=1)).isocalendar()
+                    last_week_tuple = (last_week_iso.year, last_week_iso.week)
+                    default_idx = next(
+                        (i for i, w in enumerate(weeks_jnf) if w == last_week_tuple), 0
+                    )
+
+                    col_tsel, col_tvend, col_tgen = st.columns([3, 2, 2])
+                    with col_tsel:
+                        t_sel_idx = st.selectbox(
+                            "Semaine tournées",
+                            range(len(weeks_jnf)),
+                            format_func=lambda i: _week_label_tournee(*weeks_jnf[i]),
+                            index=default_idx,
+                            key=f"cr_tournee_sem_{zone}",
+                            label_visibility="collapsed",
+                        )
+                    with col_tvend:
+                        t_incl_vend = st.checkbox(
+                            "Inclure vendredi",
+                            value=True,
+                            key=f"cr_tournee_vend_{zone}",
+                        )
+                    with col_tgen:
+                        if st.button("🔄 Générer", key=f"cr_tournee_gen_{zone}",
+                                     use_container_width=True):
+                            with st.spinner("Chargement…"):
+                                t_docs = load_justifications_nf_week(*weeks_jnf[t_sel_idx])
+                                remplacants = {
+                                    r: st.session_state.get(f"cr_tournee_remp_{zone}_{r}", "")
+                                    for r in {d["reappro"] for d in t_docs}
+                                }
+                                generated, absents = _build_tournee_cr_text(
+                                    t_docs, reappros_df, zone, remplacants,
+                                    include_vendredi=t_incl_vend,
+                                )
+                            st.session_state[f"cr_tournee_text_{zone}"] = generated
+                            st.session_state[f"cr_tournee_absents_{zone}"] = absents
+                            st.rerun()
+
+                    # Sélecteurs de remplaçant pour les absents détectés
+                    absents = st.session_state.get(f"cr_tournee_absents_{zone}", {})
+                    if absents:
+                        code_to_prenom_local = (
+                            dict(zip(reappros_df["code"].str.strip(), reappros_df["prenom"].str.strip()))
+                            if not reappros_df.empty else {}
+                        )
+                        all_prenoms = [""] + sorted(
+                            reappros_df["prenom"].str.strip().tolist()
+                            if not reappros_df.empty else []
+                        )
+                        st.caption("**Remplaçants éventuels :**")
+                        absent_items = list(absents.items())
+                        nb_cols = min(3, len(absent_items))
+                        cols = st.columns(nb_cols)
+                        for i, (code, justif) in enumerate(absent_items):
+                            prenom = code_to_prenom_local.get(code, code)
+                            with cols[i % nb_cols]:
+                                st.selectbox(
+                                    f"{prenom} ({justif})",
+                                    options=all_prenoms,
+                                    key=f"cr_tournee_remp_{zone}_{code}",
+                                )
+
+                if not weeks_jnf:
+                    st.caption(
+                        "⚠️ Aucune justification enregistrée. "
+                        "Utilisez **💾 Enregistrer** depuis l'onglet ❌ Non Faites de l'analyse tournées."
+                    )
+
+                t_default = st.session_state.get(
+                    f"cr_tournee_text_{zone}",
+                    SECTION_DEFAULTS.get("Tournées", ""),
+                )
+                section_contents[titre] = st.text_area(
+                    titre,
+                    value=t_default,
+                    height=150,
                     key=f"cr_txt_{titre}_{zone}",
                     label_visibility="collapsed",
                 )
