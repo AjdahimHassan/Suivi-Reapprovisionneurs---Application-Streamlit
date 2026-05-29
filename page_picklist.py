@@ -146,14 +146,31 @@ def parse_chargement_for_date(content: bytes, target_date: datetime.date) -> pd.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _COULEURS = {
-    "Conforme":          "#d4edda",
-    "Insuffisant":       "#f8d7da",
-    "Non chargé":        "#c0392b",
     "Surplus":           "#ffeeba",
     "Non prévu":         "#d1ecf1",
     "Rien à charger":    "#f4f4f4",
     "Quantité négative": "#00B0F0",
 }
+
+# Statuts dont la couleur est déterminée par le % d'écart (paliers)
+_STATUTS_PALIER = {"Conforme", "Insuffisant", "Non chargé"}
+
+
+def _couleur_ecart_palier(picklist: int, reel: int) -> tuple:
+    """Retourne (bg_hex, text_css) selon le % d'écart pour les statuts fusionnés."""
+    if picklist <= 0:
+        return "#27ae60", "color: white;"
+    pct = abs(reel - picklist) / picklist * 100
+    if pct == 0:
+        return "#27ae60", "color: white;"    # vert foncé — conforme parfait
+    elif pct <= 30:
+        return "#d4edda", ""                  # vert clair — 1-30 %
+    elif pct <= 50:
+        return "#ffeeba", ""                  # jaune clair — 30-50 %
+    elif pct <= 80:
+        return "#f8d7da", ""                  # rouge clair — 50-80 %
+    else:
+        return "#c0392b", "color: white;"    # rouge foncé — 80-100 %
 
 _ORDRE_STATUT = {
     "Non chargé":        0,
@@ -268,9 +285,12 @@ def _styler(df: pd.DataFrame):
     """Coloration par ligne selon le statut."""
     def ligne(row):
         statut = row["Statut"]
-        bg     = _COULEURS.get(statut, "")
-        color  = "color: white;" if statut in ("Non chargé", "Quantité négative") else ""
-        style  = f"background-color: {bg}; {color}" if bg else ""
+        if statut in _STATUTS_PALIER:
+            bg, color = _couleur_ecart_palier(int(row["Picklist"]), int(row["Réel"]))
+        else:
+            bg    = _COULEURS.get(statut, "")
+            color = "color: white;" if statut == "Quantité négative" else ""
+        style = f"background-color: {bg}; {color}" if bg else ""
         return [style] * len(row)
 
     styled = df.style.apply(ligne, axis=1)
@@ -303,9 +323,11 @@ def _couleur_conformite(pct: int) -> str:
 
 _LEGENDE = """
 <div style="display:flex;gap:0.8rem;flex-wrap:wrap;margin:0.4rem 0 1rem 0;font-size:0.80rem;">
-  <span style="background:#d4edda;padding:2px 8px;border-radius:4px;">✅ Conforme</span>
-  <span style="background:#f8d7da;padding:2px 8px;border-radius:4px;">❌ Insuffisant</span>
-  <span style="background:#c0392b;color:white;padding:2px 8px;border-radius:4px;">🚫 Non chargé</span>
+  <span style="background:#27ae60;color:white;padding:2px 8px;border-radius:4px;">✅ Conforme (0 %)</span>
+  <span style="background:#d4edda;padding:2px 8px;border-radius:4px;">🟢 Écart 1–30 %</span>
+  <span style="background:#ffeeba;padding:2px 8px;border-radius:4px;">🟡 Écart 30–50 %</span>
+  <span style="background:#f8d7da;padding:2px 8px;border-radius:4px;">🔴 Écart 50–80 %</span>
+  <span style="background:#c0392b;color:white;padding:2px 8px;border-radius:4px;">🚫 Écart 80–100 %</span>
   <span style="background:#ffeeba;padding:2px 8px;border-radius:4px;">⚠️ Surplus</span>
   <span style="background:#d1ecf1;padding:2px 8px;border-radius:4px;">📋 Non prévu</span>
   <span style="background:#f4f4f4;padding:2px 8px;border-radius:4px;">— Rien à charger</span>
@@ -338,24 +360,42 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
             })
 
         fmts = {
-            "Conforme":          fmt("#d4edda"),
-            "Insuffisant":       fmt("#f8d7da"),
-            "Non chargé":        fmt("#c0392b", font="#FFFFFF"),
             "Surplus":           fmt("#ffeeba"),
             "Non prévu":         fmt("#d1ecf1"),
             "Rien à charger":    fmt("#f4f4f4"),
             "Quantité négative": fmt("#00B0F0", font="#FFFFFF"),
         }
+        palier_fmts = [
+            fmt("#27ae60", font="#FFFFFF"),  # 0 % — vert foncé
+            fmt("#d4edda"),                   # 1-30 % — vert clair
+            fmt("#ffeeba"),                   # 30-50 % — jaune clair
+            fmt("#f8d7da"),                   # 50-80 % — rouge clair
+            fmt("#c0392b", font="#FFFFFF"),  # 80-100 % — rouge foncé
+        ]
         header_fmt = fmt("#1B3D6F", font="#FFFFFF", bold=True)
         default_fmt = fmt("#FFFFFF")
 
-        def _ecrire_feuille(ws, headers, rows_data, col_widths, statut_col_idx=None):
+        def _fmt_palier(picklist, reel):
+            if picklist <= 0:
+                return palier_fmts[0]
+            pct = abs(reel - picklist) / picklist * 100
+            if pct == 0:   return palier_fmts[0]
+            elif pct <= 30: return palier_fmts[1]
+            elif pct <= 50: return palier_fmts[2]
+            elif pct <= 80: return palier_fmts[3]
+            else:           return palier_fmts[4]
+
+        def _ecrire_feuille(ws, headers, rows_data, col_widths, statut_col_idx=None,
+                            pick_col_idx=None, reel_col_idx=None):
             ws.set_row(0, 18)
             for c, h in enumerate(headers):
                 ws.write(0, c, h, header_fmt)
             for r, row in enumerate(rows_data, start=1):
                 statut = row[statut_col_idx] if statut_col_idx is not None else None
-                row_fmt = fmts.get(statut, default_fmt)
+                if statut in _STATUTS_PALIER and pick_col_idx is not None and reel_col_idx is not None:
+                    row_fmt = _fmt_palier(row[pick_col_idx], row[reel_col_idx])
+                else:
+                    row_fmt = fmts.get(statut, default_fmt)
                 for c, val in enumerate(row):
                     ws.write(r, c, val, row_fmt)
             for c, w in enumerate(col_widths):
@@ -415,7 +455,9 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
                 row["Statut"],
                 row.get("Commentaire", ""),
             ])
-        _ecrire_feuille(wb.add_worksheet("Détail"), headers_det, rows_det, widths_det, statut_col_idx=6)
+        # Picklist idx=3, Réel idx=4, Statut idx=6 dans headers_det
+        _ecrire_feuille(wb.add_worksheet("Détail"), headers_det, rows_det, widths_det,
+                        statut_col_idx=6, pick_col_idx=3, reel_col_idx=4)
 
         # ── Une sheet par machine ─────────────────────────────
         headers_m = ["Produit", "Picklist", "Réel", "Écart", "Statut", "Commentaire"]
@@ -429,10 +471,13 @@ def generer_excel(result_df: pd.DataFrame) -> bytes:
             for c, h in enumerate(headers_m):
                 ws_m.write(1, c, h, header_fmt)
             for r, (_, row) in enumerate(df_m.iterrows(), start=2):
-                ecart   = row["Écart"]
-                statut  = row["Statut"]
-                row_fmt = fmts.get(statut, default_fmt)
-                vals    = [
+                ecart  = row["Écart"]
+                statut = row["Statut"]
+                if statut in _STATUTS_PALIER:
+                    row_fmt = _fmt_palier(int(row["Picklist"]), int(row["Réel"]))
+                else:
+                    row_fmt = fmts.get(statut, default_fmt)
+                vals = [
                     row["Libellé produit"], row["Picklist"], row["Réel"],
                     f"+{ecart}" if ecart > 0 else str(ecart),
                     statut,
@@ -464,16 +509,30 @@ def generer_excel_hebdo(result_df: pd.DataFrame) -> bytes:
             })
 
         fmts = {
-            "Conforme":          fmt("#d4edda"),
-            "Insuffisant":       fmt("#f8d7da"),
-            "Non chargé":        fmt("#c0392b", font="#FFFFFF"),
             "Surplus":           fmt("#ffeeba"),
             "Non prévu":         fmt("#d1ecf1"),
             "Rien à charger":    fmt("#f4f4f4"),
             "Quantité négative": fmt("#00B0F0", font="#FFFFFF"),
         }
+        palier_fmts_h = [
+            fmt("#27ae60", font="#FFFFFF"),
+            fmt("#d4edda"),
+            fmt("#ffeeba"),
+            fmt("#f8d7da"),
+            fmt("#c0392b", font="#FFFFFF"),
+        ]
         header_fmt = fmt("#1B3D6F", font="#FFFFFF", bold=True)
         default_fmt = fmt("#FFFFFF")
+
+        def _fmt_palier_h(picklist, reel):
+            if picklist <= 0:
+                return palier_fmts_h[0]
+            pct = abs(reel - picklist) / picklist * 100
+            if pct == 0:    return palier_fmts_h[0]
+            elif pct <= 30: return palier_fmts_h[1]
+            elif pct <= 50: return palier_fmts_h[2]
+            elif pct <= 80: return palier_fmts_h[3]
+            else:           return palier_fmts_h[4]
 
         has_date = "Date" in result_df.columns
 
@@ -570,7 +629,10 @@ def generer_excel_hebdo(result_df: pd.DataFrame) -> bytes:
         sort_cols = [col for col in ["Date", "Nom client", "Libellé produit"] if col in result_df.columns]
         for r, (_, row) in enumerate(result_df.sort_values(sort_cols).iterrows(), start=1):
             statut = row["Statut"]
-            row_fmt = fmts.get(statut, default_fmt)
+            if statut in _STATUTS_PALIER:
+                row_fmt = _fmt_palier_h(int(row["Picklist"]), int(row["Réel"]))
+            else:
+                row_fmt = fmts.get(statut, default_fmt)
             ecart = row["Écart"]
             vals = []
             if has_date:
@@ -775,7 +837,11 @@ def _afficher_resultats(picklist_df: pd.DataFrame, chargement_df: pd.DataFrame):
                     fig.patch.set_facecolor("#F7F9FC")
 
                     row_colors = [
-                        [_hex_to_rgb(_COULEURS.get(row["Statut"], "#FFFFFF"))] * len(col_labels)
+                        [_hex_to_rgb(
+                            _couleur_ecart_palier(int(row["Picklist"]), int(row["Réel"]))[0]
+                            if row["Statut"] in _STATUTS_PALIER
+                            else _COULEURS.get(row["Statut"], "#FFFFFF")
+                        )] * len(col_labels)
                         for _, row in df_disp.iterrows()
                     ]
 
