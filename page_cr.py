@@ -1572,7 +1572,7 @@ def render():
                                     t_docs, reappros_df, zone, remplacants,
                                     include_vendredi=t_incl_vend,
                                 )
-                            st.session_state[f"cr_tournee_text_{zone}"] = generated
+                            st.session_state[f"cr_txt_Tournées_{zone}"] = generated
                             st.session_state[f"cr_tournee_absents_{zone}"] = absents
                             st.rerun()
 
@@ -1606,13 +1606,10 @@ def render():
                         "Utilisez **💾 Enregistrer** depuis l'onglet ❌ Non Faites de l'analyse tournées."
                     )
 
-                t_default = st.session_state.get(
-                    f"cr_tournee_text_{zone}",
-                    SECTION_DEFAULTS.get("Tournées", ""),
-                )
+                if f"cr_txt_Tournées_{zone}" not in st.session_state:
+                    st.session_state[f"cr_txt_Tournées_{zone}"] = SECTION_DEFAULTS.get("Tournées", "")
                 section_contents[titre] = st.text_area(
                     titre,
-                    value=t_default,
                     height=150,
                     key=f"cr_txt_{titre}_{zone}",
                     label_visibility="collapsed",
