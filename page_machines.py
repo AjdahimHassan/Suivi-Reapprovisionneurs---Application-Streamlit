@@ -11,7 +11,7 @@ import streamlit as st
 import pandas as pd
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
-from mongo_storage import _get_client
+from mongo_storage import _get_client, supprimer_salle, load_salles_supprimees
 
 # ────────────────────────────────────────────────────────
 # CONSTANTES — pour ajouter une colonne : ajouter une entrée ici
@@ -290,3 +290,99 @@ def render():
             c1.metric("🆕 Nouvelles",  summary["nouvelles"],  delta=f"+{summary['nouvelles']}"   if summary["nouvelles"]  else None)
             c2.metric("🗑️ Supprimées", summary["supprimees"], delta=f"-{summary['supprimees']}"  if summary["supprimees"] else None, delta_color="inverse")
             c3.metric("✅ Conservées",  summary["conservees"])
+
+    # ── Section suppression de salle ─────────────────────
+    st.divider()
+    st.subheader("🗑️ Supprimer une salle")
+    st.warning(
+        "⚠️ La suppression retire la salle de la base de machines, des plannings de tournées, "
+        "des incidents actifs et des salles traitées. Un historique est conservé ci-dessous."
+    )
+
+    df_current = _load_from_mongo()
+    if df_current is not None and not df_current.empty and "Client" in df_current.columns:
+        # Construire les options : "CODE — Client" pour permettre la recherche par code machine
+        has_code = "Code" in df_current.columns
+        if has_code:
+            salle_rows = (
+                df_current[["Client", "Code"]].dropna(subset=["Client"])
+                .drop_duplicates(subset=["Client"])
+                .sort_values("Client")
+            )
+            options_map = {
+                f"{row['Code']} — {row['Client']}": row["Client"]
+                for _, row in salle_rows.iterrows()
+            }
+        else:
+            options_map = {c: c for c in sorted(df_current["Client"].dropna().unique())}
+
+        option_labels = ["— Sélectionner —"] + list(options_map.keys())
+        selected_label = st.selectbox(
+            "Salle à supprimer (recherche par nom ou code machine)",
+            option_labels,
+            key="salle_delete_select",
+        )
+
+        salle_to_delete = options_map.get(selected_label) if selected_label != "— Sélectionner —" else None
+
+        if salle_to_delete:
+            nb_machines_salle = int((df_current["Client"] == salle_to_delete).sum())
+            st.info(f"**{salle_to_delete}** — {nb_machines_salle} machine(s) associée(s).")
+
+            confirm_key = f"confirm_delete_{salle_to_delete}"
+            if not st.session_state.get(confirm_key):
+                if st.button("🗑️ Supprimer cette salle", type="primary", key="btn_delete_salle"):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+            else:
+                st.error(
+                    f"Confirmer la suppression définitive de **{salle_to_delete}** "
+                    f"({nb_machines_salle} machine(s)) de toutes les collections ?"
+                )
+                col_yes, col_no, _ = st.columns([1, 1, 4])
+                if col_yes.button("✅ Oui, supprimer", type="primary", key="btn_confirm_yes"):
+                    with st.spinner("Suppression en cours…"):
+                        result = supprimer_salle(salle_to_delete)
+                    st.session_state[confirm_key] = False
+                    nb_plan = len(result.get("plannings_removed", []))
+                    st.success(
+                        f"✅ Salle **{salle_to_delete}** supprimée — "
+                        f"{len(result['machines_snapshot'])} machine(s), "
+                        f"{nb_plan} entrée(s) planning retirée(s), "
+                        f"{result['incidents_resolved']} incident(s) résolu(s)."
+                    )
+                    st.cache_data.clear()
+                    st.rerun()
+                if col_no.button("❌ Annuler", key="btn_confirm_no"):
+                    st.session_state[confirm_key] = False
+                    st.rerun()
+    else:
+        st.info("Aucune salle disponible dans la base.")
+
+    # ── Historique des salles supprimées ─────────────────
+    with st.expander("📋 Historique des salles supprimées", expanded=False):
+        historique = load_salles_supprimees()
+        if not historique:
+            st.info("Aucune salle supprimée pour l'instant.")
+        else:
+            for i, doc in enumerate(historique):
+                deleted_at = doc.get("deleted_at", "")[:10]
+                client_h   = doc.get("client", "")
+                nb_mach    = len(doc.get("machines_snapshot", []))
+                nb_plan    = len(doc.get("plannings_removed", []))
+                nb_inc     = doc.get("incidents_resolved", 0)
+                cols = st.columns([3, 2, 1, 1, 1])
+                cols[0].markdown(f"**{client_h}**")
+                cols[1].caption(deleted_at)
+                cols[2].caption(f"{nb_mach} machine(s)")
+                cols[3].caption(f"{nb_plan} planning(s)")
+                cols[4].caption(f"{nb_inc} incident(s)")
+                if doc.get("machines_snapshot"):
+                    show_detail = st.toggle("Voir les machines", key=f"hist_toggle_{i}")
+                    if show_detail:
+                        snap_df = pd.DataFrame(doc["machines_snapshot"])
+                        display_cols = [c for c in COLUMNS_DISPLAY.keys() if c in snap_df.columns]
+                        if display_cols:
+                            snap_df = snap_df[display_cols].rename(columns=COLUMNS_DISPLAY)
+                        st.dataframe(snap_df, use_container_width=True, hide_index=True)
+                st.divider()

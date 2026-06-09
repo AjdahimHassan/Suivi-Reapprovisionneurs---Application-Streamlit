@@ -668,3 +668,100 @@ def load_justifications_nf_week(iso_year: int, iso_week: int) -> list:
         return docs
     except Exception:
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SALLES SUPPRIMÉES — historique des salles retirées du parc
+#
+# Un document par suppression :
+# {
+#   "client":             "SALON PARIS 8",
+#   "deleted_at":         "2026-06-09T14:32:00",
+#   "machines_snapshot":  [{"Code": "2219M1", "Ville": "Paris", ...}, ...],
+#   "plannings_removed":  [{"employe": "RIDF1", "jour": "Lundi"}, ...],
+#   "incidents_resolved": 2,
+#   "salles_traitees_deleted": 1,
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_salles_supprimees_col():
+    client  = _get_client()
+    db_name = st.secrets["mongo"]["db_name"]
+    return client[db_name]["salles_supprimees"]
+
+
+def supprimer_salle(client_name: str) -> dict:
+    """
+    Supprime une salle (Client) de toutes les collections actives et sauvegarde
+    un snapshot dans l'historique `salles_supprimees`.
+
+    Retourne un dict résumant les suppressions effectuées.
+    """
+    db_name = st.secrets["mongo"]["db_name"]
+    client  = _get_client()
+    now     = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    summary: dict = {
+        "client": client_name,
+        "deleted_at": now,
+        "machines_snapshot": [],
+        "plannings_removed": [],
+        "incidents_resolved": 0,
+        "salles_traitees_deleted": 0,
+    }
+
+    # 1. Snapshot + suppression dans machines
+    machines_col = client[db_name]["machines"]
+    docs = list(machines_col.find({"Client": client_name}, {"_id": 0}))
+    summary["machines_snapshot"] = docs
+    machines_col.delete_many({"Client": client_name})
+
+    # 2. Nettoyage plannings — retirer les entrées [client_name, machine] de chaque jour
+    plannings_col = client[db_name][st.secrets["mongo"]["collection"]]
+    all_plannings = list(plannings_col.find({}, {"_id": 0, "employe": 1, "planning": 1}))
+    for doc in all_plannings:
+        employe  = doc.get("employe", "")
+        planning = doc.get("planning", {})
+        changed  = False
+        new_planning = {}
+        for jour, salles in planning.items():
+            filtered = [s for s in salles if not (len(s) >= 1 and s[0] == client_name)]
+            if len(filtered) != len(salles):
+                changed = True
+                for _ in range(len(salles) - len(filtered)):
+                    summary["plannings_removed"].append({"employe": employe, "jour": jour})
+            new_planning[jour] = filtered
+        if changed:
+            plannings_col.update_one(
+                {"employe": employe},
+                {"$set": {"planning": new_planning, "updated_at": datetime.date.today().isoformat()}},
+            )
+
+    # 3. Résolution des incidents actifs pour cette salle
+    incidents_col = client[db_name]["incidents"]
+    result = incidents_col.update_many(
+        {"salle": client_name, "status": "actif"},
+        {"$set": {"status": "resolu", "resolved_at": datetime.datetime.utcnow()}},
+    )
+    summary["incidents_resolved"] = result.modified_count
+
+    # 4. Suppression dans salles_traitees
+    salles_traitees_col = client[db_name]["salles_traitees"]
+    result2 = salles_traitees_col.delete_many({"salle": client_name})
+    summary["salles_traitees_deleted"] = result2.deleted_count
+
+    # 5. Sauvegarde dans l'historique
+    _get_salles_supprimees_col().insert_one(dict(summary))
+
+    return summary
+
+
+def load_salles_supprimees() -> list:
+    """Retourne l'historique des salles supprimées, triées par date décroissante."""
+    try:
+        docs = list(_get_salles_supprimees_col().find(
+            {}, {"_id": 0}
+        ).sort("deleted_at", -1))
+        return docs
+    except Exception:
+        return []
