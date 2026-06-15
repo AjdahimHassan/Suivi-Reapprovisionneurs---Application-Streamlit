@@ -1314,9 +1314,6 @@ elif st.session_state.page == "suivi":
         unsafe_allow_html=True,
     )
 
-    if not plannings:
-        st.stop()
-
     # ── Plannings chargés ─────────────────────────────────
     st.divider()
     st.markdown("### ⚙️ Plannings chargés")
