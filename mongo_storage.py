@@ -169,8 +169,9 @@ def upsert_quartix_vehicle(plate: str, employe: str,
 
 
 def upsert_quartix_vehicle_info(plate: str, prenom: str = "",
-                                 zone: str = "", responsable: str = "") -> None:
-    """Met à jour conducteur/zone/responsable d'une plaque sans toucher au dépôt."""
+                                 zone: str = "", responsable: str = "",
+                                 quartix_ok: bool = True) -> None:
+    """Met à jour conducteur/zone/responsable/état Quartix d'une plaque sans toucher au dépôt."""
     _get_qv_col().update_one(
         {"plate": plate},
         {"$set": {
@@ -178,6 +179,7 @@ def upsert_quartix_vehicle_info(plate: str, prenom: str = "",
             "prenom":       prenom,
             "zone":         zone,
             "responsable":  responsable,
+            "quartix_ok":   bool(quartix_ok),
             "updated_at":   datetime.date.today().isoformat(),
         }},
         upsert=True,

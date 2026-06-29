@@ -2204,6 +2204,7 @@ def _render_hebdo_vehicle_editor(
                                 prenom=info["prenom"],
                                 zone=info["zone"],
                                 responsable=info["responsable"],
+                                quartix_ok=vehicles_db.get(plate, {}).get("quartix_ok", True),
                             )
                             matched += 1
                         else:
@@ -2231,6 +2232,7 @@ def _render_hebdo_vehicle_editor(
                 "Conducteur":   doc.get("prenom", ""),
                 "Zone":         doc.get("zone", ""),
                 "Responsable":  doc.get("responsable", ""),
+                "Quartix OK":   bool(doc.get("quartix_ok", True)),
             })
 
         edited_df = st.data_editor(
@@ -2240,6 +2242,11 @@ def _render_hebdo_vehicle_editor(
                 "Conducteur":  st.column_config.TextColumn("Conducteur", width="medium"),
                 "Zone":        st.column_config.TextColumn("Zone", width="medium"),
                 "Responsable": st.column_config.TextColumn("Responsable", width="medium"),
+                "Quartix OK":  st.column_config.CheckboxColumn(
+                    "Quartix OK",
+                    help="Cochez si le boîtier Quartix de ce réappro est fonctionnel. Décochez s'il est en panne.",
+                    width="small",
+                ),
             },
             hide_index=True,
             use_container_width=True,
@@ -2253,6 +2260,7 @@ def _render_hebdo_vehicle_editor(
                     prenom=str(row["Conducteur"]).strip(),
                     zone=str(row["Zone"]).strip(),
                     responsable=str(row["Responsable"]).strip(),
+                    quartix_ok=bool(row["Quartix OK"]),
                 )
             st.success("✅ Informations sauvegardées.")
             try:
